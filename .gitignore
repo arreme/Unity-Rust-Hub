@@ -1,0 +1,29 @@
+# dependencies
+node_modules/
+
+# frontend build
+dist/
+dist-ssr/
+
+# rust build
+target/
+src-tauri/target/
+
+# generated Tauri schemas
+src-tauri/gen/
+
+# local env
+.env
+.env.local
+.env.*.local
+
+# logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# editors / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp

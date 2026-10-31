@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "skills": {
+    "unity-cli": {
+      "source": "Unity-Technologies/skills",
+      "sourceType": "github",
+      "skillPath": "skills/unity-cli/SKILL.md",
+      "computedHash": "b4c259d1e24b8707a2bae8552016070e992cefdd29f834160243ca7011b23c91"
+    }
+  }
+}

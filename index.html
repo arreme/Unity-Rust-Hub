@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Unity Rust Hub</title>
+  </head>
+  <body>
+    <div id="root">
+      <div
+        id="boot-fallback"
+        style="
+          min-height: 100vh;
+          display: grid;
+          place-items: center;
+          background: #0b0e13;
+          color: #8e9aac;
+          font-family: system-ui, sans-serif;
+          font-size: 14px;
+        "
+      >
+        Loading Unity Rust Hub…
+      </div>
+    </div>
+    <script>
+      window.addEventListener("error", function (event) {
+        var fallback = document.getElementById("boot-fallback");
+        if (fallback) {
+          fallback.textContent = "Boot error: " + (event.message || "unknown script error");
+          fallback.style.color = "#ff7a85";
+        }
+      });
+      window.addEventListener("unhandledrejection", function (event) {
+        var fallback = document.getElementById("boot-fallback");
+        if (fallback) {
+          fallback.textContent = "Boot error: " + String(event.reason);
+          fallback.style.color = "#ff7a85";
+        }
+      });
+    </script>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
