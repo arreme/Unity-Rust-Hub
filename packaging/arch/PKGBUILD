@@ -1,0 +1,46 @@
+# Maintainer: Arreme <developer@arreme.com>
+#
+# Local-source package for the current checkout.
+# Build and install with:
+#   cd packaging/arch
+#   makepkg -si
+#
+# This PKGBUILD does not fetch a remote tarball; it compiles the working tree
+# two directories above. The first build needs network access for crates.io.
+# Update pkgver when Cargo.toml/workspace version changes. Add url= if this
+# package is published, since a local-source PKGBUILD does not need one.
+
+pkgname=unity-rust-hub
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='Native iced desktop GUI for the Unity CLI'
+arch=('x86_64' 'aarch64')
+license=('MIT')
+depends=('gcc-libs' 'glibc' 'libx11' 'libxcursor' 'libxrandr' 'libxi' 'libxkbcommon' 'wayland')
+makedepends=('cargo')
+options=('!lto')
+source=()
+sha256sums=()
+
+build() {
+  cd "$startdir/../.."
+  export CARGO_TARGET_DIR="$srcdir/target"
+  cargo build --release --locked
+}
+
+package() {
+  cd "$startdir/../.."
+
+  install -Dm755 "$srcdir/target/release/unity-rust-hub" \
+    "$pkgdir/usr/bin/unity-rust-hub"
+  install -Dm644 LICENSE \
+    "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 packaging/unity-rust-hub.desktop \
+    "$pkgdir/usr/share/applications/unity-rust-hub.desktop"
+
+  local size
+  for size in 16 20 24 32 40 48 64 256; do
+    install -Dm644 "Icon/Icon-png-icons/Icon-${size}x${size}.png" \
+      "$pkgdir/usr/share/icons/hicolor/${size}x${size}/apps/unity-rust-hub.png"
+  done
+}

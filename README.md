@@ -51,6 +51,9 @@ crates/unity-hub/      iced application: state, views, theme, jobs, settings.
   src/jobs.rs          child processes, NDJSON progress, cancellation, event queue.
   src/views/           overview, editors, projects, changelog, settings.
   assets/icon.png      window icon.
+Icon/                  app icon source and hicolor PNG set (16–256 px).
+packaging/             desktop entry and Arch Linux PKGBUILD.
+scripts/               Arch/CachyOS install and uninstall helper.
 docs/superpowers/      iced design spec and implementation plan.
 ```
 
@@ -84,6 +87,49 @@ cargo build --release -p unity-hub
 
 The workspace default member is `unity-hub`, so `cargo run` and `cargo build --release`
 also work from the repository root.
+
+## CachyOS / Arch Linux
+
+### Pacman package (system-wide)
+
+`packaging/arch/PKGBUILD` builds the current checkout and installs the binary, desktop
+entry, MIT license, and all eight icon sizes under `/usr`:
+
+```bash
+cd packaging/arch
+makepkg -si
+```
+
+Remove it with:
+
+```bash
+sudo pacman -Rns unity-rust-hub
+```
+
+The PKGBUILD uses this working tree instead of a remote tarball, so the first build
+needs network access for crates.io. Bump `pkgver` when the workspace version changes.
+Build dependencies: `base-devel` and a Rust/cargo toolchain (the `rust` or `rustup`
+package).
+
+### Per-user install script (no sudo)
+
+```bash
+./scripts/install-arch.sh                  # ~/.local
+./scripts/install-arch.sh uninstall
+
+./scripts/install-arch.sh --system         # /usr/local via sudo
+./scripts/install-arch.sh --system uninstall
+```
+
+The script builds the release binary, installs `unity-rust-hub.desktop`, the license,
+and the 16–256 px icons, then refreshes the icon and desktop caches. It also supports
+`--prefix PATH`, `--no-build`, `--binary PATH`, and `--purge` (which removes
+`~/.config/unity-rust-hub`). If you use the per-user install, make sure `~/.local/bin`
+is on your `PATH`.
+
+The launcher appears in the application menu as **Unity Rust Hub**. Do not mix a
+pacman package with a script install; uninstall using the same method you used to
+install.
 
 ## Verify
 

@@ -235,6 +235,22 @@ account data are stored by the GUI.
   or the Hub database directly.
 - Changelog Markdown is displayed as plain text, never interpreted.
 
+## Distribution on Arch Linux
+
+Two install paths are supported for Arch-based distributions, including CachyOS:
+
+- `packaging/arch/PKGBUILD` builds the current checkout with cargo and installs the
+  binary, desktop entry, license, and eight icon sizes under `/usr` via `makepkg -si`.
+- `scripts/install-arch.sh` builds the release binary and installs per-user under
+  `~/.local` by default, with `--system` for `/usr/local`, `--prefix` for custom
+  locations, and an `uninstall` command. It removes only the files it installed and
+  refreshes icon/desktop caches.
+
+Both use `packaging/unity-rust-hub.desktop` and the `Icon/Icon-png-icons` hicolor set.
+The desktop entry uses `Icon=unity-rust-hub` and `StartupWMClass=unity-rust-hub`, so
+launchers group the window correctly. Do not mix the pacman package with a script
+install; the uninstall method must match the install method.
+
 ## Testing and verification
 
 - `unity-core` unit tests cover envelope parsing, version validation, changelog

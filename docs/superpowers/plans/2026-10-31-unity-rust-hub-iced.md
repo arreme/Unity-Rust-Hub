@@ -105,6 +105,25 @@ intended deletions and the new `crates/unity-hub/` tree.
 - [x] Smoke-test the release/debug binary against the real Unity CLI.
 - [ ] Commit the rewrite on `feat/iced-native-ui`.
 
+## Phase 7 — Arch/CachyOS packaging
+
+- [x] Add `packaging/unity-rust-hub.desktop` with the launcher name, icon, categories,
+      and window class.
+- [x] Add `packaging/arch/PKGBUILD` that compiles the current checkout, installs the
+      binary, desktop entry, license, and 16–256 px hicolor icons, and declares the
+      X11/Wayland runtime dependencies.
+- [x] Add `scripts/install-arch.sh` with `install` (default per-user `~/.local`),
+      `uninstall`, `--system` (`/usr/local`), `--prefix`, `--no-build`, `--binary`,
+      and `--purge`.
+- [x] Use `Icon/Icon-png-icons/Icon-256x256.png` as the embedded window icon so the
+      launcher and window icons match.
+- [x] Document both paths in the README.
+
+Verification: `shellcheck` and `bash -n` pass; `desktop-file-validate` passes;
+`makepkg -f` produced a package containing the expected binary, desktop entry, license,
+and eight icons; the script installed and cleanly uninstalled a temp prefix with no
+leftover files; the per-user install launched successfully.
+
 ## Risks and mitigations
 
 | Risk | Mitigation |

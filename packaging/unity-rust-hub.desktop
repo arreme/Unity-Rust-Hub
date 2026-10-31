@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Unity Rust Hub
+GenericName=Unity Toolchain Manager
+Comment=Manage the Unity CLI, Editors, modules, and projects
+Exec=unity-rust-hub
+Icon=unity-rust-hub
+Terminal=false
+Categories=Development;
+Keywords=Unity;CLI;Editor;Game;Toolchain;
+StartupNotify=true
+StartupWMClass=unity-rust-hub
