@@ -292,9 +292,42 @@ pub struct RawChangelog {
     pub changelog: String,
 }
 
-/// Data attached to an install dry-run or preview response.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// The useful parts of `unity install --dry-run` output.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct InstallPreview {
-    pub raw: Value,
+    #[serde(default)]
+    pub already_installed: bool,
+    #[serde(default)]
+    pub editor: Option<PreviewEditor>,
+    #[serde(default)]
+    pub modules: Vec<PreviewModule>,
+    #[serde(default)]
+    pub total_download_size: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewEditor {
+    #[serde(default)]
+    pub version: String,
+    #[serde(default)]
+    pub architecture: String,
+    #[serde(default)]
+    pub download_size: u64,
+    #[serde(default)]
+    pub checksum: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewModule {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub download_size: u64,
+    #[serde(default)]
+    pub installed_size: u64,
 }

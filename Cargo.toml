@@ -1,5 +1,6 @@
 [workspace]
-members = ["crates/unity-core", "src-tauri"]
+members = ["crates/unity-core", "crates/unity-hub"]
+default-members = ["crates/unity-hub"]
 resolver = "2"
 
 [workspace.package]

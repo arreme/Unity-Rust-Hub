@@ -7,8 +7,8 @@ use serde_json::Value;
 use crate::envelope::{parse_data, parse_envelope, parse_items, ValueEnvelope};
 use crate::errors::{message_for_exit_code, UnityError};
 use crate::models::{
-    AuthStatus, CliUpdateInfo, CliVersion, Editor, EditorInfo, InstallPath, LicenseStatus, Module,
-    Project, RawChangelog, Release, RunningEditor, RunningEditors,
+    AuthStatus, CliStatus, CliUpdateInfo, CliVersion, Editor, EditorInfo, InstallPath,
+    LicenseStatus, Module, Project, RawChangelog, Release, RunningEditor, RunningEditors,
 };
 use crate::versions::{
     validate_cli_version, validate_editor_version, validate_module_id, validate_project_path,
@@ -159,6 +159,38 @@ impl UnityCli {
     pub fn version(&self) -> Result<CliVersion, UnityError> {
         let executed = self.run_args(&svec(&["version"]), "json")?;
         parse_data(&executed.envelope)
+    }
+
+    /// Combines resolution, version and install-path into the state the UI
+    /// needs. A missing CLI is reported in `error` instead of failing the
+    /// whole status read, so the app can still offer an install action.
+    pub fn status(&self) -> CliStatus {
+        let location = match self.locate() {
+            Ok(location) => location,
+            Err(error) => {
+                return CliStatus {
+                    installed: false,
+                    error: Some(error),
+                    ..CliStatus::default()
+                };
+            }
+        };
+
+        let mut status = CliStatus {
+            installed: true,
+            path: Some(location.path.display().to_string()),
+            path_source: Some(location.source.to_string()),
+            ..CliStatus::default()
+        };
+
+        match self.version() {
+            Ok(version) => status.version = Some(version),
+            Err(error) => status.error = Some(error),
+        }
+        if let Ok(path) = self.install_path() {
+            status.install_path = Some(path);
+        }
+        status
     }
 
     pub fn install_path(&self) -> Result<String, UnityError> {

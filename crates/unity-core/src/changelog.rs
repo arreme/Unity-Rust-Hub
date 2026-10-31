@@ -86,6 +86,44 @@ impl ChangelogProvider for CliChangelogProvider {
     }
 }
 
+/// The provider-agnostic shape a UI renders.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangelogView {
+    pub version: String,
+    pub sections: Vec<ChangelogSection>,
+    pub breaking_changes: Vec<BreakingChange>,
+    pub entry_count: usize,
+    pub markdown: String,
+    pub source: String,
+    pub source_detail: String,
+}
+
+impl ChangelogView {
+    pub fn load(
+        provider: &dyn ChangelogProvider,
+        request: &ChangelogRequest,
+    ) -> Result<Self, UnityError> {
+        let raw = provider.fetch(request)?;
+        let parsed = parse_changelog(&raw.changelog);
+        let version = parsed
+            .version
+            .clone()
+            .unwrap_or_else(|| raw.version.clone());
+        let entry_count = parsed.entry_count();
+        let source_detail = provider.source_detail(request, &raw);
+        Ok(Self {
+            version,
+            sections: parsed.sections,
+            breaking_changes: parsed.breaking_changes,
+            entry_count,
+            markdown: raw.changelog,
+            source: provider.source_id().to_string(),
+            source_detail,
+        })
+    }
+}
+
 fn breaking_wording() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {

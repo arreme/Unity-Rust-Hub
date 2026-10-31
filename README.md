@@ -1,9 +1,12 @@
 # Unity Rust Hub
 
-A small desktop GUI for the [Unity CLI](https://docs.unity.com/en-us/unity-cli/unity-cli).
-It wraps the official `unity` binary with a React UI so you can inspect the local
-toolchain, manage Editors and modules, change project versions, and read release notes
-without keeping a terminal open.
+A native desktop GUI for the [Unity CLI](https://docs.unity.com/en-us/unity-cli/unity-cli),
+written in Rust with [iced](https://iced.rs). It wraps the official `unity` binary so
+you can inspect the local toolchain, manage Editors and modules, change project
+versions, and read release notes without keeping a terminal open.
+
+No webview, no Node toolchain, no HTML/JS layer. The release build is a single Rust
+binary that renders through iced's software renderer.
 
 The Unity CLI is in beta (`1.0.0-beta.14` at the time of writing). This app is built
 against its JSON envelope and treats the CLI as the source of truth for every mutation.
@@ -31,67 +34,64 @@ against its JSON envelope and treats the CLI as the source of truth for every mu
 
 | Layer | Choice |
 |---|---|
-| Desktop shell | Tauri v2 |
-| Backend | Rust (`unity-core` crate + Tauri commands) |
-| Frontend | React 19 + TypeScript + Vite |
-| Package manager | pnpm only |
+| Desktop shell | iced 0.14 (winit window, no webview) |
+| Renderer | `tiny-skia` software rendering (`wgpu` disabled) |
+| Core adapter | `crates/unity-core` (synchronous, UI-agnostic) |
+| UI crate | `crates/unity-hub` (Elm-style boot/update/view) |
 | CLI integration | `unity --format json` / `--format ndjson` |
+| Concurrency | thread + `futures::oneshot` for reads; `JobManager` threads for jobs |
 
 ## Layout
 
 ```
 crates/unity-core/     Pure CLI adapter: command specs, envelope parsing, DTOs,
                        errors, validation, changelog parsing/provider, bootstrap.
-src-tauri/             Tauri shell, thin commands, JobManager (NDJSON + cancel).
-src/                   React views and typed invoke()/event wrappers.
-docs/superpowers/      Design spec and implementation plan.
+crates/unity-hub/      iced application: state, views, theme, jobs, settings.
+  src/app.rs           state, messages, update loop, shell, dialogs, job polling.
+  src/jobs.rs          child processes, NDJSON progress, cancellation, event queue.
+  src/views/           overview, editors, projects, changelog, settings.
+  assets/icon.png      window icon.
+docs/superpowers/      iced design spec and implementation plan.
 ```
 
-The frontend never builds a `unity` argument or parses a raw CLI envelope. Rust owns
-flag construction, process spawning, JSON normalization, exit-code mapping, and jobs.
+The UI never builds a `unity` argument or parses a raw CLI envelope. `unity-core` owns
+flag construction, process spawning, JSON normalization, exit-code mapping, and job
+specs.
 
 ## Prerequisites
 
-- **Node.js** 20+ and **pnpm** 10+ (the repo pins `pnpm@12.16.1` via `packageManager`).
-- **Rust** stable (1.77+; tested with 1.99).
+- **Rust** stable (tested with 1.99).
 - **Unity CLI** — optional at first launch. The Overview screen installs it.
-- **Linux** — Tauri v2 requires WebKitGTK 4.1:
-  - Arch / CachyOS: `sudo pacman -S webkit2gtk-4.1`
-  - Debian / Ubuntu: `sudo apt install libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev`
+- **Linux** — X11 or Wayland client libraries. A typical desktop already has them;
+  for a minimal build host install the development packages for
+  `libxkbcommon`, `libwayland-client`, and `libX11`/`libxcb`. `tiny-skia` means no
+  Vulkan/OpenGL driver or WebKitGTK is required.
 - **macOS** — Xcode Command Line Tools (`xcode-select --install`).
-- **Windows** — WebView2 runtime and the MSVC Rust toolchain.
-
-If the app aborts on Linux with `WebKitNetworkProcess (No such file or directory)`,
-the `webkit2gtk-4.1` package is missing even though the binary linked.
+- **Windows** — the MSVC Rust toolchain. No WebView2 runtime is needed.
 
 ## Run
 
 ```bash
-pnpm install
-pnpm tauri dev
+cargo run -p unity-hub
 ```
 
-Build a release binary (no installer bundle):
+Build a release binary:
 
 ```bash
-pnpm tauri build --no-bundle
+cargo build --release -p unity-hub
+./target/release/unity-rust-hub
 ```
 
-Build installers:
-
-```bash
-pnpm tauri build
-```
+The workspace default member is `unity-hub`, so `cargo run` and `cargo build --release`
+also work from the repository root.
 
 ## Verify
 
 ```bash
-pnpm check                         # TypeScript
-pnpm build                         # Vite production build
 cargo fmt --all --check
 cargo test -p unity-core           # parser/validation/heuristics unit tests
-cargo clippy -p unity-core --all-targets -- -D warnings
-cargo clippy -p unity-rust-hub --all-targets -- -D warnings
+cargo clippy -p unity-hub --all-targets -- -D warnings
+cargo build --release -p unity-hub
 ```
 
 Live adapter smoke test against a real Unity CLI (ignored by default):
@@ -112,17 +112,26 @@ Every read uses:
 unity <command> --format json --no-pager --no-banner --non-interactive
 ```
 
-Long operations use `--format ndjson` and are streamed by `JobManager` as
-`job:update` events. `projects upgrade` is run **without** `--wait` so the job ends
-when the upgrade does, not when the Editor is closed.
+Long operations use `--format ndjson` and are streamed by `JobManager` into the active
+job card. `projects upgrade` is run **without** `--wait` so the job ends when the
+upgrade does, not when the Editor is closed.
 
 Resolution order for the binary:
 
-1. Path saved in Settings.
+1. Path saved in Settings (`~/.config/unity-rust-hub/settings.json` on Linux).
 2. `unityhub/cli-install.json` or `UnityHub/cli-install.json` install receipt.
 3. `UNITY_CLI_HOME/bin/unity`.
 4. Platform default (`~/.local/bin`, `~/.unity/bin`, `%LOCALAPPDATA%\Unity\bin`).
 5. `PATH`.
+
+## UI notes
+
+- The shell is a fixed sidebar plus a scrollable content area and top bar.
+- Tables are built from header and row containers rather than `iced::widget::table`;
+  the table widget caused a rendering stall with live data in iced 0.14.
+- Job polling uses a channel-backed subscription on a 120 ms thread because iced 0.14
+  no longer exposes `iced::time::every`.
+- The theme is a custom dark palette defined in `src/theme.rs`.
 
 ## Safety
 
@@ -133,8 +142,8 @@ Resolution order for the binary:
   matching checkbox is checked.
 - Project upgrades require a second confirmation and warn that the project on disk can
   change. Commit or back up first.
-- No credentials are read, stored, or forwarded. Changelog Markdown is rendered as React
-  text, never injected as HTML.
+- No credentials are read, stored, or forwarded. Changelog Markdown is displayed as
+  plain text, never interpreted.
 
 ## Known limitations (v1)
 
@@ -143,12 +152,15 @@ Resolution order for the binary:
 - Project upgrades are restricted to installed Editors.
 - Changelog breaking flags are heuristics over English release notes, not a guarantee.
 - Jobs are not persisted across app restarts; closing the window cancels them.
+- Only one job may run at a time.
 - Linux is the tested platform. macOS/Windows code paths are implemented but not CI-built.
-- The webview CSP is currently disabled (`csp: null`); tighten it before distributing.
+- The raw changelog is shown as unformatted text.
 
 ## Documentation
 
-- Design spec: [`docs/superpowers/specs/2026-10-31-unity-rust-hub-design.md`](docs/superpowers/specs/2026-10-31-unity-rust-hub-design.md)
-- Implementation plan: [`docs/superpowers/plans/2026-10-31-unity-rust-hub.md`](docs/superpowers/plans/2026-10-31-unity-rust-hub.md)
+- Design spec: [`docs/superpowers/specs/2026-10-31-unity-rust-hub-iced-design.md`](docs/superpowers/specs/2026-10-31-unity-rust-hub-iced-design.md)
+- Implementation plan: [`docs/superpowers/plans/2026-10-31-unity-rust-hub-iced.md`](docs/superpowers/plans/2026-10-31-unity-rust-hub-iced.md)
 - Unity CLI reference: <https://docs.unity.com/en-us/unity-cli/unity-cli-reference>
 - Unity CLI release notes: <https://docs.unity.com/en-us/unity-cli/release-notes>
+
+The previous Tauri/React implementation is preserved on `main` at commit `06c65da`.
