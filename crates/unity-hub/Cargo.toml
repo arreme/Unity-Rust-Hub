@@ -16,8 +16,6 @@ dirs = "6"
 futures = "0.3"
 iced = { version = "0.14", default-features = false, features = [
   "crisp",
-  "image",
-  "linux-theme-detection",
   "thread-pool",
   "tiny-skia",
   "wayland",

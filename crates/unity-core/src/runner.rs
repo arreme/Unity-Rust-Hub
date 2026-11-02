@@ -1,6 +1,8 @@
+use std::io::Read;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, RwLock};
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
@@ -14,6 +16,15 @@ use crate::versions::{
     validate_cli_version, validate_editor_version, validate_module_id, validate_project_path,
     validate_release_stream,
 };
+
+/// The standard opt-out signal. The CLI's analytics/update callback adds a
+/// noticeable startup stall to most invocations, so every call made by the GUI
+/// opts out. Users can still use the CLI directly with their own preference.
+pub const DO_NOT_TRACK_ENV: &str = "DO_NOT_TRACK";
+
+/// Reads are expected to finish quickly. A hung CLI process must not hold the
+/// single reader worker forever.
+pub const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// A fully-resolved command line. Arguments are always passed as separate
 /// values; `display()` is for showing the user what will run, never for
@@ -74,7 +85,7 @@ impl UnityCli {
             .into_iter()
             .map(str::to_string),
         );
-        Ok(CommandSpec::new(self.resolve()?, args))
+        Ok(CommandSpec::new(self.resolve()?, args).with_env(DO_NOT_TRACK_ENV, "1"))
     }
 
     pub fn run_args(&self, parts: &[String], format: &str) -> Result<Executed, UnityError> {
@@ -83,37 +94,41 @@ impl UnityCli {
     }
 
     pub fn execute(&self, spec: &CommandSpec) -> Result<Executed, UnityError> {
-        let mut command = Command::new(&spec.program);
-        command
-            .args(&spec.args)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        for (key, value) in &spec.env {
-            command.env(key, value);
-        }
-        if let Some(cwd) = &spec.cwd {
-            command.current_dir(cwd);
-        }
+        self.execute_inner(spec, DEFAULT_READ_TIMEOUT, true)
+    }
 
-        let output = command.output().map_err(|err| {
-            if err.kind() == std::io::ErrorKind::NotFound {
-                UnityError::new(
-                    "CLI_NOT_FOUND",
-                    format!(
-                        "Could not run `{}`. The Unity CLI is not installed or is not executable.",
-                        spec.program.display()
-                    ),
-                )
-                .with_detail(err.to_string())
-            } else {
-                UnityError::new("SPAWN_FAILED", "The Unity CLI could not be started.")
-                    .with_detail(format!("{}: {err}", spec.program.display()))
-            }
-        })?;
+    /// Runs a read command without turning `success: false` into an error.
+    /// Some CLI commands (notably `auth status` when signed out) return useful
+    /// data in a failed envelope; callers need a chance to parse it.
+    pub fn execute_envelope(&self, spec: &CommandSpec) -> Result<Executed, UnityError> {
+        self.execute_inner(spec, DEFAULT_READ_TIMEOUT, false)
+    }
 
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    #[doc(hidden)]
+    pub fn execute_with_timeout(
+        &self,
+        spec: &CommandSpec,
+        timeout: Duration,
+    ) -> Result<Executed, UnityError> {
+        self.execute_inner(spec, timeout, true)
+    }
+
+    fn execute_inner(
+        &self,
+        spec: &CommandSpec,
+        timeout: Duration,
+        require_success: bool,
+    ) -> Result<Executed, UnityError> {
+        let output = run_command(spec, timeout)?;
+
+        let stdout = match String::from_utf8(output.stdout) {
+            Ok(stdout) => stdout,
+            Err(error) => String::from_utf8_lossy(error.as_bytes()).into_owned(),
+        };
+        let stderr = match String::from_utf8(output.stderr) {
+            Ok(stderr) => stderr,
+            Err(error) => String::from_utf8_lossy(error.as_bytes()).into_owned(),
+        };
         let exit_code = output.status.code();
 
         let envelope = parse_envelope(&stdout).map_err(|mut err| {
@@ -131,22 +146,8 @@ impl UnityCli {
             err
         })?;
 
-        if !envelope.success {
-            let error = envelope
-                .errors
-                .first()
-                .map(|error| error.to_unity_error(exit_code, &stderr))
-                .unwrap_or_else(|| {
-                    UnityError::new(
-                        "COMMAND_FAILED",
-                        exit_code
-                            .map(message_for_exit_code)
-                            .unwrap_or("The Unity CLI command failed."),
-                    )
-                    .with_exit_code(exit_code)
-                    .with_detail(stderr.trim())
-                });
-            return Err(error);
+        if require_success && !envelope.success {
+            return Err(envelope_error(&envelope, &stderr, exit_code));
         }
 
         Ok(Executed {
@@ -158,7 +159,7 @@ impl UnityCli {
 
     pub fn version(&self) -> Result<CliVersion, UnityError> {
         let executed = self.run_args(&svec(&["version"]), "json")?;
-        parse_data(&executed.envelope)
+        parse_data(executed.envelope)
     }
 
     /// Combines resolution, version and install-path into the state the UI
@@ -195,14 +196,14 @@ impl UnityCli {
 
     pub fn install_path(&self) -> Result<String, UnityError> {
         let executed = self.run_args(&svec(&["install-path"]), "json")?;
-        let value: InstallPath = parse_data(&executed.envelope)?;
+        let value: InstallPath = parse_data(executed.envelope)?;
         Ok(value.path)
     }
 
     pub fn editors_installed(&self) -> Result<Vec<Editor>, UnityError> {
         let parts = svec(&["editors", "--installed", "--long"]);
         let executed = self.run_args(&parts, "json")?;
-        parse_items(executed.envelope.data.as_ref(), &[])
+        parse_items(executed.envelope.data, &[])
     }
 
     pub fn editors_running(&self) -> Result<RunningEditors, UnityError> {
@@ -212,7 +213,7 @@ impl UnityCli {
             return Ok(RunningEditors::default());
         };
         if data.is_array() {
-            let instances: Vec<RunningEditor> = parse_items(Some(&data), &[])?;
+            let instances: Vec<RunningEditor> = parse_items(Some(data), &[])?;
             return Ok(RunningEditors {
                 count: instances.len(),
                 instances,
@@ -232,25 +233,33 @@ impl UnityCli {
     ) -> Result<Vec<Release>, UnityError> {
         let parts = releases_parts(limit, offset, stream)?;
         let executed = self.run_args(&parts, "json")?;
-        parse_items(executed.envelope.data.as_ref(), &[])
+        parse_items(executed.envelope.data, &[])
     }
 
     pub fn modules(&self, version: &str) -> Result<Vec<Module>, UnityError> {
         let parts = modules_parts(version)?;
         let executed = self.run_args(&parts, "json")?;
-        parse_items(executed.envelope.data.as_ref(), &[])
+        parse_items(executed.envelope.data, &[])
     }
 
     pub fn editor_info(&self, version: &str) -> Result<EditorInfo, UnityError> {
         validate_editor_version(version)?;
         let parts = svec(&["editors", "info", version]);
         let executed = self.run_args(&parts, "json")?;
-        parse_data(&executed.envelope)
+        parse_data(executed.envelope)
     }
 
     pub fn projects(&self) -> Result<Vec<Project>, UnityError> {
         let executed = self.run_args(&projects_parts(), "json")?;
-        parse_items(executed.envelope.data.as_ref(), &[])
+        parse_items(executed.envelope.data, &[])
+    }
+
+    /// Opens a project with its registered Editor version. The command returns
+    /// as soon as the Editor has been launched; it does not wait for it to exit.
+    pub fn open_project(&self, path: &str) -> Result<(), UnityError> {
+        let parts = open_project_parts(path)?;
+        self.run_args(&parts, "json")?;
+        Ok(())
     }
 
     pub fn changelog(&self, target: Option<&str>) -> Result<RawChangelog, UnityError> {
@@ -260,17 +269,33 @@ impl UnityCli {
             parts.extend(svec(&["--target", target]));
         }
         let executed = self.run_args(&parts, "json")?;
-        parse_data(&executed.envelope)
+        parse_data(executed.envelope)
     }
 
     pub fn auth_status(&self) -> Result<AuthStatus, UnityError> {
-        let executed = self.run_args(&svec(&["auth", "status"]), "json")?;
-        parse_data(&executed.envelope)
+        let spec = self.spec(&svec(&["auth", "status"]), "json")?;
+        match self.execute_envelope(&spec) {
+            Ok(executed) if executed.envelope.data.is_some() => parse_data(executed.envelope),
+            Ok(executed) if !executed.envelope.success => Err(envelope_error(
+                &executed.envelope,
+                &executed.stderr,
+                executed.exit_code,
+            )),
+            Ok(executed) => parse_data(executed.envelope),
+            Err(error) => match auth_status_from_error(&error) {
+                Some(status) => Ok(status),
+                None => Err(error),
+            },
+        }
+    }
+
+    pub fn auth_login_spec(&self) -> Result<CommandSpec, UnityError> {
+        self.spec(&auth_login_parts(), "ndjson")
     }
 
     pub fn license_status(&self) -> Result<LicenseStatus, UnityError> {
         let executed = self.run_args(&svec(&["license", "status"]), "json")?;
-        parse_data(&executed.envelope)
+        parse_data(executed.envelope)
     }
 
     /// Runs `unity install <version> --dry-run` and returns the raw preview.
@@ -324,7 +349,7 @@ impl UnityCli {
 
     pub fn self_update_check(&self) -> Result<CliUpdateInfo, UnityError> {
         let executed = self.run_args(&svec(&["self-update", "--check"]), "json")?;
-        let mut info: CliUpdateInfo = parse_data(&executed.envelope)?;
+        let mut info: CliUpdateInfo = parse_data(executed.envelope)?;
         info.update_available = info.current_version != info.latest_version;
         Ok(info)
     }
@@ -332,6 +357,121 @@ impl UnityCli {
     pub fn self_update_spec(&self) -> Result<CommandSpec, UnityError> {
         self.spec(&svec(&["self-update", "--yes"]), "ndjson")
     }
+}
+
+fn envelope_error(envelope: &ValueEnvelope, stderr: &str, exit_code: Option<i32>) -> UnityError {
+    envelope
+        .errors
+        .first()
+        .map(|error| error.to_unity_error(exit_code, stderr))
+        .unwrap_or_else(|| {
+            UnityError::new(
+                "COMMAND_FAILED",
+                exit_code
+                    .map(message_for_exit_code)
+                    .unwrap_or("The Unity CLI command failed."),
+            )
+            .with_exit_code(exit_code)
+            .with_detail(stderr.trim())
+        })
+}
+
+fn spawn_error(spec: &CommandSpec, err: std::io::Error) -> UnityError {
+    if err.kind() == std::io::ErrorKind::NotFound {
+        UnityError::new(
+            "CLI_NOT_FOUND",
+            format!(
+                "Could not run `{}`. The Unity CLI is not installed or is not executable.",
+                spec.program.display()
+            ),
+        )
+        .with_detail(err.to_string())
+    } else {
+        UnityError::new("SPAWN_FAILED", "The Unity CLI could not be started.")
+            .with_detail(format!("{}: {err}", spec.program.display()))
+    }
+}
+
+/// Runs a child with a hard deadline. `Command::output` cannot be cancelled, so
+/// stdout/stderr are drained on dedicated threads while the supervisor polls.
+fn run_command(spec: &CommandSpec, timeout: Duration) -> Result<std::process::Output, UnityError> {
+    let mut command = Command::new(&spec.program);
+    command
+        .args(&spec.args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    for (key, value) in &spec.env {
+        command.env(key, value);
+    }
+    if let Some(cwd) = &spec.cwd {
+        command.current_dir(cwd);
+    }
+
+    let mut child = command.spawn().map_err(|err| spawn_error(spec, err))?;
+    let stdout_reader = child.stdout.take().map(spawn_reader);
+    let stderr_reader = child.stderr.take().map(spawn_reader);
+
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {}
+            Err(err) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(UnityError::new(
+                    "SPAWN_FAILED",
+                    "The Unity CLI process could not be monitored.",
+                )
+                .with_detail(format!("{}: {err}", spec.program.display())));
+            }
+        }
+
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            // Do not join the readers here: a grandchild can keep the pipes
+            // open. The process exit closes them and the detached threads end.
+            drop(stdout_reader);
+            drop(stderr_reader);
+            return Err(
+                UnityError::new("TIMEOUT", "The Unity CLI did not respond in time.").with_detail(
+                    format!(
+                        "No result after {:.0}s from `{}`.",
+                        timeout.as_secs_f64(),
+                        spec.program.display()
+                    ),
+                ),
+            );
+        }
+
+        std::thread::sleep(Duration::from_millis(10));
+    };
+
+    let stdout = stdout_reader
+        .and_then(|reader| reader.join().ok())
+        .unwrap_or_default();
+    let stderr = stderr_reader
+        .and_then(|reader| reader.join().ok())
+        .unwrap_or_default();
+
+    Ok(std::process::Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
+fn spawn_reader<R>(mut reader: R) -> std::thread::JoinHandle<Vec<u8>>
+where
+    R: Read + Send + 'static,
+{
+    std::thread::spawn(move || {
+        let mut buffer = Vec::new();
+        let _ = reader.read_to_end(&mut buffer);
+        buffer
+    })
 }
 
 /// The result of one synchronous CLI invocation.
@@ -528,6 +668,12 @@ fn projects_parts() -> Vec<String> {
     svec(&["projects", "--all"])
 }
 
+fn open_project_parts(path: &str) -> Result<Vec<String>, UnityError> {
+    let project = validate_project_path(path)?;
+    let project = project.to_string_lossy().to_string();
+    Ok(svec(&["open", &project]))
+}
+
 fn install_modules_parts(
     version: &str,
     modules: &[String],
@@ -545,6 +691,18 @@ fn install_modules_parts(
         parts.push("--accept-eula".to_string());
     }
     Ok(parts)
+}
+
+fn auth_status_from_error(error: &UnityError) -> Option<AuthStatus> {
+    matches!(error.code.as_str(), "NOT_SIGNED_IN" | "SESSION_EXPIRED").then(|| AuthStatus {
+        logged_in: false,
+        session_state: Some(error.code.clone()),
+        ..AuthStatus::default()
+    })
+}
+
+fn auth_login_parts() -> Vec<String> {
+    svec(&["auth", "login"])
 }
 
 fn append_modules(parts: &mut Vec<String>, modules: &[String]) -> Result<(), UnityError> {
@@ -627,5 +785,97 @@ mod tests {
         assert_eq!(parts[1], "--editor-version");
         assert_eq!(parts[2], "6000.6.6f1");
         assert!(parts.contains(&"--accept-eula".to_string()));
+    }
+
+    #[test]
+    fn signed_out_auth_errors_become_a_logged_out_status() {
+        let status =
+            auth_status_from_error(&UnityError::new("NOT_SIGNED_IN", "You are not signed in."))
+                .expect("signed-out errors should be a normal status");
+
+        assert!(!status.logged_in);
+        assert_eq!(status.session_state.as_deref(), Some("NOT_SIGNED_IN"));
+    }
+
+    #[test]
+    fn expired_auth_sessions_become_a_logged_out_status() {
+        let status =
+            auth_status_from_error(&UnityError::new("SESSION_EXPIRED", "The session expired."))
+                .expect("expired sessions should be a normal status");
+
+        assert!(!status.logged_in);
+        assert_eq!(status.session_state.as_deref(), Some("SESSION_EXPIRED"));
+    }
+
+    #[test]
+    fn other_auth_errors_remain_errors() {
+        assert!(
+            auth_status_from_error(&UnityError::new("NETWORK_UNREACHABLE", "offline")).is_none()
+        );
+    }
+
+    #[test]
+    fn auth_login_uses_the_standard_login_command() {
+        assert_eq!(auth_login_parts(), svec(&["auth", "login"]));
+    }
+
+    #[test]
+    fn open_project_uses_the_open_command_without_auto_accepting_upgrades() {
+        let project = std::env::temp_dir();
+        let project = project.to_string_lossy();
+        let parts = open_project_parts(&project).unwrap();
+
+        assert_eq!(parts[0], "open");
+        assert_eq!(parts[1], project);
+        assert!(!parts.contains(&"--wait".to_string()));
+        assert!(!parts.contains(&"--accept-upgrades".to_string()));
+    }
+
+    #[test]
+    fn every_cli_spec_opts_out_of_telemetry() {
+        let path =
+            std::env::temp_dir().join(format!("unity-rust-hub-cli-test-{}", std::process::id()));
+        std::fs::write(&path, b"test").unwrap();
+
+        let cli = UnityCli::new();
+        cli.set_override_path(Some(path.clone()));
+        let spec = cli.spec(&svec(&["version"]), "json").unwrap();
+        std::fs::remove_file(path).ok();
+
+        assert!(spec
+            .env
+            .iter()
+            .any(|(key, value)| key == DO_NOT_TRACK_ENV && value == "1"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn execute_times_out_instead_of_hanging() {
+        let spec = CommandSpec::new("sleep", svec(&["5"]));
+        let started = Instant::now();
+        let error = UnityCli::new()
+            .execute_with_timeout(&spec, Duration::from_millis(100))
+            .expect_err("sleep should time out");
+
+        assert_eq!(error.code, "TIMEOUT");
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn execute_envelope_keeps_data_on_failure() {
+        let spec = CommandSpec::new(
+            "sh",
+            svec(&[
+                "-c",
+                r#"printf '%s' '{"success":false,"data":{"loggedIn":false},"errors":[{"code":"AUTH_ERROR","message":"signed out"}],"warnings":[]}'"#,
+            ]),
+        );
+        let cli = UnityCli::new();
+        let executed = cli.execute_envelope(&spec).unwrap();
+
+        assert!(!executed.envelope.success);
+        assert!(executed.envelope.data.is_some());
+        assert!(cli.execute(&spec).is_err());
     }
 }

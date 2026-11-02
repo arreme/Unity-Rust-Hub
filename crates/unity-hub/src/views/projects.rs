@@ -1,8 +1,9 @@
-use iced::widget::{button, column, row, text, text_input};
+use iced::widget::{button, column, row, text_input};
 use iced::{Element, Fill};
 
 use crate::app::{badge, App, Message};
 use crate::theme;
+use crate::ui::text;
 use crate::util::{error_text, format_epoch_millis, short_path};
 use crate::views::{card, cell, empty, header_cell, page_header, row_card, row_header};
 
@@ -29,7 +30,7 @@ fn projects_card(app: &App) -> Element<'_, Message> {
             text_input("Filter by name, path, or version", &app.project_search)
                 .on_input(Message::ProjectSearchChanged)
                 .padding(8)
-                .size(11)
+                .size(app.font_size(11.0))
                 .width(Fill),
             text(format!("{} of {}", filtered.len(), total))
                 .size(9)
@@ -60,12 +61,12 @@ fn projects_card(app: &App) -> Element<'_, Message> {
                     header_cell("Version", 2),
                     header_cell("Pipeline", 2),
                     header_cell("Target", 2),
-                    header_cell("Path", 3),
+                    header_cell("Path", 2),
                     header_cell("Modified", 2),
-                    header_cell("", 2),
+                    header_cell("", 3),
                 ]));
 
-                for project in filtered {
+                for (index, project) in filtered {
                     let mut badges = Vec::new();
                     if project.cloud_enabled {
                         badges.push("Unity Cloud");
@@ -73,7 +74,7 @@ fn projects_card(app: &App) -> Element<'_, Message> {
                     if let Some(vcs) = &project.vcs_provider {
                         badges.push(vcs.as_str());
                     }
-                    if !installed.is_empty() && !installed.contains(&project.version) {
+                    if !installed.is_empty() && !installed.contains(project.version.as_str()) {
                         badges.push("Editor not installed");
                     }
                     if project.is_favorite {
@@ -87,37 +88,32 @@ fn projects_card(app: &App) -> Element<'_, Message> {
 
                     let pipeline: Element<'_, Message> = project
                         .render_pipeline
-                        .clone()
+                        .as_deref()
                         .map(|pipeline| badge(pipeline, theme::Tone::Violet))
                         .unwrap_or_else(|| text("—").size(10).style(theme::faint_text).into());
 
                     body = body.push(row_card(vec![
                         cell(
                             column![
-                                text(project.title.clone()).size(11),
+                                text(project.title.as_str()).size(11),
                                 text(badges).size(9).style(theme::faint_text),
                             ]
                             .spacing(1),
                             4,
                         ),
-                        cell(text(project.version.clone()).size(10), 2),
+                        cell(text(project.version.as_str()).size(10), 2),
                         cell(pipeline, 2),
                         cell(
-                            text(
-                                project
-                                    .build_target
-                                    .clone()
-                                    .unwrap_or_else(|| "—".to_string()),
-                            )
-                            .size(9)
-                            .style(theme::muted_text),
+                            text(project.build_target.as_deref().unwrap_or("—"))
+                                .size(9)
+                                .style(theme::muted_text),
                             2,
                         ),
                         cell(
                             text(short_path(&project.path, 42))
                                 .size(9)
                                 .style(theme::faint_text),
-                            3,
+                            2,
                         ),
                         cell(
                             text(format_epoch_millis(project.last_modified))
@@ -126,11 +122,18 @@ fn projects_card(app: &App) -> Element<'_, Message> {
                             2,
                         ),
                         cell(
-                            button(text("Change version").size(9))
-                                .on_press(Message::OpenUpgrade(project.clone()))
-                                .padding([3.0, 7.0])
-                                .style(button::secondary),
-                            2,
+                            row![
+                                button(text("Open").size(9))
+                                    .on_press(Message::OpenProject(index))
+                                    .padding([3.0, 7.0])
+                                    .style(button::primary),
+                                button(text("Change version").size(9))
+                                    .on_press(Message::OpenUpgrade(index))
+                                    .padding([3.0, 7.0])
+                                    .style(button::secondary),
+                            ]
+                            .spacing(4),
+                            3,
                         ),
                     ]));
                 }

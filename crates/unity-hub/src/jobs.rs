@@ -1,8 +1,9 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
+use std::hash::{Hash, Hasher};
 use std::io::{BufRead, BufReader};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
@@ -60,10 +61,19 @@ pub struct JobManager {
     counter: Arc<AtomicU64>,
 }
 
-struct Inner {
-    events: Vec<JobEvent>,
-    handles: HashMap<String, Handle>,
+impl Hash for JobManager {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        Arc::as_ptr(&self.inner).hash(state);
+    }
 }
+
+struct Inner {
+    events: VecDeque<JobEvent>,
+    handles: HashMap<String, Handle>,
+    notifier: Option<mpsc::SyncSender<()>>,
+}
+
+const MAX_QUEUED_EVENTS: usize = 2048;
 
 struct Handle {
     child: Arc<Mutex<Child>>,
@@ -74,8 +84,9 @@ impl JobManager {
     pub fn new() -> Self {
         Self {
             inner: Arc::new(Mutex::new(Inner {
-                events: Vec::new(),
+                events: VecDeque::new(),
                 handles: HashMap::new(),
+                notifier: None,
             })),
             counter: Arc::new(AtomicU64::new(0)),
         }
@@ -234,9 +245,17 @@ impl JobManager {
         })
     }
 
+    /// Registers the subscription's wake-up channel. iced calls this when the
+    /// job subscription starts, so the UI only wakes when a job actually emits
+    /// an event instead of on a fixed timer.
+    pub fn set_notifier(&self, notifier: mpsc::SyncSender<()>) {
+        let mut inner = self.inner.lock().expect("job registry lock poisoned");
+        inner.notifier = Some(notifier);
+    }
+
     pub fn poll(&self) -> Vec<JobEvent> {
         let mut inner = self.inner.lock().expect("job registry lock poisoned");
-        std::mem::take(&mut inner.events)
+        inner.events.drain(..).collect()
     }
 
     pub fn cancel(&self, job_id: &str) -> bool {
@@ -261,7 +280,15 @@ impl JobManager {
 
     fn push(&self, event: JobEvent) {
         let mut inner = self.inner.lock().expect("job registry lock poisoned");
-        inner.events.push(event);
+        inner.events.push_back(event);
+        while inner.events.len() > MAX_QUEUED_EVENTS {
+            inner.events.pop_front();
+        }
+        if let Some(notifier) = &inner.notifier {
+            // Capacity-one channel: duplicate wake-ups are intentionally
+            // dropped; one wake-up drains the whole batch.
+            let _ = notifier.try_send(());
+        }
     }
 
     fn remove(&self, job_id: &str) {
@@ -286,7 +313,7 @@ fn wait_for_exit(child: &Arc<Mutex<Child>>) -> Option<std::process::ExitStatus> 
                 Err(_) => return None,
             }
         }
-        std::thread::sleep(Duration::from_millis(20));
+        std::thread::sleep(Duration::from_millis(100));
     }
 }
 
@@ -395,4 +422,50 @@ fn now_millis() -> u128 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn event(state: JobState) -> JobEvent {
+        JobEvent {
+            job_id: "job-test".to_string(),
+            state,
+            stream: None,
+            line: None,
+            progress: None,
+            message: None,
+            result: None,
+            error: None,
+        }
+    }
+
+    #[test]
+    fn event_queue_is_bounded_and_keeps_the_terminal_event() {
+        let manager = JobManager::new();
+        for _ in 0..MAX_QUEUED_EVENTS + 10 {
+            manager.push(event(JobState::Running));
+        }
+        manager.push(event(JobState::Succeeded));
+
+        let events = manager.poll();
+        assert_eq!(events.len(), MAX_QUEUED_EVENTS);
+        assert_eq!(
+            events.last().map(|event| event.state),
+            Some(JobState::Succeeded)
+        );
+    }
+
+    #[test]
+    fn pushing_an_event_wakes_the_subscription_once() {
+        let manager = JobManager::new();
+        let (sender, receiver) = mpsc::sync_channel(1);
+        manager.set_notifier(sender);
+        manager.push(event(JobState::Running));
+        manager.push(event(JobState::Running));
+
+        assert!(receiver.try_recv().is_ok());
+        assert!(receiver.try_recv().is_err());
+    }
 }

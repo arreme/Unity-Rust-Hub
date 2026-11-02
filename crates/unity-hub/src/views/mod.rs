@@ -1,8 +1,9 @@
-use iced::widget::{column, container, row, text};
+use iced::widget::{column, container, row};
 use iced::{Element, Fill, Length};
 
 use crate::app::Message;
 use crate::theme;
+use crate::ui::text;
 
 pub mod changelog;
 pub mod editors;

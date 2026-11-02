@@ -1,3 +1,5 @@
+use std::sync::OnceLock;
+
 use iced::theme::Palette;
 use iced::widget::{button, container, text};
 use iced::{Background, Border, Color, Shadow, Theme};
@@ -43,17 +45,22 @@ impl Tone {
 }
 
 pub fn app_theme() -> Theme {
-    Theme::custom(
-        "Unity Rust Hub",
-        Palette {
-            background: BG,
-            text: TEXT,
-            primary: ACCENT,
-            success: GREEN,
-            warning: AMBER,
-            danger: RED,
-        },
-    )
+    static THEME: OnceLock<Theme> = OnceLock::new();
+    THEME
+        .get_or_init(|| {
+            Theme::custom(
+                "Unity Rust Hub",
+                Palette {
+                    background: BG,
+                    text: TEXT,
+                    primary: ACCENT,
+                    success: GREEN,
+                    warning: AMBER,
+                    danger: RED,
+                },
+            )
+        })
+        .clone()
 }
 
 pub fn sidebar(_theme: &Theme) -> container::Style {
@@ -262,4 +269,10 @@ pub fn danger_text(_theme: &Theme) -> text::Style {
 
 pub fn warning_text(_theme: &Theme) -> text::Style {
     text::Style { color: Some(AMBER) }
+}
+
+pub fn tone_text(tone: Tone) -> impl Fn(&Theme) -> text::Style {
+    move |_theme| text::Style {
+        color: Some(tone.color()),
+    }
 }

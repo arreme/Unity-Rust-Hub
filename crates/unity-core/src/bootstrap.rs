@@ -30,7 +30,9 @@ pub fn install_cli_spec(channel: Option<&str>) -> CommandSpec {
         svec(&["-c", "curl -fsSL https://unity.com/install.sh | bash"]),
     );
 
-    let spec = spec.with_env("UNITY_CLI_SKIP_SETUP", "1");
+    let spec = spec
+        .with_env("UNITY_CLI_SKIP_SETUP", "1")
+        .with_env(crate::runner::DO_NOT_TRACK_ENV, "1");
     if channel != "stable" {
         spec.with_env("UNITY_CLI_CHANNEL", channel)
     } else {

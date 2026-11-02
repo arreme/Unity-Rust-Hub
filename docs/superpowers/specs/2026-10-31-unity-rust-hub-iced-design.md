@@ -44,14 +44,12 @@ The chosen build uses iced with `default-features = false` and:
 
 - `tiny-skia` — software rendering; avoids requiring a working Vulkan/GL driver;
 - `crisp` — sharper text and pixel snapping;
-- `image` — window icon decoding;
-- `thread-pool` — executor for futures;
-- `x11`, `wayland` — Linux window backends;
-- `linux-theme-detection` — keeps native font/theme behavior reasonable.
+- `thread-pool` — executor for futures (wrapped in a two-thread custom executor);
+- `x11`, `wayland` — Linux window backends.
 
-`wgpu` is deliberately disabled. The app is mostly panels and text; tiny-skia keeps
-the dependency tree and driver requirements smaller. A GPU build can be restored by
-swapping the feature list if profiling ever demands it.
+`image` is not enabled: the window icon ships as raw RGBA and is passed to
+`Icon::from_rgba`, so the binary does not link PNG/WebP/EXR/TIFF decoders. Linux
+theme detection is also disabled because the app always uses its own palette.
 
 ## Workspace layout
 
@@ -73,7 +71,8 @@ crates/unity-hub/      iced application
   src/theme.rs         palette, widget styles, badges
   src/util.rs          async bridge, formatting, error text
   src/views/           overview, editors, projects, changelog, settings
-  assets/icon.png      window icon
+  assets/icon.png      window icon source
+  assets/icon-128.rgba raw RGBA window icon
 
 docs/superpowers/      this spec and the implementation plan
 ```
@@ -105,9 +104,15 @@ business state.
 ### Blocking CLI work
 
 `unity-core` is synchronous by design. Every read is wrapped by
-`util::run_blocking`, which moves the closure to a dedicated OS thread and returns a
-`futures::oneshot` future. The iced executor awaits that future with `Task::perform`,
-so the UI thread never blocks on process spawning or JSON parsing.
+`util::run_blocking`, which submits the closure to one dedicated CLI reader
+worker and returns a `futures::oneshot` future. The iced executor awaits that
+future with `Task::perform`, so the UI thread never blocks on process spawning
+or JSON parsing. Reads are serialized: at most one `unity` process (roughly
+25–35 MB) is alive at a time. Each read has a 30-second deadline; a hung process
+is killed and reported as `TIMEOUT`.
+
+Every invocation sets `DO_NOT_TRACK=1`. The CLI otherwise performs an analytics
+callback that adds roughly one second and extra working memory to most calls.
 
 ### Jobs and streaming
 
@@ -125,16 +130,15 @@ Events are pushed onto a mutex-protected queue. On exit, the supervisor classifi
 job as succeeded/failed/cancelled, attaches a structured `UnityError` from the result
 envelope when present, and emits a terminal event.
 
-`App::poll_jobs` drains the queue, appends log lines (bounded to 600 with 100-line
-trimming), updates progress, and on a terminal event refreshes the affected page
-(status after CLI install, Editors after Editor/module install, Projects after an
-upgrade).
+`App::poll_jobs` drains a bounded queue, appends log lines (tail-capped to 300
+lines of 1000 characters each), updates progress, and on a terminal event refreshes
+the affected page (status after CLI install, Editors after Editor/module install,
+Projects after an upgrade).
 
-iced 0.14 no longer exposes `iced::time::every`, so the app runs a small thread that
-sends `Message::PollJobs` through a `futures::channel::mpsc` subscription every
-120 ms. The subscription is only active while a job is running, so the app does not
-wake its update loop when idle. This keeps polling independent of the executor
-implementation and replaces the former UI event channel.
+`JobManager` wakes the UI only when it has an event. The notifier coalesces bursts
+into one `PollJobs` message every 100 ms, so idle windows do not wake the update
+loop and chatty installs cannot flood the renderer. The subscription only runs
+while a job is active.
 
 A single job may run at a time. Starting another is rejected with a notice so two
 installers cannot race the same CLI state.

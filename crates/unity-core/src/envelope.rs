@@ -17,9 +17,9 @@ pub struct CliEnvelope<T> {
     pub data: Option<T>,
     #[serde(default)]
     pub errors: Vec<CliError>,
-    #[serde(default)]
+    #[serde(default, skip)]
     pub warnings: Vec<Value>,
-    #[serde(default)]
+    #[serde(default, skip)]
     pub notifications: Vec<Value>,
 }
 
@@ -91,10 +91,9 @@ pub fn parse_envelope(stdout: &str) -> Result<ValueEnvelope, UnityError> {
     })
 }
 
-pub fn parse_data<T: DeserializeOwned>(envelope: &ValueEnvelope) -> Result<T, UnityError> {
+pub fn parse_data<T: DeserializeOwned>(envelope: ValueEnvelope) -> Result<T, UnityError> {
     let data = envelope
         .data
-        .clone()
         .ok_or_else(|| UnityError::unexpected_output("The CLI envelope had no `data` field."))?;
     serde_json::from_value(data)
         .map_err(|err| UnityError::unexpected_output(format!("Could not parse `data`: {err}")))
@@ -106,8 +105,11 @@ pub fn parse_data<T: DeserializeOwned>(envelope: &ValueEnvelope) -> Result<T, Un
 /// plain arrays for most listings and `{ count, instances }` for running
 /// Editors. Accept all of them so a CLI update on either side does not break
 /// the app.
+///
+/// Takes ownership of `data` so list items can be deserialized in place instead
+/// of deep-cloning the entire array first.
 pub fn parse_items<T: DeserializeOwned>(
-    data: Option<&Value>,
+    data: Option<Value>,
     keys: &[&str],
 ) -> Result<Vec<T>, UnityError> {
     let Some(data) = data else {
@@ -116,30 +118,32 @@ pub fn parse_items<T: DeserializeOwned>(
     if data.is_null() {
         return Ok(Vec::new());
     }
-    let array = if let Some(array) = data.as_array() {
-        array.clone()
-    } else if let Some(object) = data.as_object() {
-        let mut found = None;
-        for key in keys
-            .iter()
-            .copied()
-            .chain(["items", "instances", "results", "entries"])
-        {
-            if let Some(Value::Array(array)) = object.get(key) {
-                found = Some(array.clone());
-                break;
+    let array = match data {
+        Value::Array(array) => array,
+        Value::Object(mut object) => {
+            let mut found = None;
+            for key in keys
+                .iter()
+                .copied()
+                .chain(["items", "instances", "results", "entries"])
+            {
+                if let Some(Value::Array(array)) = object.remove(key) {
+                    found = Some(array);
+                    break;
+                }
             }
+            found.ok_or_else(|| {
+                UnityError::unexpected_output(format!(
+                    "Expected a list in `data`, found an object with keys: {}",
+                    object.keys().cloned().collect::<Vec<_>>().join(", ")
+                ))
+            })?
         }
-        found.ok_or_else(|| {
-            UnityError::unexpected_output(format!(
-                "Expected a list in `data`, found an object with keys: {}",
-                object.keys().cloned().collect::<Vec<_>>().join(", ")
-            ))
-        })?
-    } else {
-        return Err(UnityError::unexpected_output(format!(
-            "Expected a list in `data`, found {data}."
-        )));
+        other => {
+            return Err(UnityError::unexpected_output(format!(
+                "Expected a list in `data`, found {other}."
+            )));
+        }
     };
 
     array
@@ -170,7 +174,7 @@ mod tests {
         let data = serde_json::json!([
             { "version": "6000.6.6f1", "moduleNames": ["Windows"] }
         ]);
-        let editors: Vec<Editor> = parse_items(Some(&data), &[]).unwrap();
+        let editors: Vec<Editor> = parse_items(Some(data), &[]).unwrap();
         assert_eq!(editors.len(), 1);
         assert_eq!(editors[0].version, "6000.6.6f1");
         assert_eq!(editors[0].module_names, vec!["Windows"]);
@@ -183,7 +187,7 @@ mod tests {
             "total": 1,
             "nextPage": null
         });
-        let editors: Vec<Editor> = parse_items(Some(&data), &[]).unwrap();
+        let editors: Vec<Editor> = parse_items(Some(data), &[]).unwrap();
         assert_eq!(editors.len(), 1);
     }
 
@@ -193,7 +197,7 @@ mod tests {
             "count": 1,
             "instances": [{ "projectPath": "/tmp/Game", "editorVersion": "6000.6.6f1", "pid": 42 }]
         });
-        let editors: Vec<RunningEditor> = parse_items(Some(&data), &["instances"]).unwrap();
+        let editors: Vec<RunningEditor> = parse_items(Some(data), &["instances"]).unwrap();
         assert_eq!(editors.len(), 1);
         assert_eq!(editors[0].project_path.as_deref(), Some("/tmp/Game"));
     }

@@ -1,10 +1,13 @@
-use iced::widget::{button, column, container, pick_list, row, scrollable, space, text};
+use iced::widget::{button, column, container, pick_list, row, scrollable, space};
 use iced::{Element, Fill};
 
 use crate::app::{badge, App, Message};
 use crate::theme;
+use crate::ui::text;
 use crate::util::error_text;
 use crate::views::{card, empty, page_header};
+
+const MAX_SECTION_ENTRIES: usize = 250;
 
 pub fn view(app: &App) -> Element<'_, Message> {
     let mut page = column![page_header(
@@ -31,6 +34,7 @@ fn controls(app: &App) -> Element<'_, Message> {
                     app.changelog_target.clone(),
                     Message::ChangelogTargetChanged,
                 )
+                .text_size(app.font_size(12.0))
                 .width(Fill)
                 .placeholder("Installed CLI"),
             ]
@@ -104,7 +108,7 @@ fn changelog_body(app: &App) -> Element<'_, Message> {
             ]
             .spacing(2)
             .width(Fill),
-            badge(view.source.clone(), theme::Tone::Neutral),
+            badge(view.source.as_str(), theme::Tone::Neutral),
         ]
         .align_y(iced::Alignment::Center),
     );
@@ -127,26 +131,40 @@ fn changelog_body(app: &App) -> Element<'_, Message> {
         let items = column(
             view.breaking_changes
                 .iter()
-                .map(|change| {
-                    column![
-                        text(&change.text).size(11),
-                        row![
-                            badge(change.section.clone(), theme::Tone::Red),
-                            badge(change.reason.clone(), theme::Tone::Amber),
+                .enumerate()
+                .map(|(index, change)| {
+                    container(
+                        column![
+                            row![
+                                text(format!("{:02}", index + 1))
+                                    .size(10)
+                                    .style(theme::faint_text)
+                                    .width(24),
+                                text(&change.text).size(12).line_height(1.45).width(Fill),
+                            ]
+                            .spacing(6)
+                            .align_y(iced::Alignment::Start),
+                            row![
+                                space().width(30),
+                                badge(change.section.as_str(), theme::Tone::Red),
+                                badge(change.reason.as_str(), theme::Tone::Amber),
+                            ]
+                            .spacing(5),
                         ]
-                        .spacing(5),
-                    ]
-                    .spacing(4)
+                        .spacing(7),
+                    )
+                    .padding(10)
                     .width(Fill)
+                    .style(theme::row_card)
                     .into()
                 })
                 .collect::<Vec<Element<'_, Message>>>(),
         )
-        .spacing(10);
+        .spacing(8);
 
         card(
             "Possible breaking changes",
-            scrollable(items).height(260).into(),
+            scrollable(items).height(300).into(),
         )
     };
 
@@ -154,20 +172,26 @@ fn changelog_body(app: &App) -> Element<'_, Message> {
 
     for section in &view.sections {
         let tone = section_tone(&section.title);
-        let entries = column(
+        let mut entries = column(
             section
                 .entries
                 .iter()
-                .map(|entry| {
-                    text(entry)
-                        .size(11)
-                        .style(theme::muted_text)
-                        .width(Fill)
-                        .into()
-                })
+                .take(MAX_SECTION_ENTRIES)
+                .map(|entry| entry_row(entry, tone))
                 .collect::<Vec<Element<'_, Message>>>(),
         )
-        .spacing(6);
+        .spacing(9);
+
+        if section.entries.len() > MAX_SECTION_ENTRIES {
+            entries = entries.push(
+                text(format!(
+                    "… {} more entries. Use the raw Markdown view for the full list.",
+                    section.entries.len() - MAX_SECTION_ENTRIES
+                ))
+                .size(9)
+                .style(theme::faint_text),
+            );
+        }
 
         body = body.push(
             container(
@@ -180,7 +204,7 @@ fn changelog_body(app: &App) -> Element<'_, Message> {
                     .align_y(iced::Alignment::Center),
                     entries,
                 ]
-                .spacing(8)
+                .spacing(10)
                 .width(Fill),
             )
             .padding(16)
@@ -205,23 +229,54 @@ fn changelog_body(app: &App) -> Element<'_, Message> {
     );
 
     if app.show_raw_changelog {
-        body = body.push(
-            container(
+        let raw: Element<'_, Message> =
+            if app.raw_changelog.loading && app.raw_changelog.data.is_none() {
+                text("Loading raw Markdown…")
+                    .size(10)
+                    .style(theme::muted_text)
+                    .into()
+            } else if let Some(error) = &app.raw_changelog.error {
+                text(error_text(error))
+                    .size(10)
+                    .style(theme::danger_text)
+                    .into()
+            } else if let Some(markdown) = &app.raw_changelog.data {
                 scrollable(
-                    text(&view.markdown)
+                    text(markdown.as_str())
                         .size(9)
                         .font(iced::Font::MONOSPACE)
                         .style(theme::muted_text),
                 )
-                .height(320),
-            )
-            .padding(10)
-            .width(Fill)
-            .style(theme::card),
-        );
+                .height(320)
+                .into()
+            } else {
+                text("Raw Markdown is not loaded.")
+                    .size(10)
+                    .style(theme::faint_text)
+                    .into()
+            };
+
+        body = body.push(container(raw).padding(10).width(Fill).style(theme::card));
     }
 
     body.into()
+}
+
+fn entry_row<'a>(entry: &'a str, tone: theme::Tone) -> Element<'a, Message> {
+    row![
+        text("•")
+            .size(14)
+            .line_height(1.2)
+            .style(theme::tone_text(tone)),
+        text(entry)
+            .size(12)
+            .line_height(1.45)
+            .style(theme::muted_text)
+            .width(Fill),
+    ]
+    .spacing(9)
+    .align_y(iced::Alignment::Start)
+    .into()
 }
 
 fn section_tone(title: &str) -> theme::Tone {

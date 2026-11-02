@@ -1,8 +1,9 @@
-use iced::widget::{button, checkbox, column, container, row, scrollable, space, text, text_input};
+use iced::widget::{button, checkbox, column, container, row, scrollable, space, text_input};
 use iced::{Element, Fill};
 
 use crate::app::{badge, detail_column, App, Message};
 use crate::theme;
+use crate::ui::text;
 use crate::util::{error_text, format_bytes};
 use crate::views::{card, cell, empty, header_cell, page_header, row_card, row_header};
 
@@ -50,7 +51,7 @@ fn installed_card(app: &App) -> Element<'_, Message> {
                 header_cell("", 2),
             ]));
 
-            for editor in editors {
+            for (index, editor) in editors.iter().enumerate() {
                 let modules = if editor.module_names.is_empty() {
                     "No modules reported".to_string()
                 } else {
@@ -63,13 +64,13 @@ fn installed_card(app: &App) -> Element<'_, Message> {
                 };
 
                 body = body.push(row_card(vec![
-                    cell(text(editor.version.clone()).size(11), 2),
-                    cell(text(editor.architecture.clone()).size(10), 2),
+                    cell(text(editor.version.as_str()).size(11), 2),
+                    cell(text(editor.architecture.as_str()).size(10), 2),
                     cell(default, 2),
                     cell(text(modules).size(10).style(theme::muted_text), 5),
                     cell(
                         button(text("Manage").size(10))
-                            .on_press(Message::OpenModules(editor.clone()))
+                            .on_press(Message::OpenModules(index))
                             .padding([4.0, 8.0])
                             .style(button::secondary),
                         2,
@@ -93,7 +94,7 @@ fn install_card(app: &App) -> Element<'_, Message> {
             )
             .on_input(Message::InstallVersionChanged)
             .padding(8)
-            .size(12)
+            .size(app.font_size(12.0))
             .width(Fill),
             button(text("Load modules").size(10))
                 .on_press(Message::LoadModules)
@@ -110,7 +111,7 @@ fn install_card(app: &App) -> Element<'_, Message> {
             .style(theme::faint_text),
     );
 
-    if app.modules.loading {
+    if app.modules.loading && app.modules.data.is_none() {
         body = body.push(
             text("Loading module catalog…")
                 .size(10)
@@ -141,20 +142,18 @@ fn install_card(app: &App) -> Element<'_, Message> {
         let list = column(
             modules
                 .iter()
-                .filter(|module| !module.is_installed)
-                .map(|module| {
+                .enumerate()
+                .filter(|(_, module)| !module.is_installed)
+                .map(|(index, module)| {
                     checkbox(app.selected_modules.contains(&module.id))
                         .label(format!(
                             "{}  ·  {}",
                             module.name,
                             format_bytes(module.download_bytes)
                         ))
-                        .on_toggle({
-                            let id = module.id.clone();
-                            move |value| Message::ToggleModule(id.clone(), value)
-                        })
+                        .on_toggle(move |value| Message::ToggleModule(index, value))
                         .size(14)
-                        .text_size(10)
+                        .text_size(app.font_size(10.0))
                         .into()
                 })
                 .collect::<Vec<Element<'_, Message>>>(),
@@ -175,7 +174,7 @@ fn install_card(app: &App) -> Element<'_, Message> {
             .label("Accept the module license agreements for this install (--accept-eula).")
             .on_toggle(Message::AcceptEulaToggled)
             .size(14)
-            .text_size(10),
+            .text_size(app.font_size(10.0)),
     );
 
     let preview_status: Element<'_, Message> = if app.preview_loading {
@@ -216,8 +215,8 @@ fn install_card(app: &App) -> Element<'_, Message> {
                         preview
                             .editor
                             .as_ref()
-                            .map(|editor| editor.version.clone())
-                            .unwrap_or_else(|| app.install_version.clone()),
+                            .map(|editor| editor.version.as_str())
+                            .unwrap_or(app.install_version.as_str()),
                     ),
                     detail_column(
                         "Download",
@@ -256,7 +255,7 @@ fn install_card(app: &App) -> Element<'_, Message> {
 fn releases_card(app: &App) -> Element<'_, Message> {
     let mut body = column![].spacing(8);
 
-    if app.releases.loading {
+    if app.releases.loading && app.releases.data.is_none() {
         body = body.push(text("Fetching releases…").size(10).style(theme::muted_text));
     } else if let Some(error) = &app.releases.error {
         body = body.push(text(error_text(error)).size(10).style(theme::danger_text));
@@ -274,22 +273,23 @@ fn releases_card(app: &App) -> Element<'_, Message> {
             ]));
 
             let installed = app.installed_versions();
-            for release in releases.iter().take(14) {
+            for (index, release) in releases.iter().take(14).enumerate() {
                 let tone = stream_tone(&release.stream);
-                let is_installed = release.installed || installed.contains(&release.version);
+                let is_installed =
+                    release.installed || installed.contains(release.version.as_str());
                 let action: Element<'_, Message> = if is_installed {
                     badge("installed", theme::Tone::Blue)
                 } else {
                     button(text("Use").size(9))
-                        .on_press(Message::UseRelease(release.version.clone()))
+                        .on_press(Message::UseRelease(index))
                         .padding([3.0, 7.0])
                         .style(button::text)
                         .into()
                 };
 
                 body = body.push(row_card(vec![
-                    cell(text(release.version.clone()).size(10), 4),
-                    cell(badge(release.stream.clone(), tone), 3),
+                    cell(text(release.version.as_str()).size(10), 4),
+                    cell(badge(release.stream.as_str(), tone), 3),
                     cell(action, 3),
                 ]));
             }

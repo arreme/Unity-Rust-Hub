@@ -86,6 +86,10 @@ impl ChangelogProvider for CliChangelogProvider {
 }
 
 /// The provider-agnostic shape a UI renders.
+///
+/// Raw Markdown is deliberately not stored here. It can be larger than the
+/// parsed notes and is only needed when the user opens the raw view; the UI
+/// fetches it on demand through [`ChangelogProvider`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChangelogView {
@@ -93,7 +97,6 @@ pub struct ChangelogView {
     pub sections: Vec<ChangelogSection>,
     pub breaking_changes: Vec<BreakingChange>,
     pub entry_count: usize,
-    pub markdown: String,
     pub source: String,
     pub source_detail: String,
 }
@@ -116,7 +119,6 @@ impl ChangelogView {
             sections: parsed.sections,
             breaking_changes: parsed.breaking_changes,
             entry_count,
-            markdown: raw.changelog,
             source: provider.source_id().to_string(),
             source_detail,
         })

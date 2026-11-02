@@ -1,8 +1,9 @@
-use iced::widget::{button, column, container, row, rule, space, text};
+use iced::widget::{button, column, container, row, rule, space};
 use iced::{Element, Fill};
 
 use crate::app::{badge, detail_column, App, Message};
 use crate::theme;
+use crate::ui::text;
 use crate::util::{error_text, format_iso};
 
 pub fn view(app: &App) -> Element<'_, Message> {
@@ -64,8 +65,8 @@ fn cli_card(app: &App) -> Element<'_, Message> {
             let version = status
                 .version
                 .as_ref()
-                .map(|version| version.version.clone())
-                .unwrap_or_else(|| "unknown".to_string());
+                .map(|version| version.version.as_str())
+                .unwrap_or("unknown");
 
             body = body.push(
                 row![
@@ -74,8 +75,8 @@ fn cli_card(app: &App) -> Element<'_, Message> {
                         status
                             .version
                             .as_ref()
-                            .map(|version| version.channel.clone())
-                            .unwrap_or_else(|| "unknown".to_string()),
+                            .map(|version| version.channel.as_str())
+                            .unwrap_or("unknown"),
                         theme::Tone::Accent,
                     ),
                     update_badge(app),
@@ -107,25 +108,16 @@ fn cli_card(app: &App) -> Element<'_, Message> {
                         status
                             .version
                             .as_ref()
-                            .and_then(|v| v.runtime.clone())
-                            .unwrap_or_else(|| "—".to_string()),
+                            .and_then(|v| v.runtime.as_deref())
+                            .unwrap_or("—"),
                     ),
                 ]
                 .spacing(16),
             );
             body = body.push(
                 row![
-                    detail_column(
-                        "Executable",
-                        status.path.clone().unwrap_or_else(|| "—".to_string())
-                    ),
-                    detail_column(
-                        "Resolved via",
-                        status
-                            .path_source
-                            .clone()
-                            .unwrap_or_else(|| "—".to_string()),
-                    ),
+                    detail_column("Executable", status.path.as_deref().unwrap_or("—")),
+                    detail_column("Resolved via", status.path_source.as_deref().unwrap_or("—"),),
                 ]
                 .spacing(16),
             );
@@ -133,10 +125,7 @@ fn cli_card(app: &App) -> Element<'_, Message> {
                 row![
                     detail_column(
                         "Editor install path",
-                        status
-                            .install_path
-                            .clone()
-                            .unwrap_or_else(|| "—".to_string()),
+                        status.install_path.as_deref().unwrap_or("—"),
                     ),
                     detail_column(
                         "Build date",
@@ -262,7 +251,7 @@ fn install_callout() -> Element<'static, Message> {
 fn account_card(app: &App) -> Element<'_, Message> {
     let mut body = column![].spacing(8);
 
-    if app.auth.loading {
+    if app.auth.loading && app.auth.data.is_none() {
         body = body.push(text("Checking sign-in…").size(10).style(theme::muted_text));
     } else if let Some(auth) = &app.auth.data {
         if auth.logged_in {
@@ -277,14 +266,14 @@ fn account_card(app: &App) -> Element<'_, Message> {
                         text(
                             auth.user
                                 .as_ref()
-                                .map(|u| u.name.clone())
-                                .unwrap_or_else(|| "Signed in".to_string())
+                                .map(|u| u.name.as_str())
+                                .unwrap_or("Signed in")
                         )
                         .size(12),
                         text(
                             auth.user
                                 .as_ref()
-                                .map(|u| u.email.clone())
+                                .map(|u| u.email.as_str())
                                 .unwrap_or_default()
                         )
                         .size(10)
@@ -296,7 +285,23 @@ fn account_card(app: &App) -> Element<'_, Message> {
                 .align_y(iced::Alignment::Center),
             );
         } else {
-            body = body.push(text("Not signed in.").size(11).style(theme::muted_text));
+            let message = if auth.session_state.as_deref() == Some("SESSION_EXPIRED") {
+                "Your session expired. Sign in again."
+            } else {
+                "Not signed in."
+            };
+
+            body = body.push(
+                row![
+                    text(message).size(11).style(theme::muted_text).width(Fill),
+                    button(text("Sign in").size(10))
+                        .on_press(Message::SignIn)
+                        .padding([5.0, 9.0])
+                        .style(button::primary),
+                ]
+                .spacing(8)
+                .align_y(iced::Alignment::Center),
+            );
         }
     } else if let Some(error) = &app.auth.error {
         body = body.push(
@@ -336,7 +341,7 @@ fn account_card(app: &App) -> Element<'_, Message> {
                 body = body.push(
                     row![
                         text(&license.product).size(11).width(Fill),
-                        badge(license.kind.clone(), theme::Tone::Neutral),
+                        badge(license.kind.as_str(), theme::Tone::Neutral),
                     ]
                     .spacing(8)
                     .align_y(iced::Alignment::Center),
@@ -357,7 +362,7 @@ fn account_card(app: &App) -> Element<'_, Message> {
 fn running_card(app: &App) -> Element<'_, Message> {
     let mut body = column![].spacing(8);
 
-    if app.running.loading {
+    if app.running.loading && app.running.data.is_none() {
         body = body.push(
             text("Checking running Editors…")
                 .size(10)
@@ -379,19 +384,11 @@ fn running_card(app: &App) -> Element<'_, Message> {
                 body = body.push(
                     container(
                         column![
-                            text(
-                                instance
-                                    .project_path
-                                    .clone()
-                                    .unwrap_or_else(|| "Unity Editor".to_string())
-                            )
-                            .size(11),
+                            text(instance.project_path.as_deref().unwrap_or("Unity Editor"))
+                                .size(11),
                             text(format!(
                                 "{} · pid {}",
-                                instance
-                                    .editor_version
-                                    .clone()
-                                    .unwrap_or_else(|| "unknown".to_string()),
+                                instance.editor_version.as_deref().unwrap_or("unknown"),
                                 instance
                                     .pid
                                     .map(|pid| pid.to_string())
@@ -410,7 +407,7 @@ fn running_card(app: &App) -> Element<'_, Message> {
         }
     } else if let Some(error) = &app.running.error {
         body = body.push(
-            text(error.message.clone())
+            text(error.message.as_str())
                 .size(10)
                 .style(theme::muted_text),
         );

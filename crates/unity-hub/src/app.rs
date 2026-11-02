@@ -1,8 +1,9 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::time::Duration;
 
-use iced::widget::{button, checkbox, column, container, pick_list, row, scrollable, space, text};
+use iced::widget::text::IntoFragment;
+use iced::widget::{button, checkbox, column, container, pick_list, row, scrollable, space};
 use iced::{Center, Element, Fill, Subscription, Task, Theme};
 use serde_json::Value;
 use unity_core::bootstrap;
@@ -14,8 +15,9 @@ use unity_core::models::{
 use unity_core::{CommandSpec, UnityCli, UnityError};
 
 use crate::jobs::{JobManager, JobStarted, JobState, StreamKind};
-use crate::settings::{self, AppSettings};
+use crate::settings::{self, AppSettings, TextSize};
 use crate::theme;
+use crate::ui::{self, text};
 use crate::util::{error_text, format_bytes, run_blocking, short_path};
 use crate::views;
 
@@ -105,6 +107,39 @@ impl<T> Loadable<T> {
     }
 }
 
+/// Lower-cased project fields, computed once per projects load so filtering
+/// does not allocate strings for every row on every keystroke.
+#[derive(Debug, Clone)]
+pub struct ProjectSearchKey {
+    title: String,
+    path: String,
+    version: String,
+}
+
+impl ProjectSearchKey {
+    fn new(project: &Project) -> Self {
+        Self {
+            title: project.title.to_lowercase(),
+            path: project.path.to_lowercase(),
+            version: project.version.to_lowercase(),
+        }
+    }
+
+    fn matches(&self, needle: &str) -> bool {
+        self.title.contains(needle) || self.path.contains(needle) || self.version.contains(needle)
+    }
+}
+
+fn project_search_keys(projects: &[Project]) -> Vec<ProjectSearchKey> {
+    projects.iter().map(ProjectSearchKey::new).collect()
+}
+
+fn project_matches_fallback(project: &Project, needle: &str) -> bool {
+    project.title.to_lowercase().contains(needle)
+        || project.path.to_lowercase().contains(needle)
+        || project.version.to_lowercase().contains(needle)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NoticeKind {
     Info,
@@ -163,8 +198,7 @@ pub struct ActiveJob {
     pub state: JobState,
     pub progress: f32,
     pub message: Option<String>,
-    pub logs: Vec<LogLine>,
-    pub result: Option<Value>,
+    pub logs: VecDeque<LogLine>,
     pub error: Option<UnityError>,
 }
 
@@ -177,8 +211,7 @@ impl ActiveJob {
             state: JobState::Running,
             progress: 0.0,
             message: None,
-            logs: Vec::new(),
-            result: None,
+            logs: VecDeque::new(),
             error: None,
         }
     }
@@ -204,6 +237,7 @@ pub struct App {
     pub changelog_loaded: bool,
     pub changelog_target: Option<String>,
     pub show_raw_changelog: bool,
+    pub raw_changelog: Loadable<String>,
     pub modules: Loadable<Vec<Module>>,
     pub dialog_modules: Loadable<Vec<Module>>,
     pub modal: Modal,
@@ -218,6 +252,7 @@ pub struct App {
     pub dialog_selected: BTreeSet<String>,
     pub dialog_eula: bool,
     pub project_search: String,
+    pub project_search_index: Vec<ProjectSearchKey>,
     pub upgrade_target: Option<String>,
     pub upgrade_confirmed: bool,
     pub app_settings: AppSettings,
@@ -225,6 +260,7 @@ pub struct App {
     pub config_dir: Option<String>,
     pub active_job: Option<ActiveJob>,
     pub notice: Option<Notice>,
+    pub boot_background_started: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -243,10 +279,13 @@ pub enum Message {
     DialogModulesLoaded(Result<Vec<Module>, UnityError>),
     PreviewLoaded(Result<Value, UnityError>),
     ChangelogLoaded(Result<ChangelogView, UnityError>),
+    RawChangelogLoaded(Result<String, UnityError>),
     PollJobs,
     DismissJob,
     CancelJob,
     DismissNotice,
+    SignIn,
+    TextSizeChanged(TextSize),
     OpenInstallCli,
     CliChannelChanged(String),
     CliConsentToggled(bool),
@@ -254,19 +293,21 @@ pub enum Message {
     UpdateCli,
     InstallVersionChanged(String),
     LoadModules,
-    ToggleModule(String, bool),
+    ToggleModule(usize, bool),
     SelectAllModules(bool),
     AcceptEulaToggled(bool),
     PreviewInstall,
     StartInstallEditor,
-    UseRelease(String),
-    OpenModules(Editor),
+    UseRelease(usize),
+    OpenModules(usize),
     CloseModal,
-    ToggleDialogModule(String, bool),
+    ToggleDialogModule(usize, bool),
     DialogEulaToggled(bool),
     StartInstallModules,
     ProjectSearchChanged(String),
-    OpenUpgrade(Project),
+    OpenProject(usize),
+    ProjectOpened(Result<(), UnityError>),
+    OpenUpgrade(usize),
     UpgradeTargetChanged(String),
     UpgradeConfirmed(bool),
     StartUpgrade,
@@ -305,6 +346,7 @@ impl App {
             changelog_loaded: false,
             changelog_target: None,
             show_raw_changelog: false,
+            raw_changelog: Loadable::default(),
             modules: Loadable::default(),
             dialog_modules: Loadable::default(),
             modal: Modal::None,
@@ -319,6 +361,7 @@ impl App {
             dialog_selected: BTreeSet::new(),
             dialog_eula: false,
             project_search: String::new(),
+            project_search_index: Vec::new(),
             upgrade_target: None,
             upgrade_confirmed: false,
             cli_path_input: app_settings.cli_path.clone().unwrap_or_default(),
@@ -326,17 +369,20 @@ impl App {
             config_dir: settings::config_dir().map(|path| path.display().to_string()),
             active_job: None,
             notice: None,
+            boot_background_started: false,
         };
 
-        let tasks = Task::batch(vec![
-            load_status(app.cli.clone()),
-            load_update(app.cli.clone()),
-            load_auth(app.cli.clone()),
-            load_license(app.cli.clone()),
-            load_running(app.cli.clone()),
-        ]);
+        // The status read is the only critical boot work. The rest of the
+        // Overview is loaded after it succeeds, one CLI process at a time.
+        (app, load_status(cli))
+    }
 
-        (app, tasks)
+    pub fn text_scale(&self) -> f32 {
+        self.app_settings.text_size().scale()
+    }
+
+    pub fn font_size(&self, base: f32) -> f32 {
+        base * self.text_scale()
     }
 
     pub fn theme(&self) -> Theme {
@@ -356,14 +402,27 @@ impl App {
             return Subscription::none();
         }
 
-        // iced 0.14 no longer exposes `time::every`; a tiny timer thread keeps
-        // the job event queue polled without depending on a specific executor.
-        Subscription::run(|| {
+        // iced 0.14 no longer exposes `time::every`. JobManager wakes this
+        // subscription only when it actually has an event, and the notifier
+        // coalesces bursts into at most one UI poll every 100 ms.
+        Subscription::run_with(self.jobs.clone(), |jobs| {
+            let (notifier, wakeups) = std::sync::mpsc::sync_channel(1);
+            jobs.set_notifier(notifier);
+
             let (sender, receiver) = futures::channel::mpsc::unbounded();
-            std::thread::spawn(move || loop {
-                std::thread::sleep(Duration::from_millis(120));
+            std::thread::spawn(move || {
+                // Drain anything that arrived before this subscription existed.
                 if sender.unbounded_send(Message::PollJobs).is_err() {
-                    break;
+                    return;
+                }
+
+                while wakeups.recv().is_ok() {
+                    std::thread::sleep(Duration::from_millis(100));
+                    while wakeups.try_recv().is_ok() {}
+
+                    if sender.unbounded_send(Message::PollJobs).is_err() {
+                        break;
+                    }
                 }
             });
             receiver
@@ -378,18 +437,33 @@ impl App {
             }
             Message::Refresh => self.refresh_page(),
             Message::StatusLoaded(result) => {
-                match result {
+                let installed = match result {
                     Ok(status) => {
                         if let Some(version) = &status.version {
                             if version.channel == "beta" || version.channel == "alpha" {
                                 self.cli_channel = version.channel.clone();
                             }
                         }
+                        let installed = status.installed;
                         self.cli_status.succeeded(status);
+                        installed
                     }
-                    Err(error) => self.cli_status.failed(error),
+                    Err(error) => {
+                        self.cli_status.failed(error);
+                        false
+                    }
+                };
+
+                if self.boot_background_started {
+                    Task::none()
+                } else {
+                    self.boot_background_started = true;
+                    if installed {
+                        self.load_overview_data(false)
+                    } else {
+                        Task::none()
+                    }
                 }
-                Task::none()
             }
             Message::UpdateLoaded(result) => {
                 match result {
@@ -438,7 +512,10 @@ impl App {
             }
             Message::ProjectsLoaded(result) => {
                 match result {
-                    Ok(projects) => self.projects.succeeded(projects),
+                    Ok(projects) => {
+                        self.project_search_index = project_search_keys(&projects);
+                        self.projects.succeeded(projects);
+                    }
                     Err(error) => self.projects.failed(error),
                 }
                 Task::none()
@@ -460,10 +537,16 @@ impl App {
             Message::PreviewLoaded(result) => {
                 self.preview_loading = false;
                 match result {
-                    Ok(value) => {
-                        self.preview_raw = Some(value.clone());
-                        self.preview = serde_json::from_value::<InstallPreview>(value).ok();
-                    }
+                    Ok(value) => match serde_json::from_value::<InstallPreview>(value.clone()) {
+                        Ok(preview) => {
+                            self.preview = Some(preview);
+                            self.preview_raw = None;
+                        }
+                        Err(_) => {
+                            self.preview = None;
+                            self.preview_raw = Some(value);
+                        }
+                    },
                     Err(error) => {
                         self.preview = None;
                         self.preview_raw = None;
@@ -476,6 +559,13 @@ impl App {
                 match result {
                     Ok(view) => self.changelog.succeeded(view),
                     Err(error) => self.changelog.failed(error),
+                }
+                Task::none()
+            }
+            Message::RawChangelogLoaded(result) => {
+                match result {
+                    Ok(markdown) => self.raw_changelog.succeeded(markdown),
+                    Err(error) => self.raw_changelog.failed(error),
                 }
                 Task::none()
             }
@@ -494,6 +584,29 @@ impl App {
             }
             Message::DismissNotice => {
                 self.notice = None;
+                Task::none()
+            }
+            Message::SignIn => {
+                match self.cli.auth_login_spec() {
+                    Ok(spec) => {
+                        self.start_job("auth-login", spec);
+                    }
+                    Err(error) => {
+                        self.notice = Some(Notice::error(error_text(&error)));
+                    }
+                }
+                Task::none()
+            }
+            Message::TextSizeChanged(size) => {
+                self.app_settings.text_scale_percent = size.percent();
+                match settings::save(&self.app_settings) {
+                    Ok(()) => {
+                        self.notice = Some(Notice::success(format!("Text size set to {size}.")));
+                    }
+                    Err(error) => {
+                        self.notice = Some(Notice::error(error_text(&error)));
+                    }
+                }
                 Task::none()
             }
             Message::OpenInstallCli => {
@@ -549,7 +662,16 @@ impl App {
                     Message::ModulesLoaded,
                 )
             }
-            Message::ToggleModule(id, value) => {
+            Message::ToggleModule(index, value) => {
+                let Some(id) = self
+                    .modules
+                    .data
+                    .as_ref()
+                    .and_then(|modules| modules.get(index))
+                    .map(|module| module.id.clone())
+                else {
+                    return Task::none();
+                };
                 if value {
                     self.selected_modules.insert(id);
                 } else {
@@ -607,7 +729,16 @@ impl App {
                 }
                 Task::none()
             }
-            Message::UseRelease(version) => {
+            Message::UseRelease(index) => {
+                let Some(version) = self
+                    .releases
+                    .data
+                    .as_ref()
+                    .and_then(|releases| releases.get(index))
+                    .map(|release| release.version.clone())
+                else {
+                    return Task::none();
+                };
                 self.install_version = version.clone();
                 self.modules.begin();
                 self.selected_modules.clear();
@@ -619,7 +750,16 @@ impl App {
                     Message::ModulesLoaded,
                 )
             }
-            Message::OpenModules(editor) => {
+            Message::OpenModules(index) => {
+                let Some(editor) = self
+                    .editors
+                    .data
+                    .as_ref()
+                    .and_then(|editors| editors.get(index))
+                    .cloned()
+                else {
+                    return Task::none();
+                };
                 self.dialog_modules.begin();
                 self.dialog_selected.clear();
                 self.dialog_eula = false;
@@ -637,7 +777,16 @@ impl App {
                 self.modal = Modal::None;
                 Task::none()
             }
-            Message::ToggleDialogModule(id, value) => {
+            Message::ToggleDialogModule(index, value) => {
+                let Some(id) = self
+                    .dialog_modules
+                    .data
+                    .as_ref()
+                    .and_then(|modules| modules.get(index))
+                    .map(|module| module.id.clone())
+                else {
+                    return Task::none();
+                };
                 if value {
                     self.dialog_selected.insert(id);
                 } else {
@@ -677,7 +826,47 @@ impl App {
                 self.project_search = value;
                 Task::none()
             }
-            Message::OpenUpgrade(project) => {
+            Message::OpenProject(index) => {
+                let Some(project) = self
+                    .projects
+                    .data
+                    .as_ref()
+                    .and_then(|projects| projects.get(index))
+                else {
+                    return Task::none();
+                };
+                let title = project.title.clone();
+                let path = project.path.clone();
+                self.notice = Some(Notice::info(format!("Opening {title}…")));
+                Task::perform(
+                    run_blocking({
+                        let cli = self.cli.clone();
+                        move || cli.open_project(&path)
+                    }),
+                    Message::ProjectOpened,
+                )
+            }
+            Message::ProjectOpened(result) => {
+                match result {
+                    Ok(()) => {
+                        self.notice = Some(Notice::success("Unity Editor is launching."));
+                    }
+                    Err(error) => {
+                        self.notice = Some(Notice::error(error_text(&error)));
+                    }
+                }
+                Task::none()
+            }
+            Message::OpenUpgrade(index) => {
+                let Some(project) = self
+                    .projects
+                    .data
+                    .as_ref()
+                    .and_then(|projects| projects.get(index))
+                    .cloned()
+                else {
+                    return Task::none();
+                };
                 self.upgrade_target = self.first_other_editor_version(&project.version);
                 self.upgrade_confirmed = false;
                 self.modal = Modal::UpgradeProject(project);
@@ -716,27 +905,39 @@ impl App {
             }
             Message::ChangelogTargetChanged(target) => {
                 self.changelog_target = Some(target);
+                self.raw_changelog = Loadable::default();
+                self.show_raw_changelog = false;
                 if self.changelog_loaded {
-                    self.changelog.begin();
-                    Task::perform(
-                        load_changelog_future(self.cli.clone(), self.changelog_target.clone()),
-                        Message::ChangelogLoaded,
-                    )
+                    self.load_changelog_page(true)
                 } else {
                     Task::none()
                 }
             }
             Message::LoadChangelog => {
                 self.changelog_loaded = true;
-                self.changelog.begin();
-                Task::perform(
-                    load_changelog_future(self.cli.clone(), self.changelog_target.clone()),
-                    Message::ChangelogLoaded,
-                )
+                self.raw_changelog = Loadable::default();
+                self.show_raw_changelog = false;
+                self.load_changelog_page(true)
             }
             Message::ToggleRawChangelog => {
-                self.show_raw_changelog = !self.show_raw_changelog;
-                Task::none()
+                if self.show_raw_changelog {
+                    self.show_raw_changelog = false;
+                    self.raw_changelog = Loadable::default();
+                    return Task::none();
+                }
+
+                self.show_raw_changelog = true;
+                if self.raw_changelog.loading || self.raw_changelog.data.is_some() {
+                    return Task::none();
+                }
+
+                self.raw_changelog.begin();
+                let cli = self.cli.clone();
+                let target = self.changelog_target.clone();
+                Task::perform(
+                    run_blocking(move || cli.changelog(target.as_deref()).map(|raw| raw.changelog)),
+                    Message::RawChangelogLoaded,
+                )
             }
             Message::CliPathChanged(value) => {
                 self.cli_path_input = value;
@@ -750,6 +951,7 @@ impl App {
                     } else {
                         Some(value.clone())
                     },
+                    text_scale_percent: self.app_settings.text_scale_percent,
                 };
                 if !value.is_empty() {
                     let path = PathBuf::from(&value);
@@ -767,7 +969,7 @@ impl App {
                             self.app_settings.cli_path.as_ref().map(PathBuf::from),
                         );
                         self.notice = Some(Notice::success("CLI path saved."));
-                        load_status(self.cli.clone())
+                        self.refresh_status()
                     }
                     Err(error) => {
                         self.notice = Some(Notice::error(error_text(&error)));
@@ -782,7 +984,7 @@ impl App {
                     Ok(()) => {
                         self.cli.set_override_path(None);
                         self.notice = Some(Notice::success("CLI path override cleared."));
-                        load_status(self.cli.clone())
+                        self.refresh_status()
                     }
                     Err(error) => {
                         self.notice = Some(Notice::error(error_text(&error)));
@@ -818,6 +1020,9 @@ impl App {
     }
 
     fn poll_jobs(&mut self) -> Task<Message> {
+        const MAX_LOG_LINES: usize = 300;
+        const MAX_LOG_CHARS: usize = 1000;
+
         let events = self.jobs.poll();
         let mut finished: Option<(String, JobState, Option<UnityError>)> = None;
 
@@ -829,18 +1034,26 @@ impl App {
                 continue;
             }
 
+            // Progress-only NDJSON lines are already reflected in the progress
+            // bar. Keeping them in the scrollback multiplies widget and string
+            // churn during installs for no new information.
+            let progress_only =
+                event.progress.is_some() && event.message.is_none() && event.result.is_none();
+
             if let Some(line) = event.line {
-                let text = if line.chars().count() > 4000 {
-                    line.chars().take(4000).collect::<String>() + "…"
-                } else {
-                    line
-                };
-                job.logs.push(LogLine {
-                    stream: event.stream.unwrap_or(StreamKind::Stdout),
-                    text,
-                });
-                if job.logs.len() > 600 {
-                    job.logs.drain(..100);
+                if !progress_only {
+                    let text = if line.chars().count() > MAX_LOG_CHARS {
+                        line.chars().take(MAX_LOG_CHARS).collect::<String>() + "…"
+                    } else {
+                        line
+                    };
+                    job.logs.push_back(LogLine {
+                        stream: event.stream.unwrap_or(StreamKind::Stdout),
+                        text,
+                    });
+                    while job.logs.len() > MAX_LOG_LINES {
+                        job.logs.pop_front();
+                    }
                 }
             }
             if let Some(progress) = event.progress {
@@ -852,7 +1065,6 @@ impl App {
             if event.state != JobState::Running {
                 job.state = event.state;
                 job.error = event.error.clone();
-                job.result = event.result.clone();
                 if event.state == JobState::Succeeded {
                     job.progress = 100.0;
                 }
@@ -881,50 +1093,109 @@ impl App {
         }
 
         match kind.as_str() {
-            "cli-install" | "cli-update" => Task::batch(vec![
-                load_status(self.cli.clone()),
-                load_update(self.cli.clone()),
-                load_auth(self.cli.clone()),
-                load_license(self.cli.clone()),
-                load_running(self.cli.clone()),
-            ]),
-            "editor-install" | "module-install" => Task::batch(vec![
-                load_editors(self.cli.clone()),
-                load_releases(self.cli.clone()),
-            ]),
-            "project-upgrade" => load_projects(self.cli.clone()),
+            "cli-install" | "cli-update" => {
+                Task::batch(vec![self.refresh_status(), self.load_overview_data(true)])
+            }
+            "editor-install" | "module-install" => self.load_editors_page(true),
+            "auth-login" => {
+                let mut tasks = Vec::new();
+                if !self.auth.loading {
+                    self.auth.begin();
+                    tasks.push(load_auth(self.cli.clone()));
+                }
+                if !self.license.loading {
+                    self.license.begin();
+                    tasks.push(load_license(self.cli.clone()));
+                }
+                Task::batch(tasks)
+            }
+            "project-upgrade" => self.load_projects_page(true),
             _ => Task::none(),
         }
     }
 
+    /// Starts missing Overview reads. `force` reloads data that is already
+    /// present, but never starts a second copy of a read that is in flight.
+    fn load_overview_data(&mut self, force: bool) -> Task<Message> {
+        let mut tasks = Vec::new();
+
+        if (force || self.update.data.is_none()) && !self.update.loading {
+            self.update.begin();
+            tasks.push(load_update(self.cli.clone()));
+        }
+        if (force || self.auth.data.is_none()) && !self.auth.loading {
+            self.auth.begin();
+            tasks.push(load_auth(self.cli.clone()));
+        }
+        if (force || self.license.data.is_none()) && !self.license.loading {
+            self.license.begin();
+            tasks.push(load_license(self.cli.clone()));
+        }
+        if (force || self.running.data.is_none()) && !self.running.loading {
+            self.running.begin();
+            tasks.push(load_running(self.cli.clone()));
+        }
+
+        Task::batch(tasks)
+    }
+
+    fn load_editors_page(&mut self, force: bool) -> Task<Message> {
+        let mut tasks = Vec::new();
+
+        if (force || self.editors.data.is_none()) && !self.editors.loading {
+            self.editors.begin();
+            tasks.push(load_editors(self.cli.clone()));
+        }
+        if (force || self.releases.data.is_none()) && !self.releases.loading {
+            self.releases.begin();
+            tasks.push(load_releases(self.cli.clone()));
+        }
+
+        Task::batch(tasks)
+    }
+
+    fn load_projects_page(&mut self, force: bool) -> Task<Message> {
+        let mut tasks = Vec::new();
+
+        if (force || self.projects.data.is_none()) && !self.projects.loading {
+            self.projects.begin();
+            tasks.push(load_projects(self.cli.clone()));
+        }
+        if (force || self.editors.data.is_none()) && !self.editors.loading {
+            self.editors.begin();
+            tasks.push(load_editors(self.cli.clone()));
+        }
+
+        Task::batch(tasks)
+    }
+
+    fn load_changelog_page(&mut self, force: bool) -> Task<Message> {
+        if !force && (self.changelog.loading || self.changelog_loaded) {
+            return Task::none();
+        }
+
+        self.changelog_loaded = true;
+        self.changelog.begin();
+        Task::perform(
+            load_changelog_future(self.cli.clone(), self.changelog_target.clone()),
+            Message::ChangelogLoaded,
+        )
+    }
+
+    fn refresh_status(&mut self) -> Task<Message> {
+        if self.cli_status.loading {
+            return Task::none();
+        }
+        self.cli_status.begin();
+        load_status(self.cli.clone())
+    }
+
     fn ensure_page(&mut self, page: Page) -> Task<Message> {
         match page {
-            Page::Editors if self.editors.data.is_none() => {
-                self.editors.begin();
-                self.releases.begin();
-                Task::batch(vec![
-                    load_editors(self.cli.clone()),
-                    load_releases(self.cli.clone()),
-                ])
-            }
-            Page::Projects if self.projects.data.is_none() => {
-                self.projects.begin();
-                if self.editors.data.is_none() {
-                    self.editors.begin();
-                }
-                Task::batch(vec![
-                    load_projects(self.cli.clone()),
-                    load_editors(self.cli.clone()),
-                ])
-            }
-            Page::Changelog if !self.changelog_loaded => {
-                self.changelog_loaded = true;
-                self.changelog.begin();
-                Task::perform(
-                    load_changelog_future(self.cli.clone(), self.changelog_target.clone()),
-                    Message::ChangelogLoaded,
-                )
-            }
+            Page::Overview => self.load_overview_data(false),
+            Page::Editors => self.load_editors_page(false),
+            Page::Projects => self.load_projects_page(false),
+            Page::Changelog => self.load_changelog_page(false),
             _ => Task::none(),
         }
     }
@@ -932,48 +1203,18 @@ impl App {
     fn refresh_page(&mut self) -> Task<Message> {
         match self.page {
             Page::Overview => {
-                self.cli_status.begin();
-                self.update.begin();
-                self.auth.begin();
-                self.license.begin();
-                self.running.begin();
-                Task::batch(vec![
-                    load_status(self.cli.clone()),
-                    load_update(self.cli.clone()),
-                    load_auth(self.cli.clone()),
-                    load_license(self.cli.clone()),
-                    load_running(self.cli.clone()),
-                ])
+                Task::batch(vec![self.refresh_status(), self.load_overview_data(true)])
             }
-            Page::Editors => {
-                self.editors.begin();
-                self.releases.begin();
-                Task::batch(vec![
-                    load_editors(self.cli.clone()),
-                    load_releases(self.cli.clone()),
-                ])
-            }
-            Page::Projects => {
-                self.projects.begin();
-                self.editors.begin();
-                Task::batch(vec![
-                    load_projects(self.cli.clone()),
-                    load_editors(self.cli.clone()),
-                ])
-            }
-            Page::Changelog if self.changelog_loaded => {
-                self.changelog.begin();
-                Task::perform(
-                    load_changelog_future(self.cli.clone(), self.changelog_target.clone()),
-                    Message::ChangelogLoaded,
-                )
-            }
-            Page::Changelog => Task::none(),
-            Page::Settings => load_status(self.cli.clone()),
+            Page::Editors => self.load_editors_page(true),
+            Page::Projects => self.load_projects_page(true),
+            Page::Changelog => self.load_changelog_page(true),
+            Page::Settings => self.refresh_status(),
         }
     }
 
     pub fn view<'a>(&'a self) -> Element<'a, Message> {
+        ui::set_scale(self.text_scale());
+
         // A full-screen modal screen instead of `stack!`: layering a scrollable
         // base under an opaque card miscomposites with iced's tiny-skia backend
         // (the base is drawn over the dialog), so modals get their own view.
@@ -1039,8 +1280,8 @@ impl App {
             .data
             .as_ref()
             .and_then(|status| status.version.as_ref())
-            .map(|version| version.version.clone())
-            .unwrap_or_else(|| "not detected".to_string());
+            .map(|version| version.version.as_str())
+            .unwrap_or("not detected");
         let installed = self
             .cli_status
             .data
@@ -1105,7 +1346,7 @@ impl App {
             .data
             .as_ref()
             .and_then(|status| status.version.as_ref())
-            .map(|version| version.version.clone());
+            .map(|version| version.version.as_str());
 
         let badge = if self.cli_status.loading && version.is_none() {
             container(text("checking CLI…").size(10).style(theme::muted_text))
@@ -1227,29 +1468,28 @@ impl App {
         );
 
         if !job.logs.is_empty() {
-            let lines = column(
-                job.logs
-                    .iter()
-                    .map(|line| {
-                        text(&line.text)
-                            .size(9)
-                            .font(iced::Font::MONOSPACE)
-                            .style(if line.stream == StreamKind::Stderr {
-                                theme::danger_text
-                            } else {
-                                theme::muted_text
-                            })
-                            .into()
-                    })
-                    .collect::<Vec<Element<'_, Message>>>(),
-            )
-            .spacing(2);
+            let mut log_text = String::new();
+            for line in &job.logs {
+                if line.stream == StreamKind::Stderr {
+                    log_text.push_str("! ");
+                }
+                log_text.push_str(&line.text);
+                log_text.push('\n');
+            }
 
             body = body.push(
-                container(scrollable(lines).height(150))
-                    .padding(8)
-                    .width(Fill)
-                    .style(theme::card),
+                container(
+                    scrollable(
+                        text(log_text)
+                            .size(9)
+                            .font(iced::Font::MONOSPACE)
+                            .style(theme::muted_text),
+                    )
+                    .height(150),
+                )
+                .padding(8)
+                .width(Fill)
+                .style(theme::card),
             );
         }
 
@@ -1296,6 +1536,7 @@ impl App {
                 .style(theme::muted_text),
             text("Release channel").size(10).style(theme::faint_text),
             pick_list(channels, Some(self.cli_channel.clone()), Message::CliChannelChanged)
+                .text_size(self.font_size(12.0))
                 .width(Fill),
             container(
                 column![
@@ -1317,7 +1558,7 @@ impl App {
                 .label("I understand this downloads and executes Unity's installer script from unity.com.")
                 .on_toggle(Message::CliConsentToggled)
                 .size(14)
-                .text_size(11),
+                .text_size(self.font_size(11.0)),
             row![
                 space().width(Fill),
                 button(text("Cancel").size(11))
@@ -1368,20 +1609,18 @@ impl App {
                 column(
                     modules
                         .iter()
-                        .filter(|module| !module.is_installed)
-                        .map(|module| {
+                        .enumerate()
+                        .filter(|(_, module)| !module.is_installed)
+                        .map(|(index, module)| {
                             checkbox(self.dialog_selected.contains(&module.id))
                                 .label(format!(
                                     "{}  ·  {}",
                                     module.name,
                                     format_bytes(module.download_bytes)
                                 ))
-                                .on_toggle({
-                                    let id = module.id.clone();
-                                    move |value| Message::ToggleDialogModule(id.clone(), value)
-                                })
+                                .on_toggle(move |value| Message::ToggleDialogModule(index, value))
                                 .size(14)
-                                .text_size(10)
+                                .text_size(self.font_size(10.0))
                                 .into()
                         })
                         .collect::<Vec<Element<'_, Message>>>(),
@@ -1409,7 +1648,7 @@ impl App {
                 .label("I accept the module license agreements (--accept-eula).")
                 .on_toggle(Message::DialogEulaToggled)
                 .size(14)
-                .text_size(11),
+                .text_size(self.font_size(11.0)),
             row![
                 space().width(Fill),
                 button(text("Cancel").size(11))
@@ -1460,6 +1699,7 @@ impl App {
                 self.upgrade_target.clone(),
                 Message::UpgradeTargetChanged,
             )
+            .text_size(self.font_size(12.0))
             .width(Fill)
             .placeholder("Select an installed Editor")
             .into()
@@ -1500,7 +1740,7 @@ impl App {
                 .label("I understand and want to upgrade this project now.")
                 .on_toggle(Message::UpgradeConfirmed)
                 .size(14)
-                .text_size(11),
+                .text_size(self.font_size(11.0)),
             row![
                 space().width(Fill),
                 button(text("Cancel").size(11))
@@ -1543,31 +1783,36 @@ impl App {
         self.upgrade_target = self.first_other_editor_version(&project.version);
     }
 
-    pub fn filtered_projects(&self) -> Vec<Project> {
+    pub fn filtered_projects(&self) -> Vec<(usize, &Project)> {
+        let Some(projects) = self.projects.data.as_ref() else {
+            return Vec::new();
+        };
         let needle = self.project_search.trim().to_lowercase();
-        let projects = self.projects.data.clone().unwrap_or_default();
+
         if needle.is_empty() {
-            return projects;
+            return projects.iter().enumerate().collect();
         }
 
         projects
-            .into_iter()
-            .filter(|project| {
-                project.title.to_lowercase().contains(&needle)
-                    || project.path.to_lowercase().contains(&needle)
-                    || project.version.to_lowercase().contains(&needle)
+            .iter()
+            .enumerate()
+            .filter(|(index, project)| {
+                self.project_search_index
+                    .get(*index)
+                    .map(|key| key.matches(&needle))
+                    .unwrap_or_else(|| project_matches_fallback(project, &needle))
             })
             .collect()
     }
 
-    pub fn installed_versions(&self) -> Vec<String> {
+    pub fn installed_versions(&self) -> HashSet<&str> {
         self.editors
             .data
             .as_ref()
             .map(|editors| {
                 editors
                     .iter()
-                    .map(|editor| editor.version.clone())
+                    .map(|editor| editor.version.as_str())
                     .collect()
             })
             .unwrap_or_default()
@@ -1642,7 +1887,7 @@ fn load_editors(cli: UnityCli) -> Task<Message> {
 
 fn load_releases(cli: UnityCli) -> Task<Message> {
     Task::perform(
-        run_blocking(move || cli.releases(40, 0, None)),
+        run_blocking(move || cli.releases(20, 0, None)),
         Message::ReleasesLoaded,
     )
 }
@@ -1665,7 +1910,7 @@ async fn load_changelog_future(
     .await
 }
 
-pub fn detail_column<'a>(label: &'a str, value: String) -> Element<'a, Message> {
+pub fn detail_column<'a>(label: &'a str, value: impl IntoFragment<'a>) -> Element<'a, Message> {
     column![
         text(label).size(9).style(theme::faint_text),
         text(value).size(11).style(theme::muted_text),
@@ -1675,9 +1920,53 @@ pub fn detail_column<'a>(label: &'a str, value: String) -> Element<'a, Message> 
     .into()
 }
 
-pub fn badge<'a>(label: impl Into<String>, tone: theme::Tone) -> Element<'a, Message> {
-    container(text(label.into()).size(10))
+pub fn badge<'a>(label: impl IntoFragment<'a>, tone: theme::Tone) -> Element<'a, Message> {
+    container(text(label).size(10))
         .padding([3.0, 8.0])
         .style(theme::badge(tone))
         .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn project(title: &str, path: &str, version: &str) -> Project {
+        Project {
+            title: title.to_string(),
+            path: path.to_string(),
+            version: version.to_string(),
+            ..Project::default()
+        }
+    }
+
+    #[test]
+    fn project_filter_uses_the_precomputed_index_and_returns_original_indices() {
+        let (mut app, _) = App::boot();
+        let projects = vec![
+            project("Alpha Game", "/games/alpha", "6000.1.1f1"),
+            project("Beta Tool", "/tools/beta", "6000.2.2f1"),
+            project("Gamma", "/games/gamma", "6000.3.3f1"),
+        ];
+        app.project_search_index = project_search_keys(&projects);
+        app.projects.data = Some(projects);
+        app.project_search = "beta".to_string();
+
+        let filtered = app.filtered_projects();
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].0, 1);
+        assert_eq!(filtered[0].1.title, "Beta Tool");
+    }
+
+    #[test]
+    fn empty_project_search_borrows_every_project() {
+        let (mut app, _) = App::boot();
+        let projects = vec![project("Alpha", "/alpha", "6000.1.1f1")];
+        app.project_search_index = project_search_keys(&projects);
+        app.projects.data = Some(projects);
+
+        let filtered = app.filtered_projects();
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].0, 0);
+    }
 }

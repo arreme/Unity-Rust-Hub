@@ -14,7 +14,8 @@ against its JSON envelope and treats the CLI as the source of truth for every mu
 ## Features
 
 - **CLI lifecycle** — detect the executable, show version/channel/platform, check for
-  updates, install the CLI with Unity's official per-platform script, and self-update.
+  updates, install the CLI with Unity's official per-platform script, self-update, and
+  sign in to Unity with `unity auth login`.
 - **Editors** — installed versions with modules, Linux/macOS/Windows architecture,
   default-Editor state, and the install location.
 - **Releases** — newest releases with LTS/beta/alpha and installed badges.
@@ -23,12 +24,13 @@ against its JSON envelope and treats the CLI as the source of truth for every mu
   explicitly, then install with live NDJSON progress and a cancellable raw log.
 - **Modules** — add modules to an installed Editor with `install-modules`.
 - **Projects** — every project in the Hub registry, its Editor version, render pipeline,
-  build target, cloud/VCS badges, and a guarded upgrade dialog.
-- **Changelog** — `unity changelog` rendered as sections, with a focused heuristic for
-  **possible breaking changes** and a raw Markdown view.
+  build target, cloud/VCS badges, an Open action, and a guarded upgrade dialog.
+- **Changelog** — `unity changelog` rendered as sections with readable bullet points and
+  a focused heuristic for **possible breaking changes**, plus a raw Markdown view.
 - **Provider-ready changelog** — `ChangelogProvider` is a trait; v1 uses
   `CliChangelogProvider`. A remote JSON/docs feed can be added without changing the UI.
-- **Settings** — explicit CLI path override with auto-detection fallback.
+- **Settings** — explicit CLI path override with auto-detection fallback and a persisted
+  text-size setting (100%, 110%, 125%, 150%).
 
 ## Stack
 
@@ -39,7 +41,7 @@ against its JSON envelope and treats the CLI as the source of truth for every mu
 | Core adapter | `crates/unity-core` (synchronous, UI-agnostic) |
 | UI crate | `crates/unity-hub` (Elm-style boot/update/view) |
 | CLI integration | `unity --format json` / `--format ndjson` |
-| Concurrency | thread + `futures::oneshot` for reads; `JobManager` threads for jobs |
+| Concurrency | one serialized CLI reader worker; `JobManager` threads for streaming jobs |
 
 ## Layout
 
@@ -50,7 +52,8 @@ crates/unity-hub/      iced application: state, views, theme, jobs, settings.
   src/app.rs           state, messages, update loop, shell, dialogs, job polling.
   src/jobs.rs          child processes, NDJSON progress, cancellation, event queue.
   src/views/           overview, editors, projects, changelog, settings.
-  assets/icon.png      window icon.
+  assets/icon.png      window icon source.
+  assets/icon-128.rgba raw RGBA window icon (no image-codec dependency).
 Icon/                  app icon source and hicolor PNG set (16–256 px).
 packaging/             desktop entry and Arch Linux PKGBUILD.
 scripts/               Arch/CachyOS install and uninstall helper.
@@ -183,10 +186,19 @@ Resolution order for the binary:
   layers over the scrollable shell miscomposite in iced's tiny-skia backend, and
   dialog drop shadows are omitted because tiny-skia repaints them over the card on
   partial redraws.
-- Job polling uses a channel-backed subscription on a 120 ms thread because iced 0.14
-  no longer exposes `iced::time::every`. The subscription only runs while a job is
-  active, so an idle window does not wake the update loop.
+- Job polling is event-driven: `JobManager` wakes a subscription only when it has
+  an event, coalescing bursts into one UI poll every 100 ms. An idle window does not
+  wake the update loop, and the queued event/log buffers are bounded.
+- CLI reads run through one serialized worker with a 30 s timeout, so only one
+  `unity` process is alive at a time. Every invocation sets `DO_NOT_TRACK=1`; this
+  avoids the CLI's analytics call, which otherwise adds roughly one second and extra
+  memory to most commands.
+- The window icon is compiled in as raw RGBA, which lets the build drop iced's
+  `image` feature and its image codecs. The custom theme means Linux theme detection
+  is not linked either.
 - The theme is a custom dark palette defined in `src/theme.rs`.
+- Settings persist the optional CLI path and a text-size preference (100–150%). The
+  scale applies to text only, so controls and layout geometry stay fixed.
 
 ## Safety
 
