@@ -1,7 +1,7 @@
 # Unity Rust Hub — iced design spec
 
 Date: 2026-10-31
-Branch: `feat/iced-native-ui`
+Branch: `main`
 Status: implemented
 
 ## Goal

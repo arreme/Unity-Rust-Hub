@@ -1,15 +1,15 @@
 # Unity Rust Hub — iced implementation plan
 
 Date: 2026-10-31
-Branch: `feat/iced-native-ui`
+Branch: `main`
 Base: previous desktop implementation
 Status: complete
 
 ## Objective
 
 Build a native iced 0.14 application while keeping the `unity-core` adapter and
-the full feature set. Work happens on a feature branch so the previous
-implementation remains available until the rewrite is verified.
+the full feature set. Work happened on a feature branch until the rewrite was
+verified, then the result was promoted to `main`.
 
 ## Phase 0 — Preserve the baseline
 
@@ -97,12 +97,12 @@ intended deletions and the new `crates/unity-hub/` tree.
 ## Phase 6 — Final verification
 
 - [x] `cargo fmt --all`
-- [x] `cargo test -p unity-core` (17 passed, 1 ignored live test)
+- [x] `cargo test -p unity-core` (22 passed, 1 ignored live test)
 - [x] `cargo clippy -p unity-hub --all-targets -- -D warnings`
 - [x] `cargo build --release -p unity-hub`
 - [x] `grep -R "eprintln\|UNITY_HUB_PAGE\|dbg!" crates` returns nothing.
 - [x] Smoke-test the release/debug binary against the real Unity CLI.
-- [ ] Commit the rewrite on `feat/iced-native-ui`.
+- [x] Commit the rewrite and merge it into `main`.
 
 ## Phase 7 — Arch/CachyOS packaging
 
