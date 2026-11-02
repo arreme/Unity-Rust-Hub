@@ -8,7 +8,7 @@ versions, and read release notes without keeping a terminal open.
 No webview, no Node toolchain, no HTML/JS layer. The release build is a single Rust
 binary that renders through iced's software renderer.
 
-The Unity CLI is in beta (`1.0.0-beta.14` at the time of writing). This app is built
+The Unity CLI is in beta (`1.0.0-beta.15` at the time of writing). This app is built
 against its JSON envelope and treats the CLI as the source of truth for every mutation.
 
 ## Features
@@ -162,6 +162,10 @@ Long operations use `--format ndjson` and are streamed by `JobManager` into the 
 job card. `projects upgrade` is run **without** `--wait` so the job ends when the
 upgrade does, not when the Editor is closed.
 
+CLI beta.15 removed the `list` subcommands and deprecated a few flags, so the adapter
+uses the current spellings: `unity projects --all`, `unity modules <version>`,
+`unity releases --offset`, and `unity install-modules --editor-version`.
+
 Resolution order for the binary:
 
 1. Path saved in Settings (`~/.config/unity-rust-hub/settings.json` on Linux).
@@ -175,8 +179,13 @@ Resolution order for the binary:
 - The shell is a fixed sidebar plus a scrollable content area and top bar.
 - Tables are built from header and row containers rather than `iced::widget::table`;
   the table widget caused a rendering stall with live data in iced 0.14.
+- Dialogs replace the shell with a full-screen view instead of using `stack!`. Stacked
+  layers over the scrollable shell miscomposite in iced's tiny-skia backend, and
+  dialog drop shadows are omitted because tiny-skia repaints them over the card on
+  partial redraws.
 - Job polling uses a channel-backed subscription on a 120 ms thread because iced 0.14
-  no longer exposes `iced::time::every`.
+  no longer exposes `iced::time::every`. The subscription only runs while a job is
+  active, so an idle window does not wake the update loop.
 - The theme is a custom dark palette defined in `src/theme.rs`.
 
 ## Safety
@@ -208,5 +217,3 @@ Resolution order for the binary:
 - Implementation plan: [`docs/superpowers/plans/2026-10-31-unity-rust-hub-iced.md`](docs/superpowers/plans/2026-10-31-unity-rust-hub-iced.md)
 - Unity CLI reference: <https://docs.unity.com/en-us/unity-cli/unity-cli-reference>
 - Unity CLI release notes: <https://docs.unity.com/en-us/unity-cli/release-notes>
-
-The previous Tauri/React implementation is preserved on `main` at commit `06c65da`.

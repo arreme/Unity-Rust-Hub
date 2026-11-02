@@ -45,7 +45,7 @@ fn reads_real_cli_data() {
     );
 
     let first_version = editors[0].version.clone();
-    let modules = cli.modules(&first_version).expect("unity modules list");
+    let modules = cli.modules(&first_version).expect("unity modules");
     println!("modules for {first_version}: {}", modules.len());
     assert!(!modules.is_empty());
 
@@ -62,7 +62,7 @@ fn reads_real_cli_data() {
     );
     assert!(!releases.is_empty());
 
-    let projects = cli.projects().expect("unity projects list");
+    let projects = cli.projects().expect("unity projects");
     println!("projects: {}", projects.len());
     for project in &projects {
         println!("  {} -> {}", project.title, project.version);

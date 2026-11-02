@@ -1,5 +1,3 @@
-use std::collections::BTreeMap;
-
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -154,58 +152,12 @@ pub fn parse_items<T: DeserializeOwned>(
         .collect()
 }
 
-/// Extracts human-readable warning strings. The CLI emits plain strings today,
-/// but objects with `message` are accepted for forward compatibility.
-pub fn warning_texts(envelope: &ValueEnvelope) -> Vec<String> {
-    envelope
-        .warnings
-        .iter()
-        .filter_map(|warning| match warning {
-            Value::String(text) => Some(text.clone()),
-            Value::Object(object) => object
-                .get("message")
-                .and_then(Value::as_str)
-                .map(str::to_string),
-            _ => None,
-        })
-        .collect()
-}
-
-pub fn notification_texts(envelope: &ValueEnvelope) -> Vec<String> {
-    envelope
-        .notifications
-        .iter()
-        .filter_map(|notification| match notification {
-            Value::String(text) => Some(text.clone()),
-            Value::Object(object) => object
-                .get("message")
-                .and_then(Value::as_str)
-                .map(str::to_string),
-            _ => None,
-        })
-        .collect()
-}
-
 fn preview(value: &str, limit: usize) -> String {
-    if value.len() <= limit {
+    if value.chars().count() <= limit {
         value.to_string()
     } else {
-        format!("{}…", &value[..limit])
+        format!("{}…", value.chars().take(limit).collect::<String>())
     }
-}
-
-/// Small helper for diagnostics UI: show CLI extensions sorted.
-pub fn extension_keys(object: &Map<String, Value>) -> BTreeMap<String, Value> {
-    object
-        .iter()
-        .filter(|(key, _)| {
-            !matches!(
-                key.as_str(),
-                "code" | "message" | "detail" | "remediation" | "raw"
-            )
-        })
-        .map(|(key, value)| (key.clone(), value.clone()))
-        .collect()
 }
 
 #[cfg(test)]
@@ -265,5 +217,11 @@ mod tests {
     fn empty_data_is_an_empty_list() {
         let editors: Vec<Editor> = parse_items(None, &[]).unwrap();
         assert!(editors.is_empty());
+    }
+
+    #[test]
+    fn preview_truncates_without_splitting_utf8() {
+        let text = "áéíóú".repeat(10);
+        assert_eq!(preview(&text, 5), "áéíóú…");
     }
 }

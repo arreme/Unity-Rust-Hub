@@ -2,29 +2,29 @@
 
 Date: 2026-10-31
 Branch: `feat/iced-native-ui`
-Base: `06c65da` on `main` (Tauri/React implementation, preserved)
+Base: previous desktop implementation
 Status: complete
 
 ## Objective
 
-Replace the Tauri/React UI with a native iced 0.14 application while keeping the
-`unity-core` adapter and the full feature set. Work happens only on the feature
-branch; `main` remains a working Tauri implementation.
+Build a native iced 0.14 application while keeping the `unity-core` adapter and
+the full feature set. Work happens on a feature branch so the previous
+implementation remains available until the rewrite is verified.
 
 ## Phase 0 — Preserve the baseline
 
-- [x] Commit the Tauri implementation on `main` as `06c65da`.
+- [x] Record the pre-rewrite baseline on `main` as `06c65da`.
 - [x] Create `feat/iced-native-ui` from that commit.
 - [x] Confirm a clean starting tree and branch name.
 
-Verification: `git log --oneline -1` showed the Tauri commit; `git branch --show-current`
+Verification: `git log --oneline -1` showed the baseline commit; `git branch --show-current`
 reported `feat/iced-native-ui`.
 
 ## Phase 1 — Workspace and UI-agnostic core
 
 - [x] Change the workspace to `crates/unity-core` + `crates/unity-hub`, with the hub
       as the default member.
-- [x] Remove the Tauri member from the workspace.
+- [x] Remove the old webview shell member from the workspace.
 - [x] Add `UnityCli::status()` so boot can resolve path, version, and install path in
       one typed value; a missing CLI is reported as `installed: false`, not a failure.
 - [x] Replace raw preview JSON with typed `InstallPreview` / `PreviewEditor` /
@@ -57,19 +57,18 @@ theme on Linux.
       retain the last result envelope, map failures to `UnityError`, and support
       cancellation by killing the child.
 - [x] Add a 120 ms channel-backed subscription to poll job events, because iced 0.14
-      no longer exposes `iced::time::every`.
+      no longer exposes `iced::time::every`. It only runs while a job is active.
 - [x] Serialize mutations: reject a second job while one is running.
 - [x] Refresh the affected dataset after each terminal job.
 
 Verification: the app stayed responsive while loading Editors, releases, projects, and
-changelog data from CLI `1.0.0-beta.14`; compiled with clippy `-D warnings`.
+changelog data from CLI `1.0.0-beta.15`; compiled with clippy `-D warnings`.
 
 ## Phase 4 — Shell and pages
 
 - [x] Shell: sidebar navigation, CLI status footer, top bar with version badge and
-      Refresh, notice banner, active job card, stacked modal overlay.
-- [x] Overview: CLI detail card, update action, account/license card, running Editors,
-      quick links.
+      Refresh, notice banner, active job card, full-screen dialog views.
+- [x] Overview: CLI detail card, update action, account/license card, running Editors.
 - [x] Editors: installed list, module management dialog, install form with catalog,
       select-all, EULA, dry-run preview, release list.
 - [x] Projects: filterable table, badges, guarded upgrade dialog restricted to
@@ -84,15 +83,15 @@ Verification: screenshots captured for Overview, Editors, Projects, Changelog, a
 Settings; each showed live data (3 Editors, 40 releases, 6 projects, 6 changelog
 sections / 344 entries / 22 breaking candidates).
 
-## Phase 5 — Replace the Tauri tree
+## Phase 5 — Remove the webview frontend
 
 - [x] Delete `src-tauri/`, `src/`, `public/`, `index.html`, `package.json`,
       `pnpm-lock.yaml`, Vite/TypeScript config, and `node_modules`.
-- [x] Copy a window icon into `crates/unity-hub/assets/` before removing the Tauri tree.
-- [x] Regenerate `Cargo.lock`; confirm it contains no Tauri dependencies.
+- [x] Copy a window icon into `crates/unity-hub/assets/` before removing the old frontend.
+- [x] Regenerate `Cargo.lock`; confirm it contains no webview dependencies.
 - [x] Replace the README and docs with iced instructions.
 
-Verification: `grep -c tauri Cargo.lock` returned 0; `git status` shows only the
+Verification: the lockfile contained no webview dependencies; `git status` shows only the
 intended deletions and the new `crates/unity-hub/` tree.
 
 ## Phase 6 — Final verification

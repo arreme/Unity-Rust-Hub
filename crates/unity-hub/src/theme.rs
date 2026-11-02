@@ -1,6 +1,6 @@
 use iced::theme::Palette;
 use iced::widget::{button, container, text};
-use iced::{Background, Border, Color, Shadow, Theme, Vector};
+use iced::{Background, Border, Color, Shadow, Theme};
 
 pub const BG: Color = Color::from_rgb8(0x0b, 0x0e, 0x13);
 pub const PANEL: Color = Color::from_rgb8(0x14, 0x19, 0x22);
@@ -105,6 +105,8 @@ pub fn hero(_theme: &Theme) -> container::Style {
 }
 
 pub fn modal(_theme: &Theme) -> container::Style {
+    // No drop shadow: tiny-skia's damage tracking repaints it over the card on
+    // partial redraws, which progressively darkens the dialog.
     container::Style {
         background: Some(Background::Color(PANEL_2)),
         border: Border {
@@ -112,24 +114,15 @@ pub fn modal(_theme: &Theme) -> container::Style {
             width: 1.0,
             radius: 16.0.into(),
         },
-        shadow: Shadow {
-            color: Color {
-                a: 0.55,
-                ..Color::BLACK
-            },
-            offset: Vector::new(0.0, 14.0),
-            blur_radius: 40.0,
-        },
         ..Default::default()
     }
 }
 
-pub fn backdrop(_theme: &Theme) -> container::Style {
+/// Full-window background for dialog screens. Dialogs replace the shell instead
+/// of being stacked over it; see `App::view`.
+pub fn modal_screen(_theme: &Theme) -> container::Style {
     container::Style {
-        background: Some(Background::Color(Color {
-            a: 0.72,
-            ..Color::BLACK
-        })),
+        background: Some(Background::Color(BG)),
         ..Default::default()
     }
 }

@@ -50,8 +50,7 @@ pub struct ChangelogRequest {
 /// Where release notes come from.
 ///
 /// v1 ships [`CliChangelogProvider`]. A future remote JSON provider can
-/// implement this trait and be selected without changing the Tauri command or
-/// the UI contract.
+/// implement this trait and be selected without changing the UI contract.
 pub trait ChangelogProvider: Send + Sync {
     fn source_id(&self) -> &'static str;
     fn source_detail(&self, request: &ChangelogRequest, raw: &RawChangelog) -> String;

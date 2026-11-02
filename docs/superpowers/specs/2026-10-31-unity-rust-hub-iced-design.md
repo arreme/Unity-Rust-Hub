@@ -6,7 +6,7 @@ Status: implemented
 
 ## Goal
 
-Replace the Tauri/React shell with a fully native Rust desktop application built on
+Replace the previous webview-based shell with a fully native Rust desktop application built on
 [iced 0.14](https://iced.rs). The Unity CLI adapter (`crates/unity-core`) stays the
 single source of truth for flags, envelopes, validation, and job specs. The rewrite
 changes only the presentation and process-driving layer.
@@ -79,7 +79,7 @@ docs/superpowers/      this spec and the implementation plan
 ```
 
 Dependency direction is one-way: `unity-hub` depends on `unity-core`; core knows
-nothing about iced, Tauri, or any UI toolkit.
+nothing about iced or any UI toolkit.
 
 ## Runtime architecture
 
@@ -132,8 +132,9 @@ upgrade).
 
 iced 0.14 no longer exposes `iced::time::every`, so the app runs a small thread that
 sends `Message::PollJobs` through a `futures::channel::mpsc` subscription every
-120 ms. This keeps polling independent of the executor implementation and replaces
-the former Tauri event channel.
+120 ms. The subscription is only active while a job is running, so the app does not
+wake its update loop when idle. This keeps polling independent of the executor
+implementation and replaces the former UI event channel.
 
 A single job may run at a time. Starting another is rejected with a notice so two
 installers cannot race the same CLI state.
@@ -159,7 +160,9 @@ error: `CliStatus { installed: false, .. }` drives the install callout.
 - Sidebar: brand, five navigation buttons, CLI connection footer.
 - Top bar: page title, CLI version badge (or "checking"/"CLI not found"), Refresh.
 - Content: notice banner, current page, active job card, all inside a scrollable.
-- Overlay: modals are layered with `stack!` over a dimmed backdrop.
+- Dialog: modals replace the shell with a full-screen view. `stack!` was removed
+  because layering the scrollable shell under a dialog miscomposites in iced's
+  tiny-skia backend (base widgets draw over the dialog).
 
 Navigation lazily loads data the first time a page needs it. Refresh re-fetches only
 the current page.
@@ -168,7 +171,7 @@ the current page.
 
 Hero strip, CLI card (version, channel, platform, runtime, executable, resolution
 source, install path, build date, update availability, update action), account card
-(sign-in state, license summary), running Editors, quick links.
+(sign-in state, license summary), and running Editors.
 
 ### Editors
 
@@ -212,8 +215,8 @@ directory and settings file, engine information, and UI/CLI versions.
 
 `theme.rs` defines the palette (near-black background, raised panels, warm orange
 accent, green/red/amber/blue/violet tones) and style functions for the sidebar,
-top bar, cards, hero, modal, backdrop, notice cards, badges, navigation buttons, and
-manual table rows. Text styles cover muted, faint, accent, success, warning, and
+top bar, cards, hero, modal, modal screen, notice cards, badges, navigation buttons,
+and manual table rows. Text styles cover muted, faint, accent, success, warning, and
 danger. Widgets use these functions instead of ad-hoc colors so the app stays
 visually consistent.
 
@@ -260,7 +263,7 @@ install; the uninstall method must match the install method.
   changelog) without mutating anything.
 - `cargo fmt --all`, `cargo test -p unity-core`, and
   `cargo clippy -p unity-hub --all-targets -- -D warnings` are the required checks.
-- Manual smoke tests launch the binary against CLI `1.0.0-beta.14` and verify each page
+- Manual smoke tests launch the binary against CLI `1.0.0-beta.15` and verify each page
   renders and loads live data.
 
 ## Decision record
@@ -279,6 +282,11 @@ install; the uninstall method must match the install method.
    interleaved writes and confusing refresh races.
 6. **Changelog provider trait retained.** The current provider shells out to the CLI;
    a remote JSON source can be substituted behind `ChangelogView::load`.
+7. **Dialog screens instead of `stack!`.** In iced 0.14 with tiny-skia, stacking a
+   dialog over the scrollable shell draws base widgets over the dialog and turns the
+   window progressively darker. Full-screen dialogs are deterministic and cheaper.
+   Dialog cards also skip drop shadows because tiny-skia's damage tracking repaints
+   the shadow over the card on partial redraws.
 
 ## Known limitations
 

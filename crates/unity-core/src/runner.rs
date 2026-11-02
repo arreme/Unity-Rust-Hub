@@ -227,32 +227,16 @@ impl UnityCli {
     pub fn releases(
         &self,
         limit: u32,
-        skip: u32,
+        offset: u32,
         stream: Option<&str>,
     ) -> Result<Vec<Release>, UnityError> {
-        if limit == 0 || limit > 200 {
-            return Err(UnityError::invalid_input(
-                "Release limit must be between 1 and 200.",
-            ));
-        }
-        let mut parts = svec(&["releases"]);
-        if let Some(stream) = stream.filter(|value| !value.trim().is_empty()) {
-            validate_release_stream(stream)?;
-            parts.extend(svec(&["--stream", stream]));
-        }
-        parts.extend(svec(&[
-            "--limit",
-            &limit.to_string(),
-            "--skip",
-            &skip.to_string(),
-        ]));
+        let parts = releases_parts(limit, offset, stream)?;
         let executed = self.run_args(&parts, "json")?;
         parse_items(executed.envelope.data.as_ref(), &[])
     }
 
     pub fn modules(&self, version: &str) -> Result<Vec<Module>, UnityError> {
-        validate_editor_version(version)?;
-        let parts = svec(&["modules", "list", version]);
+        let parts = modules_parts(version)?;
         let executed = self.run_args(&parts, "json")?;
         parse_items(executed.envelope.data.as_ref(), &[])
     }
@@ -265,8 +249,7 @@ impl UnityCli {
     }
 
     pub fn projects(&self) -> Result<Vec<Project>, UnityError> {
-        let parts = svec(&["projects", "list"]);
-        let executed = self.run_args(&parts, "json")?;
+        let executed = self.run_args(&projects_parts(), "json")?;
         parse_items(executed.envelope.data.as_ref(), &[])
     }
 
@@ -320,17 +303,7 @@ impl UnityCli {
         modules: &[String],
         accept_eula: bool,
     ) -> Result<CommandSpec, UnityError> {
-        validate_editor_version(version)?;
-        if modules.is_empty() {
-            return Err(UnityError::invalid_input(
-                "Select at least one module to install.",
-            ));
-        }
-        let mut parts = svec(&["install-modules", "-e", version, "--yes"]);
-        append_modules(&mut parts, modules)?;
-        if accept_eula {
-            parts.push("--accept-eula".to_string());
-        }
+        let parts = install_modules_parts(version, modules, accept_eula)?;
         self.spec(&parts, "ndjson")
     }
 
@@ -522,6 +495,58 @@ fn find_on_path(executable: &str) -> Option<PathBuf> {
         .find(|candidate| candidate.is_file())
 }
 
+fn releases_parts(
+    limit: u32,
+    offset: u32,
+    stream: Option<&str>,
+) -> Result<Vec<String>, UnityError> {
+    if limit == 0 || limit > 200 {
+        return Err(UnityError::invalid_input(
+            "Release limit must be between 1 and 200.",
+        ));
+    }
+    let mut parts = svec(&["releases"]);
+    if let Some(stream) = stream.filter(|value| !value.trim().is_empty()) {
+        validate_release_stream(stream)?;
+        parts.extend(svec(&["--stream", stream]));
+    }
+    parts.extend(svec(&[
+        "--limit",
+        &limit.to_string(),
+        "--offset",
+        &offset.to_string(),
+    ]));
+    Ok(parts)
+}
+
+fn modules_parts(version: &str) -> Result<Vec<String>, UnityError> {
+    validate_editor_version(version)?;
+    Ok(svec(&["modules", version]))
+}
+
+fn projects_parts() -> Vec<String> {
+    svec(&["projects", "--all"])
+}
+
+fn install_modules_parts(
+    version: &str,
+    modules: &[String],
+    accept_eula: bool,
+) -> Result<Vec<String>, UnityError> {
+    validate_editor_version(version)?;
+    if modules.is_empty() {
+        return Err(UnityError::invalid_input(
+            "Select at least one module to install.",
+        ));
+    }
+    let mut parts = svec(&["install-modules", "--editor-version", version, "--yes"]);
+    append_modules(&mut parts, modules)?;
+    if accept_eula {
+        parts.push("--accept-eula".to_string());
+    }
+    Ok(parts)
+}
+
 fn append_modules(parts: &mut Vec<String>, modules: &[String]) -> Result<(), UnityError> {
     for module in modules {
         validate_module_id(module)?;
@@ -556,8 +581,8 @@ mod tests {
 
     #[test]
     fn display_quotes_paths_with_spaces() {
-        let spec = CommandSpec::new("/home/me/unity", svec(&["projects", "list"]));
-        assert_eq!(spec.display(), "/home/me/unity projects list");
+        let spec = CommandSpec::new("/home/me/unity", svec(&["projects", "--all"]));
+        assert_eq!(spec.display(), "/home/me/unity projects --all");
 
         let spec = CommandSpec::new(
             "/home/me/unity",
@@ -571,5 +596,36 @@ mod tests {
         let mut parts = Vec::new();
         assert!(append_modules(&mut parts, &["--accept-eula".to_string()]).is_err());
         assert!(parts.is_empty());
+    }
+
+    #[test]
+    fn projects_uses_the_flat_listing_without_the_removed_list_subcommand() {
+        assert_eq!(projects_parts(), svec(&["projects", "--all"]));
+    }
+
+    #[test]
+    fn modules_uses_the_flat_listing_without_the_removed_list_subcommand() {
+        assert_eq!(
+            modules_parts("6000.6.6f1").unwrap(),
+            svec(&["modules", "6000.6.6f1"])
+        );
+    }
+
+    #[test]
+    fn releases_use_offset_instead_of_the_deprecated_skip_flag() {
+        let parts = releases_parts(40, 20, None).unwrap();
+        assert!(parts.contains(&"--offset".to_string()));
+        assert!(parts.contains(&"20".to_string()));
+        assert!(!parts.contains(&"--skip".to_string()));
+    }
+
+    #[test]
+    fn install_modules_uses_the_current_editor_version_flag() {
+        let parts =
+            install_modules_parts("6000.6.6f1", &["windows-il2cpp".to_string()], true).unwrap();
+        assert_eq!(parts[0], "install-modules");
+        assert_eq!(parts[1], "--editor-version");
+        assert_eq!(parts[2], "6000.6.6f1");
+        assert!(parts.contains(&"--accept-eula".to_string()));
     }
 }

@@ -1,4 +1,4 @@
-use iced::widget::{button, column, container, row, rule, scrollable, space, text};
+use iced::widget::{button, column, container, row, rule, space, text};
 use iced::{Element, Fill};
 
 use crate::app::{badge, detail_column, App, Message};
@@ -14,11 +14,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
             .align_y(iced::Alignment::Start),
     );
 
-    page = page.push(
-        row![running_card(app), quick_links()]
-            .spacing(16)
-            .align_y(iced::Alignment::Start),
-    );
+    page = page.push(running_card(app));
 
     page.into()
 }
@@ -421,53 +417,6 @@ fn running_card(app: &App) -> Element<'_, Message> {
     }
 
     card("Running Editors", body.into())
-}
-
-fn quick_links() -> Element<'static, Message> {
-    let link = |label: &'static str, detail: &'static str, page| {
-        button(
-            row![
-                column![
-                    text(label).size(12),
-                    text(detail).size(9).style(theme::faint_text),
-                ]
-                .spacing(1)
-                .width(Fill),
-                text("→").size(14).style(theme::accent_text),
-            ]
-            .align_y(iced::Alignment::Center),
-        )
-        .width(Fill)
-        .padding(9)
-        .style(button::text)
-        .on_press(Message::Navigate(page))
-    };
-
-    card(
-        "Jump back in",
-        scrollable(
-            column![
-                link(
-                    "Editors",
-                    "Installed versions, modules, releases",
-                    crate::app::Page::Editors
-                ),
-                link(
-                    "Projects",
-                    "Versions, upgrade targets, paths",
-                    crate::app::Page::Projects
-                ),
-                link(
-                    "Changelog",
-                    "Beta notes and breaking changes",
-                    crate::app::Page::Changelog
-                ),
-            ]
-            .spacing(3),
-        )
-        .height(180)
-        .into(),
-    )
 }
 
 fn card<'a>(title: &'a str, body: Element<'a, Message>) -> Element<'a, Message> {

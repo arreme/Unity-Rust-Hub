@@ -21,6 +21,9 @@ pub fn view(app: &App) -> Element<'_, Message> {
 fn projects_card(app: &App) -> Element<'_, Message> {
     let mut body = column![].spacing(10);
 
+    let filtered = app.filtered_projects();
+    let total = app.projects.data.as_ref().map(Vec::len).unwrap_or(0);
+
     body = body.push(
         row![
             text_input("Filter by name, path, or version", &app.project_search)
@@ -28,13 +31,9 @@ fn projects_card(app: &App) -> Element<'_, Message> {
                 .padding(8)
                 .size(11)
                 .width(Fill),
-            text(format!(
-                "{} of {}",
-                app.filtered_projects().len(),
-                app.projects.data.as_ref().map(Vec::len).unwrap_or(0)
-            ))
-            .size(9)
-            .style(theme::faint_text),
+            text(format!("{} of {}", filtered.len(), total))
+                .size(9)
+                .style(theme::faint_text),
         ]
         .spacing(10)
         .align_y(iced::Alignment::Center),
@@ -51,7 +50,6 @@ fn projects_card(app: &App) -> Element<'_, Message> {
                 "Add a project folder to the Unity Hub registry, then refresh.",
             ));
         } else {
-            let filtered = app.filtered_projects();
             if filtered.is_empty() {
                 body = body.push(empty("No matching projects", "Try a shorter search."));
             } else {

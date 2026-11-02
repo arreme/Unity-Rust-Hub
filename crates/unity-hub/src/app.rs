@@ -2,9 +2,7 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use iced::widget::{
-    button, checkbox, column, container, pick_list, row, scrollable, space, stack, text,
-};
+use iced::widget::{button, checkbox, column, container, pick_list, row, scrollable, space, text};
 use iced::{Center, Element, Fill, Subscription, Task, Theme};
 use serde_json::Value;
 use unity_core::bootstrap;
@@ -346,6 +344,18 @@ impl App {
     }
 
     pub fn subscription(&self) -> Subscription<Message> {
+        // Only wake the update loop while a job is streaming. An always-on
+        // timer keeps the app awake for no reason and prevents the process from
+        // idling when nothing is running.
+        if !self
+            .active_job
+            .as_ref()
+            .map(ActiveJob::is_running)
+            .unwrap_or(false)
+        {
+            return Subscription::none();
+        }
+
         // iced 0.14 no longer exposes `time::every`; a tiny timer thread keeps
         // the job event queue polled without depending on a specific executor.
         Subscription::run(|| {
@@ -411,7 +421,10 @@ impl App {
             }
             Message::EditorsLoaded(result) => {
                 match result {
-                    Ok(editors) => self.editors.succeeded(editors),
+                    Ok(editors) => {
+                        self.editors.succeeded(editors);
+                        self.ensure_upgrade_target();
+                    }
                     Err(error) => self.editors.failed(error),
                 }
                 Task::none()
@@ -665,19 +678,7 @@ impl App {
                 Task::none()
             }
             Message::OpenUpgrade(project) => {
-                let installed = self
-                    .editors
-                    .data
-                    .as_ref()
-                    .map(|editors| {
-                        editors
-                            .iter()
-                            .map(|editor| editor.version.clone())
-                            .filter(|version| version != &project.version)
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default();
-                self.upgrade_target = installed.first().cloned();
+                self.upgrade_target = self.first_other_editor_version(&project.version);
                 self.upgrade_confirmed = false;
                 self.modal = Modal::UpgradeProject(project);
                 Task::none()
@@ -973,11 +974,12 @@ impl App {
     }
 
     pub fn view<'a>(&'a self) -> Element<'a, Message> {
-        let base = self.shell();
-        if let Some(overlay) = self.modal_view() {
-            stack![base, overlay].width(Fill).height(Fill).into()
-        } else {
-            base
+        // A full-screen modal screen instead of `stack!`: layering a scrollable
+        // base under an opaque card miscomposites with iced's tiny-skia backend
+        // (the base is drawn over the dialog), so modals get their own view.
+        match self.modal_view() {
+            Some(modal) => modal,
+            None => self.shell(),
         }
     }
 
@@ -1270,7 +1272,7 @@ impl App {
             container(iced::widget::center(card))
                 .width(Fill)
                 .height(Fill)
-                .style(theme::backdrop)
+                .style(theme::modal_screen)
                 .into(),
         )
     }
@@ -1441,13 +1443,14 @@ impl App {
             .map(|editors| {
                 editors
                     .iter()
+                    .filter(|editor| editor.version != project.version)
                     .map(|editor| editor.version.clone())
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
 
         let picker: Element<'_, Message> = if versions.is_empty() {
-            text("No Editors installed. Install one on the Editors page first.")
+            text("No other Editor version is installed. Install one on the Editors page first.")
                 .size(11)
                 .style(theme::warning_text)
                 .into()
@@ -1458,6 +1461,7 @@ impl App {
                 Message::UpgradeTargetChanged,
             )
             .width(Fill)
+            .placeholder("Select an installed Editor")
             .into()
         };
 
@@ -1517,6 +1521,26 @@ impl App {
             .padding(22)
             .style(theme::modal)
             .into()
+    }
+
+    fn first_other_editor_version(&self, current: &str) -> Option<String> {
+        self.editors
+            .data
+            .as_ref()?
+            .iter()
+            .map(|editor| editor.version.clone())
+            .find(|version| version != current)
+    }
+
+    /// Fills the target when Editors finish loading after the dialog opened.
+    fn ensure_upgrade_target(&mut self) {
+        if self.upgrade_target.is_some() {
+            return;
+        }
+        let Modal::UpgradeProject(project) = &self.modal else {
+            return;
+        };
+        self.upgrade_target = self.first_other_editor_version(&project.version);
     }
 
     pub fn filtered_projects(&self) -> Vec<Project> {

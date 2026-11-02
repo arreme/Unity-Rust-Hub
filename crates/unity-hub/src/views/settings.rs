@@ -99,7 +99,7 @@ fn app_data_card(app: &App) -> Element<'_, Message> {
 fn about_card(app: &App) -> Element<'_, Message> {
     let body = column![
         row![
-            detail_column("App version", "0.1.0".to_string()),
+            detail_column("App version", env!("CARGO_PKG_VERSION").to_string()),
             detail_column("UI", "iced 0.14 · native Rust".to_string()),
             detail_column("CLI adapter", "unity-core".to_string()),
         ]
