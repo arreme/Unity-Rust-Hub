@@ -25,6 +25,12 @@ pub fn scaled_pixels(base: f32) -> f32 {
     base * scale()
 }
 
+/// Scales a widget text size (for `pick_list`, `checkbox`, ...) by the current
+/// text-size preference.
+pub fn font_size(base: f32) -> f32 {
+    scaled_pixels(base)
+}
+
 /// A `text` widget whose explicit size is multiplied by the current text scale.
 ///
 /// The app sets the scale before building the view, so every existing

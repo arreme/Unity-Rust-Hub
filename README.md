@@ -38,31 +38,46 @@ against its JSON envelope and treats the CLI as the source of truth for every mu
 |---|---|
 | Desktop shell | iced 0.14 (winit window, no webview) |
 | Renderer | `tiny-skia` software rendering (`wgpu` disabled) |
-| Core adapter | `crates/unity-core` (synchronous, UI-agnostic) |
-| UI crate | `crates/unity-hub` (Elm-style boot/update/view) |
+| CLI adapter | `crates/unity-core` (synchronous, UI-agnostic) |
+| Contract | `crates/unity-hub-model` (view models + `UiAction`, no dependencies) |
+| Controller | `crates/unity-hub-controller` (state, jobs, settings, view-model mapping) |
+| Visuals | `crates/unity-hub-ui` (design tokens, components, pages, modals, gallery) |
+| Composition root | `crates/unity-hub` (iced application, window, runtime wiring) |
 | CLI integration | `unity --format json` / `--format ndjson` |
 | Concurrency | one serialized CLI reader worker; `JobManager` threads for streaming jobs |
 
 ## Layout
 
 ```
-crates/unity-core/     Pure CLI adapter: command specs, envelope parsing, DTOs,
-                       errors, validation, changelog parsing/provider, bootstrap.
-crates/unity-hub/      iced application: state, views, theme, jobs, settings.
-  src/app.rs           state, messages, update loop, shell, dialogs, job polling.
-  src/jobs.rs          child processes, NDJSON progress, cancellation, event queue.
-  src/views/           overview, editors, projects, changelog, settings.
-  assets/icon.png      window icon source.
-  assets/icon-128.rgba raw RGBA window icon (no image-codec dependency).
-Icon/                  app icon source and hicolor PNG set (16–256 px).
-packaging/             desktop entry and Arch Linux PKGBUILD.
-scripts/               Arch/CachyOS install and uninstall helper.
-docs/superpowers/      iced design spec and implementation plan.
+crates/unity-core/          Pure CLI adapter: command specs, envelope parsing, DTOs,
+                            errors, validation, changelog parsing/provider, bootstrap.
+crates/unity-hub-model/     Stable presentation contract: view models, UiAction,
+                            LoadState, semantic tones. No dependencies.
+crates/unity-hub-controller/ State, messages, update loop, jobs, settings, and
+  src/app.rs                domain/CLI → view-model mapping.
+  src/jobs.rs               Child processes, NDJSON progress, cancellation.
+  src/settings.rs           Persisted CLI path and text-size preference.
+  src/util.rs               Serialized reader worker and display formatting.
+crates/unity-hub-ui/        Visual layer; depends only on unity-hub-model + iced.
+  src/tokens.rs             Figma-mappable palette, spacing, radii, type tokens.
+  src/theme.rs              iced theme/styles built from tokens.
+  src/components.rs         Shared cards, badges, tables, headers.
+  src/pages/                overview, editors, projects, changelog, settings.
+  src/shell.rs              Sidebar, top bar, notice and job cards.
+  src/modals.rs             Full-screen dialog screens.
+  src/fixtures.rs           Deterministic content for every screen/state.
+  src/bin/gallery.rs        CLI-free design gallery.
+crates/unity-hub/           Thin binary: iced application, window/icon, runtime.
+Icon/                       app icon source and hicolor PNG set (16–256 px).
+packaging/                  desktop entry and Arch Linux PKGBUILD.
+scripts/                    Arch/CachyOS install and uninstall helper.
+docs/design/                Designer/controller contract and token mapping.
+docs/superpowers/           Historical iced design spec and implementation plan.
 ```
 
-The UI never builds a `unity` argument or parses a raw CLI envelope. `unity-core` owns
-flag construction, process spawning, JSON normalization, exit-code mapping, and job
-specs.
+Dependency direction is one-way: `unity-hub-ui` → `unity-hub-model`; the controller
+depends on `unity-core` and the model; the binary wires controller + UI together. The
+UI never builds a `unity` argument, parses a raw CLI envelope, or sees a `UnityError`.
 
 ## Prerequisites
 
@@ -138,9 +153,15 @@ install.
 
 ```bash
 cargo fmt --all --check
-cargo test -p unity-core           # parser/validation/heuristics unit tests
-cargo clippy -p unity-hub --all-targets -- -D warnings
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
 cargo build --release -p unity-hub
+```
+
+Render every screen/modal/job fixture without a Unity CLI:
+
+```bash
+cargo run -p unity-hub-ui --bin unity-hub-design-gallery
 ```
 
 Live adapter smoke test against a real Unity CLI (ignored by default):
@@ -152,6 +173,22 @@ cargo test -p unity-core --test live -- --ignored --nocapture
 This only reads data: version, Editors, modules, releases, projects, auth/license,
 update check, and the installed changelog. It never installs an Editor, changes a
 project, or updates the CLI.
+
+## Performance
+
+Measured on a Linux/Wayland release build (1280×840, Unity CLI `1.0.0-beta.15`):
+
+| Metric | Result |
+|---|---|
+| Idle app RSS | 23–27 MB |
+| Peak RSS during boot (app + CLI child) | ~55–60 MB |
+| Concurrent Unity CLI processes | 1 |
+| Time until the last boot read finishes | ~0.4 s |
+| Idle CPU | 0% |
+
+The app serializes reads through one worker, sets `DO_NOT_TRACK=1` on every CLI
+invocation, and gives each read a 30-second deadline. `scripts/measure-memory.py`
+reproduces the RSS measurement on Linux.
 
 ## How the CLI is invoked
 
@@ -196,7 +233,12 @@ Resolution order for the binary:
 - The window icon is compiled in as raw RGBA, which lets the build drop iced's
   `image` feature and its image codecs. The custom theme means Linux theme detection
   is not linked either.
-- The theme is a custom dark palette defined in `src/theme.rs`.
+- The theme is built from the design tokens in
+  `crates/unity-hub-ui/src/tokens.rs`; component styles live in
+  `crates/unity-hub-ui/src/theme.rs`.
+- `cargo run -p unity-hub-ui --bin unity-hub-design-gallery` renders every page,
+  modal, job state, loading state, and error state with fixture view models, so
+  design review does not depend on a Unity installation.
 - Settings persist the optional CLI path and a text-size preference (100–150%). The
   scale applies to text only, so controls and layout geometry stay fixed.
 
@@ -225,7 +267,9 @@ Resolution order for the binary:
 
 ## Documentation
 
-- Design spec: [`docs/superpowers/specs/2026-10-31-unity-rust-hub-iced-design.md`](docs/superpowers/specs/2026-10-31-unity-rust-hub-iced-design.md)
-- Implementation plan: [`docs/superpowers/plans/2026-10-31-unity-rust-hub-iced.md`](docs/superpowers/plans/2026-10-31-unity-rust-hub-iced.md)
+- Designer/controller contract: [`docs/design/contract.md`](docs/design/contract.md)
+- Design tokens: [`docs/design/tokens.md`](docs/design/tokens.md)
+- Historical iced design spec: [`docs/superpowers/specs/2026-10-31-unity-rust-hub-iced-design.md`](docs/superpowers/specs/2026-10-31-unity-rust-hub-iced-design.md)
+- Historical implementation plan: [`docs/superpowers/plans/2026-10-31-unity-rust-hub-iced.md`](docs/superpowers/plans/2026-10-31-unity-rust-hub-iced.md)
 - Unity CLI reference: <https://docs.unity.com/en-us/unity-cli/unity-cli-reference>
 - Unity CLI release notes: <https://docs.unity.com/en-us/unity-cli/release-notes>

@@ -2,9 +2,7 @@ use std::collections::{BTreeSet, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::time::Duration;
 
-use iced::widget::text::IntoFragment;
-use iced::widget::{button, checkbox, column, container, pick_list, row, scrollable, space};
-use iced::{Center, Element, Fill, Subscription, Task, Theme};
+use iced::{Subscription, Task};
 use serde_json::Value;
 use unity_core::bootstrap;
 use unity_core::changelog::{ChangelogRequest, ChangelogView, CliChangelogProvider};
@@ -13,52 +11,20 @@ use unity_core::models::{
     Release, RunningEditors,
 };
 use unity_core::{CommandSpec, UnityCli, UnityError};
+use unity_hub_model::{
+    AccountCardVm, AuthVm, BadgeVm, BreakingChangeVm, ChangelogDataVm, ChangelogSectionVm,
+    ChangelogVm, CliCardVm, CliConnectionVm, CliDetailsVm, EditorModulesVm, EditorRowVm, EditorsVm,
+    InstallCliVm, InstallEditorVm, InstallPreviewVm, JobLogVm, JobPhase, JobVm, LicenseRowVm,
+    LicenseVm, LoadState, ModalVm, ModuleOptionVm, NoticeVm, OverviewVm, Page, PageVm,
+    ProjectRowVm, ProjectsVm, ReleaseRowVm, RunningEditorVm, SectionKind, SettingsVm, ShellVm,
+    TextScaleOptionVm, Tone, UiAction, UiError, UpdateVm, UpgradeProjectVm, ViewModel,
+};
 
 use crate::jobs::{JobManager, JobStarted, JobState, StreamKind};
 use crate::settings::{self, AppSettings, TextSize};
-use crate::theme;
-use crate::ui::{self, text};
-use crate::util::{error_text, format_bytes, run_blocking, short_path};
-use crate::views;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Page {
-    Overview,
-    Editors,
-    Projects,
-    Changelog,
-    Settings,
-}
-
-impl Page {
-    pub const ALL: [Page; 5] = [
-        Page::Overview,
-        Page::Editors,
-        Page::Projects,
-        Page::Changelog,
-        Page::Settings,
-    ];
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Page::Overview => "Overview",
-            Page::Editors => "Editors",
-            Page::Projects => "Projects",
-            Page::Changelog => "Changelog",
-            Page::Settings => "Settings",
-        }
-    }
-
-    pub fn title(self) -> &'static str {
-        match self {
-            Page::Overview => "Overview",
-            Page::Editors => "Editors & modules",
-            Page::Projects => "Projects",
-            Page::Changelog => "Changelog & breaking changes",
-            Page::Settings => "Settings",
-        }
-    }
-}
+use crate::util::{
+    error_text, format_bytes, format_epoch_millis, format_iso, run_blocking, short_path,
+};
 
 #[derive(Debug, Clone)]
 pub enum Modal {
@@ -174,14 +140,6 @@ impl Notice {
             text: text.into(),
         }
     }
-
-    pub fn tone(&self) -> theme::Tone {
-        match self.kind {
-            NoticeKind::Info => theme::Tone::Blue,
-            NoticeKind::Success => theme::Tone::Green,
-            NoticeKind::Error => theme::Tone::Red,
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -265,8 +223,47 @@ pub struct App {
 
 #[derive(Debug, Clone)]
 pub enum Message {
+    // UI intents. These are constructed from `UiAction` so the visual layer
+    // never needs to know about the controller's async message variants.
     Navigate(Page),
     Refresh,
+    DismissJob,
+    CancelJob,
+    DismissNotice,
+    SignIn,
+    TextSizeChanged(TextSize),
+    OpenInstallCli,
+    CliChannelChanged(String),
+    CliConsentToggled(bool),
+    InstallCli,
+    UpdateCli,
+    InstallVersionChanged(String),
+    LoadModules,
+    ToggleModule(String, bool),
+    SelectAllModules(bool),
+    AcceptEulaToggled(bool),
+    PreviewInstall,
+    StartInstallEditor,
+    UseRelease(String),
+    OpenModules(String),
+    CloseModal,
+    ToggleDialogModule(String, bool),
+    DialogEulaToggled(bool),
+    StartInstallModules,
+    ProjectSearchChanged(String),
+    OpenProject(String),
+    OpenUpgrade(String),
+    UpgradeTargetChanged(String),
+    UpgradeConfirmed(bool),
+    StartUpgrade,
+    ChangelogTargetChanged(String),
+    LoadChangelog,
+    ToggleRawChangelog,
+    CliPathChanged(String),
+    SaveCliPath,
+    ClearCliPath,
+
+    // Async results and job lifecycle stay controller-private.
     StatusLoaded(Result<CliStatus, UnityError>),
     UpdateLoaded(Result<CliUpdateInfo, UnityError>),
     AuthLoaded(Result<AuthStatus, UnityError>),
@@ -281,42 +278,53 @@ pub enum Message {
     ChangelogLoaded(Result<ChangelogView, UnityError>),
     RawChangelogLoaded(Result<String, UnityError>),
     PollJobs,
-    DismissJob,
-    CancelJob,
-    DismissNotice,
-    SignIn,
-    TextSizeChanged(TextSize),
-    OpenInstallCli,
-    CliChannelChanged(String),
-    CliConsentToggled(bool),
-    InstallCli,
-    UpdateCli,
-    InstallVersionChanged(String),
-    LoadModules,
-    ToggleModule(usize, bool),
-    SelectAllModules(bool),
-    AcceptEulaToggled(bool),
-    PreviewInstall,
-    StartInstallEditor,
-    UseRelease(usize),
-    OpenModules(usize),
-    CloseModal,
-    ToggleDialogModule(usize, bool),
-    DialogEulaToggled(bool),
-    StartInstallModules,
-    ProjectSearchChanged(String),
-    OpenProject(usize),
     ProjectOpened(Result<(), UnityError>),
-    OpenUpgrade(usize),
-    UpgradeTargetChanged(String),
-    UpgradeConfirmed(bool),
-    StartUpgrade,
-    ChangelogTargetChanged(String),
-    LoadChangelog,
-    ToggleRawChangelog,
-    CliPathChanged(String),
-    SaveCliPath,
-    ClearCliPath,
+}
+
+impl From<UiAction> for Message {
+    fn from(action: UiAction) -> Self {
+        match action {
+            UiAction::Navigate(page) => Self::Navigate(page),
+            UiAction::Refresh => Self::Refresh,
+            UiAction::DismissNotice => Self::DismissNotice,
+            UiAction::DismissJob => Self::DismissJob,
+            UiAction::CancelJob => Self::CancelJob,
+            UiAction::SignIn => Self::SignIn,
+            UiAction::TextScaleChanged(percent) => {
+                Self::TextSizeChanged(TextSize::from_percent(percent))
+            }
+            UiAction::OpenInstallCli => Self::OpenInstallCli,
+            UiAction::CliChannelChanged(channel) => Self::CliChannelChanged(channel),
+            UiAction::CliConsentToggled(value) => Self::CliConsentToggled(value),
+            UiAction::InstallCli => Self::InstallCli,
+            UiAction::UpdateCli => Self::UpdateCli,
+            UiAction::InstallVersionChanged(version) => Self::InstallVersionChanged(version),
+            UiAction::LoadModules => Self::LoadModules,
+            UiAction::ToggleModule(id, value) => Self::ToggleModule(id, value),
+            UiAction::SelectAllModules(value) => Self::SelectAllModules(value),
+            UiAction::AcceptEulaToggled(value) => Self::AcceptEulaToggled(value),
+            UiAction::PreviewInstall => Self::PreviewInstall,
+            UiAction::StartInstallEditor => Self::StartInstallEditor,
+            UiAction::UseRelease(version) => Self::UseRelease(version),
+            UiAction::OpenEditorModules(version) => Self::OpenModules(version),
+            UiAction::CloseModal => Self::CloseModal,
+            UiAction::ToggleDialogModule(id, value) => Self::ToggleDialogModule(id, value),
+            UiAction::DialogEulaToggled(value) => Self::DialogEulaToggled(value),
+            UiAction::StartInstallModules => Self::StartInstallModules,
+            UiAction::ProjectSearchChanged(value) => Self::ProjectSearchChanged(value),
+            UiAction::OpenProject(path) => Self::OpenProject(path),
+            UiAction::OpenProjectUpgrade(path) => Self::OpenUpgrade(path),
+            UiAction::UpgradeTargetChanged(version) => Self::UpgradeTargetChanged(version),
+            UiAction::UpgradeConfirmed(value) => Self::UpgradeConfirmed(value),
+            UiAction::StartUpgrade => Self::StartUpgrade,
+            UiAction::ChangelogTargetChanged(target) => Self::ChangelogTargetChanged(target),
+            UiAction::LoadChangelog => Self::LoadChangelog,
+            UiAction::ToggleRawChangelog => Self::ToggleRawChangelog,
+            UiAction::CliPathChanged(value) => Self::CliPathChanged(value),
+            UiAction::SaveCliPath => Self::SaveCliPath,
+            UiAction::ClearCliPath => Self::ClearCliPath,
+        }
+    }
 }
 
 impl App {
@@ -379,14 +387,6 @@ impl App {
 
     pub fn text_scale(&self) -> f32 {
         self.app_settings.text_size().scale()
-    }
-
-    pub fn font_size(&self, base: f32) -> f32 {
-        base * self.text_scale()
-    }
-
-    pub fn theme(&self) -> Theme {
-        theme::app_theme()
     }
 
     pub fn subscription(&self) -> Subscription<Message> {
@@ -662,16 +662,7 @@ impl App {
                     Message::ModulesLoaded,
                 )
             }
-            Message::ToggleModule(index, value) => {
-                let Some(id) = self
-                    .modules
-                    .data
-                    .as_ref()
-                    .and_then(|modules| modules.get(index))
-                    .map(|module| module.id.clone())
-                else {
-                    return Task::none();
-                };
+            Message::ToggleModule(id, value) => {
                 if value {
                     self.selected_modules.insert(id);
                 } else {
@@ -729,16 +720,7 @@ impl App {
                 }
                 Task::none()
             }
-            Message::UseRelease(index) => {
-                let Some(version) = self
-                    .releases
-                    .data
-                    .as_ref()
-                    .and_then(|releases| releases.get(index))
-                    .map(|release| release.version.clone())
-                else {
-                    return Task::none();
-                };
+            Message::UseRelease(version) => {
                 self.install_version = version.clone();
                 self.modules.begin();
                 self.selected_modules.clear();
@@ -750,12 +732,12 @@ impl App {
                     Message::ModulesLoaded,
                 )
             }
-            Message::OpenModules(index) => {
+            Message::OpenModules(version) => {
                 let Some(editor) = self
                     .editors
                     .data
                     .as_ref()
-                    .and_then(|editors| editors.get(index))
+                    .and_then(|editors| editors.iter().find(|editor| editor.version == version))
                     .cloned()
                 else {
                     return Task::none();
@@ -777,16 +759,7 @@ impl App {
                 self.modal = Modal::None;
                 Task::none()
             }
-            Message::ToggleDialogModule(index, value) => {
-                let Some(id) = self
-                    .dialog_modules
-                    .data
-                    .as_ref()
-                    .and_then(|modules| modules.get(index))
-                    .map(|module| module.id.clone())
-                else {
-                    return Task::none();
-                };
+            Message::ToggleDialogModule(id, value) => {
                 if value {
                     self.dialog_selected.insert(id);
                 } else {
@@ -826,17 +799,16 @@ impl App {
                 self.project_search = value;
                 Task::none()
             }
-            Message::OpenProject(index) => {
+            Message::OpenProject(path) => {
                 let Some(project) = self
                     .projects
                     .data
                     .as_ref()
-                    .and_then(|projects| projects.get(index))
+                    .and_then(|projects| projects.iter().find(|project| project.path == path))
                 else {
                     return Task::none();
                 };
                 let title = project.title.clone();
-                let path = project.path.clone();
                 self.notice = Some(Notice::info(format!("Opening {title}…")));
                 Task::perform(
                     run_blocking({
@@ -857,12 +829,12 @@ impl App {
                 }
                 Task::none()
             }
-            Message::OpenUpgrade(index) => {
+            Message::OpenUpgrade(path) => {
                 let Some(project) = self
                     .projects
                     .data
                     .as_ref()
-                    .and_then(|projects| projects.get(index))
+                    .and_then(|projects| projects.iter().find(|project| project.path == path))
                     .cloned()
                 else {
                     return Task::none();
@@ -1212,555 +1184,444 @@ impl App {
         }
     }
 
-    pub fn view<'a>(&'a self) -> Element<'a, Message> {
-        ui::set_scale(self.text_scale());
-
-        // A full-screen modal screen instead of `stack!`: layering a scrollable
-        // base under an opaque card miscomposites with iced's tiny-skia backend
-        // (the base is drawn over the dialog), so modals get their own view.
-        match self.modal_view() {
-            Some(modal) => modal,
-            None => self.shell(),
-        }
-    }
-
-    fn shell<'a>(&'a self) -> Element<'a, Message> {
-        let mut content = column![].spacing(16).width(Fill).padding(24);
-
-        if let Some(notice) = &self.notice {
-            content = content.push(self.notice_view(notice));
-        }
-
-        content = content.push(self.page_view());
-
-        if let Some(job) = &self.active_job {
-            content = content.push(self.job_view(job));
-        }
-
-        let main = column![self.topbar(), scrollable(content).height(Fill).width(Fill)]
-            .width(Fill)
-            .height(Fill);
-
-        row![self.sidebar(), main].height(Fill).width(Fill).into()
-    }
-
-    fn sidebar<'a>(&'a self) -> Element<'a, Message> {
-        let brand = row![
-            container(text("U").size(18).style(theme::accent_text))
-                .width(38)
-                .height(38)
-                .center(38)
-                .style(theme::badge(theme::Tone::Accent)),
-            column![
-                text("Unity Rust Hub").size(14),
-                text("Native · iced").size(10).style(theme::faint_text),
-            ]
-            .spacing(1),
-        ]
-        .spacing(10)
-        .align_y(Center);
-
-        let nav = column(
-            Page::ALL
-                .iter()
-                .map(|page| {
-                    button(text(page.label()).size(13))
-                        .width(Fill)
-                        .padding([10.0, 12.0])
-                        .style(theme::nav_button(self.page == *page))
-                        .on_press(Message::Navigate(*page))
-                        .into()
-                })
-                .collect::<Vec<Element<'_, Message>>>(),
-        )
-        .spacing(4);
-
-        let cli_version = self
-            .cli_status
-            .data
-            .as_ref()
-            .and_then(|status| status.version.as_ref())
-            .map(|version| version.version.as_str())
-            .unwrap_or("not detected");
-        let installed = self
-            .cli_status
-            .data
-            .as_ref()
-            .map(|status| status.installed)
-            .unwrap_or(false);
-        let loading = self.cli_status.loading && self.cli_status.data.is_none();
-
-        let footer = container(
-            column![
-                row![
-                    container(text("●").size(9).style(if installed {
-                        theme::success_text
-                    } else if loading {
-                        theme::muted_text
-                    } else {
-                        theme::danger_text
-                    })),
-                    text(if loading {
-                        "Checking CLI…"
-                    } else if installed {
-                        "CLI connected"
-                    } else {
-                        "CLI missing"
-                    })
-                    .size(11),
-                ]
-                .spacing(6)
-                .align_y(Center),
-                text(cli_version).size(10).style(theme::faint_text),
-            ]
-            .spacing(3),
-        )
-        .padding(10)
-        .width(Fill)
-        .style(theme::card);
-
-        container(
-            column![
-                brand,
-                nav,
-                space().height(Fill),
-                footer,
-                text("All mutations go through the official Unity CLI.")
-                    .size(9)
-                    .style(theme::faint_text),
-            ]
-            .spacing(18)
-            .width(Fill)
-            .height(Fill),
-        )
-        .width(232)
-        .height(Fill)
-        .padding(16)
-        .style(theme::sidebar)
-        .into()
-    }
-
-    fn topbar<'a>(&'a self) -> Element<'a, Message> {
-        let version = self
-            .cli_status
-            .data
-            .as_ref()
-            .and_then(|status| status.version.as_ref())
-            .map(|version| version.version.as_str());
-
-        let badge = if self.cli_status.loading && version.is_none() {
-            container(text("checking CLI…").size(10).style(theme::muted_text))
-                .padding([3.0, 8.0])
-                .style(theme::badge(theme::Tone::Neutral))
-        } else {
-            match version {
-                Some(version) => container(text(version).size(10).style(theme::success_text))
-                    .padding([3.0, 8.0])
-                    .style(theme::badge(theme::Tone::Green)),
-                None => container(text("CLI not found").size(10).style(theme::danger_text))
-                    .padding([3.0, 8.0])
-                    .style(theme::badge(theme::Tone::Red)),
-            }
-        };
-
-        container(
-            row![
-                text(self.page.title()).size(17),
-                space().width(Fill),
-                badge,
-                button(text("Refresh").size(11))
-                    .on_press(Message::Refresh)
-                    .padding([6.0, 10.0])
-                    .style(button::text),
-            ]
-            .spacing(10)
-            .align_y(Center),
-        )
-        .padding([12.0, 22.0])
-        .width(Fill)
-        .style(theme::topbar)
-        .into()
-    }
-
-    fn page_view<'a>(&'a self) -> Element<'a, Message> {
-        match self.page {
-            Page::Overview => views::overview::view(self),
-            Page::Editors => views::editors::view(self),
-            Page::Projects => views::projects::view(self),
-            Page::Changelog => views::changelog::view(self),
-            Page::Settings => views::settings::view(self),
-        }
-    }
-
-    fn notice_view<'a>(&'a self, notice: &'a Notice) -> Element<'a, Message> {
-        container(
-            row![
-                text(&notice.text).size(12).width(Fill),
-                button(text("Dismiss").size(10))
-                    .on_press(Message::DismissNotice)
-                    .padding([4.0, 8.0])
-                    .style(button::text),
-            ]
-            .spacing(10)
-            .align_y(Center),
-        )
-        .padding([10.0, 12.0])
-        .width(Fill)
-        .style(theme::notice_card(notice.tone()))
-        .into()
-    }
-
-    fn job_view<'a>(&'a self, job: &'a ActiveJob) -> Element<'a, Message> {
-        let state_badge = match job.state {
-            JobState::Succeeded => theme::Tone::Green,
-            JobState::Failed => theme::Tone::Red,
-            JobState::Cancelled => theme::Tone::Amber,
-            JobState::Running => theme::Tone::Blue,
-        };
-
-        let header = row![
-            text(&job.kind).size(13).width(Fill),
-            container(text(job.state.label()).size(10))
-                .padding([3.0, 8.0])
-                .style(theme::badge(state_badge)),
-            if job.is_running() {
-                Element::from(
-                    button(text("Cancel").size(10))
-                        .on_press(Message::CancelJob)
-                        .padding([4.0, 8.0])
-                        .style(button::danger),
-                )
-            } else {
-                Element::from(
-                    button(text("Dismiss").size(10))
-                        .on_press(Message::DismissJob)
-                        .padding([4.0, 8.0])
-                        .style(button::text),
-                )
+    /// Builds the presentation snapshot consumed by the UI crate. The UI never
+    /// sees controller state, CLI types, or errors.
+    pub fn view_model(&self) -> ViewModel {
+        ViewModel {
+            shell: self.shell_vm(),
+            page: match self.page {
+                Page::Overview => PageVm::Overview(self.overview_vm()),
+                Page::Editors => PageVm::Editors(self.editors_vm()),
+                Page::Projects => PageVm::Projects(self.projects_vm()),
+                Page::Changelog => PageVm::Changelog(self.changelog_vm()),
+                Page::Settings => PageVm::Settings(self.settings_vm()),
             },
-        ]
-        .spacing(8)
-        .align_y(Center);
+            modal: self.modal_vm(),
+            text_scale: self.text_scale(),
+        }
+    }
 
-        let mut body = column![header].spacing(8);
+    fn shell_vm(&self) -> ShellVm {
+        let cli = match &self.cli_status.data {
+            Some(status) if status.installed => CliConnectionVm::Connected {
+                version: status
+                    .version
+                    .as_ref()
+                    .map(|version| version.version.clone()),
+            },
+            Some(_) => CliConnectionVm::Missing,
+            None if self.cli_status.loading => CliConnectionVm::Checking,
+            None => CliConnectionVm::Missing,
+        };
 
-        if job.is_running() {
-            body = body.push(
-                iced::widget::progress_bar(0.0..=100.0, job.progress)
-                    .length(Fill)
-                    .girth(6.0),
-            );
+        ShellVm {
+            page: self.page,
+            cli,
+            notice: self.notice.as_ref().map(|notice| NoticeVm {
+                tone: notice_tone(notice.kind),
+                text: notice.text.clone(),
+            }),
+            job: self.active_job.as_ref().map(job_vm),
+        }
+    }
+
+    fn overview_vm(&self) -> OverviewVm {
+        OverviewVm {
+            cli: self.cli_card_vm(),
+            update: load_state(&self.update, |update| UpdateVm {
+                available: update.update_available,
+                current_version: update.current_version.clone(),
+                latest_version: update.latest_version.clone(),
+            }),
+            account: AccountCardVm {
+                auth: self.auth_vm(),
+                license: self.license_vm(),
+            },
+            running: load_state(&self.running, |running| {
+                running
+                    .instances
+                    .iter()
+                    .map(|instance| RunningEditorVm {
+                        project_path: instance
+                            .project_path
+                            .clone()
+                            .unwrap_or_else(|| "Unity Editor".to_string()),
+                        editor_version: instance
+                            .editor_version
+                            .clone()
+                            .unwrap_or_else(|| "unknown".to_string()),
+                        pid: instance
+                            .pid
+                            .map(|pid| pid.to_string())
+                            .unwrap_or_else(|| "—".to_string()),
+                    })
+                    .collect()
+            }),
+        }
+    }
+
+    fn cli_card_vm(&self) -> CliCardVm {
+        if self.cli_status.loading && self.cli_status.data.is_none() {
+            return CliCardVm::Loading;
         }
 
-        if let Some(message) = &job.message {
-            body = body.push(text(message).size(11).style(theme::muted_text));
-        }
-
-        if let Some(error) = &job.error {
-            body = body.push(text(error_text(error)).size(11).style(theme::danger_text));
-        }
-
-        body = body.push(
-            text(&job.command)
-                .size(9)
-                .font(iced::Font::MONOSPACE)
-                .style(theme::faint_text),
-        );
-
-        if !job.logs.is_empty() {
-            let mut log_text = String::new();
-            for line in &job.logs {
-                if line.stream == StreamKind::Stderr {
-                    log_text.push_str("! ");
-                }
-                log_text.push_str(&line.text);
-                log_text.push('\n');
+        if let Some(status) = &self.cli_status.data {
+            if !status.installed {
+                return CliCardVm::Missing;
             }
 
-            body = body.push(
-                container(
-                    scrollable(
-                        text(log_text)
-                            .size(9)
-                            .font(iced::Font::MONOSPACE)
-                            .style(theme::muted_text),
-                    )
-                    .height(150),
-                )
-                .padding(8)
-                .width(Fill)
-                .style(theme::card),
-            );
+            let version = status.version.as_ref();
+            return CliCardVm::Ready {
+                details: CliDetailsVm {
+                    version: version
+                        .map(|version| version.version.clone())
+                        .unwrap_or_else(|| "unknown".to_string()),
+                    channel: version
+                        .map(|version| version.channel.clone())
+                        .unwrap_or_else(|| "unknown".to_string()),
+                    platform: format!(
+                        "{} {}",
+                        version
+                            .map(|version| version.platform.as_str())
+                            .unwrap_or("—"),
+                        version.map(|version| version.arch.as_str()).unwrap_or("")
+                    ),
+                    runtime: version
+                        .and_then(|version| version.runtime.clone())
+                        .unwrap_or_else(|| "—".to_string()),
+                    executable: status.path.clone().unwrap_or_else(|| "—".to_string()),
+                    resolved_via: status
+                        .path_source
+                        .clone()
+                        .unwrap_or_else(|| "—".to_string()),
+                    install_path: status
+                        .install_path
+                        .clone()
+                        .unwrap_or_else(|| "—".to_string()),
+                    build_date: format_iso(
+                        version.and_then(|version| version.build_date.as_deref()),
+                    ),
+                },
+                error: self.cli_status.error.as_ref().map(ui_error),
+            };
         }
 
-        container(body)
-            .padding(14)
-            .width(Fill)
-            .style(theme::job_card)
-            .into()
+        match &self.cli_status.error {
+            Some(error) => CliCardVm::Failed(ui_error(error)),
+            None => CliCardVm::Idle,
+        }
     }
 
-    fn modal_view<'a>(&'a self) -> Option<Element<'a, Message>> {
-        let card = match &self.modal {
-            Modal::None => return None,
-            Modal::InstallCli => self.install_cli_modal(),
-            Modal::EditorModules(editor) => self.editor_modules_modal(editor),
-            Modal::UpgradeProject(project) => self.upgrade_modal(project),
+    fn auth_vm(&self) -> AuthVm {
+        if self.auth.loading && self.auth.data.is_none() {
+            return AuthVm::Loading;
+        }
+
+        if let Some(auth) = &self.auth.data {
+            if auth.logged_in {
+                return AuthVm::SignedIn {
+                    name: auth
+                        .user
+                        .as_ref()
+                        .map(|user| user.name.clone())
+                        .unwrap_or_else(|| "Signed in".to_string()),
+                    email: auth
+                        .user
+                        .as_ref()
+                        .map(|user| user.email.clone())
+                        .unwrap_or_default(),
+                };
+            }
+            return AuthVm::SignedOut {
+                expired: auth.session_state.as_deref() == Some("SESSION_EXPIRED"),
+            };
+        }
+
+        match &self.auth.error {
+            Some(error) => AuthVm::Failed(ui_error(error)),
+            None => AuthVm::Idle,
+        }
+    }
+
+    fn license_vm(&self) -> LicenseVm {
+        if let Some(license) = &self.license.data {
+            return LicenseVm::Ready {
+                active: license.active,
+                licenses: license
+                    .licenses
+                    .iter()
+                    .take(4)
+                    .map(|license| LicenseRowVm {
+                        product: license.product.clone(),
+                        kind: license.kind.clone(),
+                    })
+                    .collect(),
+            };
+        }
+
+        match &self.license.error {
+            Some(error) => LicenseVm::Failed(ui_error(error)),
+            None => LicenseVm::Idle,
+        }
+    }
+
+    fn editors_vm(&self) -> EditorsVm {
+        let installed = self.installed_versions();
+
+        EditorsVm {
+            installed: load_state(&self.editors, |editors| {
+                editors.iter().map(editor_row_vm).collect()
+            }),
+            install: self.install_editor_vm(),
+            releases: load_state(&self.releases, |releases| {
+                releases
+                    .iter()
+                    .map(|release| ReleaseRowVm {
+                        version: release.version.clone(),
+                        stream: release.stream.clone(),
+                        stream_tone: stream_tone(&release.stream),
+                        installed: release.installed
+                            || installed.contains(release.version.as_str()),
+                    })
+                    .collect()
+            }),
+        }
+    }
+
+    fn install_editor_vm(&self) -> InstallEditorVm {
+        let modules = load_state(&self.modules, |modules| {
+            modules
+                .iter()
+                .filter(|module| !module.is_installed)
+                .map(|module| ModuleOptionVm {
+                    id: module.id.clone(),
+                    label: format!(
+                        "{}  ·  {}",
+                        module.name,
+                        format_bytes(module.download_bytes)
+                    ),
+                    selected: self.selected_modules.contains(&module.id),
+                })
+                .collect()
+        });
+
+        let available_count = self
+            .modules
+            .data
+            .as_ref()
+            .map(|modules| modules.iter().filter(|module| !module.is_installed).count())
+            .unwrap_or(0);
+
+        let preview = self.preview.as_ref().map(|preview| InstallPreviewVm {
+            editor_version: preview
+                .editor
+                .as_ref()
+                .map(|editor| editor.version.clone())
+                .unwrap_or_else(|| self.install_version.clone()),
+            download_size: format_bytes(
+                preview.total_download_size.max(
+                    preview
+                        .editor
+                        .as_ref()
+                        .map(|editor| editor.download_size)
+                        .unwrap_or(0),
+                ),
+            ),
+            module_count: preview.modules.len().max(self.selected_modules.len()),
+        });
+
+        InstallEditorVm {
+            version_input: self.install_version.clone(),
+            modules,
+            available_count,
+            accept_eula: self.accept_eula,
+            can_install: self.selected_modules.is_empty() || self.accept_eula,
+            preview,
+            preview_note: self
+                .preview_raw
+                .as_ref()
+                .map(|raw| format!("Dry-run returned: {raw}")),
+            preview_loading: self.preview_loading,
+        }
+    }
+
+    fn projects_vm(&self) -> ProjectsVm {
+        let filtered = self.filtered_projects();
+        let total_count = self.projects.data.as_ref().map(Vec::len).unwrap_or(0);
+        let visible_count = filtered.len();
+        let installed = self.installed_versions();
+        let rows = || {
+            filtered
+                .iter()
+                .map(|(_, project)| project_row_vm(project, &installed))
+                .collect::<Vec<_>>()
         };
 
-        Some(
-            container(iced::widget::center(card))
-                .width(Fill)
-                .height(Fill)
-                .style(theme::modal_screen)
-                .into(),
-        )
-    }
-
-    fn install_cli_modal<'a>(&'a self) -> Element<'a, Message> {
-        let channels = vec![
-            "stable".to_string(),
-            "beta".to_string(),
-            "alpha".to_string(),
-        ];
-        let command = if cfg!(target_os = "windows") {
-            "irm https://unity.com/install.ps1 | iex"
+        let projects = if self.projects.loading {
+            LoadState::Loading {
+                previous: self.projects.data.as_ref().map(|_| rows()),
+            }
+        } else if let Some(error) = &self.projects.error {
+            LoadState::Failed {
+                error: ui_error(error),
+                previous: self.projects.data.as_ref().map(|_| rows()),
+            }
+        } else if self.projects.data.is_some() {
+            LoadState::Ready(rows())
         } else {
-            "curl -fsSL https://unity.com/install.sh | bash"
+            LoadState::Idle
         };
 
-        let content = column![
-            text("Install the Unity CLI").size(20),
-            text("Unity's official installer runs locally. This app does not bundle the CLI.")
-                .size(11)
-                .style(theme::muted_text),
-            text("Release channel").size(10).style(theme::faint_text),
-            pick_list(channels, Some(self.cli_channel.clone()), Message::CliChannelChanged)
-                .text_size(self.font_size(12.0))
-                .width(Fill),
-            container(
-                column![
-                    text("Official installer command").size(10).style(theme::faint_text),
-                    text(command)
-                        .size(11)
-                        .font(iced::Font::MONOSPACE)
-                        .style(theme::accent_text),
-                    text("UNITY_CLI_SKIP_SETUP=1 is set so the installer does not block on its interactive setup.")
-                        .size(9)
-                        .style(theme::faint_text),
-                ]
-                .spacing(5),
-            )
-            .padding(10)
-            .width(Fill)
-            .style(theme::card),
-            checkbox(self.cli_consent)
-                .label("I understand this downloads and executes Unity's installer script from unity.com.")
-                .on_toggle(Message::CliConsentToggled)
-                .size(14)
-                .text_size(self.font_size(11.0)),
-            row![
-                space().width(Fill),
-                button(text("Cancel").size(11))
-                    .on_press(Message::CloseModal)
-                    .padding([7.0, 12.0])
-                    .style(button::text),
-                button(text("Run installer").size(11))
-                    .on_press_maybe(self.cli_consent.then_some(Message::InstallCli))
-                    .padding([7.0, 12.0])
-                    .style(button::primary),
-            ]
-            .spacing(8),
-        ]
-        .spacing(12);
-
-        container(content)
-            .width(560)
-            .padding(22)
-            .style(theme::modal)
-            .into()
+        ProjectsVm {
+            search: self.project_search.clone(),
+            total_count,
+            visible_count,
+            projects,
+        }
     }
 
-    fn editor_modules_modal<'a>(&'a self, editor: &'a Editor) -> Element<'a, Message> {
-        let installed: Element<'_, Message> = if editor.module_names.is_empty() {
-            text("No modules reported.")
-                .size(10)
-                .style(theme::faint_text)
-                .into()
+    fn changelog_vm(&self) -> ChangelogVm {
+        ChangelogVm {
+            loaded: self.changelog_loaded,
+            versions: self.changelog_versions(),
+            selected_target: self.changelog_target.clone(),
+            show_raw: self.show_raw_changelog,
+            state: load_state(&self.changelog, |view| ChangelogDataVm {
+                version: view.version.clone(),
+                source: view.source.clone(),
+                source_detail: view.source_detail.clone(),
+                entry_count: view.entry_count,
+                breaking_changes: view
+                    .breaking_changes
+                    .iter()
+                    .map(|change| BreakingChangeVm {
+                        text: change.text.clone(),
+                        section: change.section.clone(),
+                        reason: change.reason.clone(),
+                    })
+                    .collect(),
+                sections: view
+                    .sections
+                    .iter()
+                    .map(|section| ChangelogSectionVm {
+                        title: section.title.clone(),
+                        kind: section_kind(&section.title),
+                        entries: section.entries.clone(),
+                    })
+                    .collect(),
+            }),
+            raw: load_state(&self.raw_changelog, |markdown| markdown.clone()),
+        }
+    }
+
+    fn settings_vm(&self) -> SettingsVm {
+        let resolved_executable = self
+            .cli_status
+            .data
+            .as_ref()
+            .and_then(|status| status.path.clone())
+            .unwrap_or_else(|| "Not found".to_string());
+        let resolved_via = self
+            .cli_status
+            .data
+            .as_ref()
+            .and_then(|status| status.path_source.clone())
+            .unwrap_or_else(|| "—".to_string());
+        let config_dir = self.config_dir.clone().unwrap_or_else(|| "—".to_string());
+        let settings_file = if config_dir == "—" {
+            "—".to_string()
         } else {
-            text(editor.module_names.join(" · "))
-                .size(10)
-                .style(theme::success_text)
-                .into()
+            format!("{config_dir}/settings.json")
         };
 
-        let module_list: Element<'_, Message> = if self.dialog_modules.is_loading() {
-            text("Loading modules…")
-                .size(11)
-                .style(theme::muted_text)
-                .into()
-        } else if let Some(error) = &self.dialog_modules.error {
-            text(error_text(error))
-                .size(10)
-                .style(theme::danger_text)
-                .into()
-        } else if let Some(modules) = &self.dialog_modules.data {
-            scrollable(
-                column(
+        SettingsVm {
+            resolved_executable,
+            resolved_via,
+            cli_path_input: self.cli_path_input.clone(),
+            config_dir,
+            settings_file,
+            text_scale_options: TextSize::ALL
+                .iter()
+                .map(|size| TextScaleOptionVm {
+                    percent: size.percent(),
+                    label: size.to_string(),
+                })
+                .collect(),
+            text_scale_percent: self.app_settings.text_size().percent(),
+            engine_info: self.engine_info(),
+        }
+    }
+
+    fn modal_vm(&self) -> Option<ModalVm> {
+        match &self.modal {
+            Modal::None => None,
+            Modal::InstallCli => Some(ModalVm::InstallCli(InstallCliVm {
+                channels: vec![
+                    "stable".to_string(),
+                    "beta".to_string(),
+                    "alpha".to_string(),
+                ],
+                selected_channel: self.cli_channel.clone(),
+                consent: self.cli_consent,
+                command_preview: if cfg!(target_os = "windows") {
+                    "irm https://unity.com/install.ps1 | iex"
+                } else {
+                    "curl -fsSL https://unity.com/install.sh | bash"
+                }
+                .to_string(),
+                can_install: self.cli_consent,
+            })),
+            Modal::EditorModules(editor) => {
+                let modules = load_state(&self.dialog_modules, |modules| {
                     modules
                         .iter()
-                        .enumerate()
-                        .filter(|(_, module)| !module.is_installed)
-                        .map(|(index, module)| {
-                            checkbox(self.dialog_selected.contains(&module.id))
-                                .label(format!(
-                                    "{}  ·  {}",
-                                    module.name,
-                                    format_bytes(module.download_bytes)
-                                ))
-                                .on_toggle(move |value| Message::ToggleDialogModule(index, value))
-                                .size(14)
-                                .text_size(self.font_size(10.0))
-                                .into()
+                        .filter(|module| !module.is_installed)
+                        .map(|module| ModuleOptionVm {
+                            id: module.id.clone(),
+                            label: format!(
+                                "{}  ·  {}",
+                                module.name,
+                                format_bytes(module.download_bytes)
+                            ),
+                            selected: self.dialog_selected.contains(&module.id),
                         })
-                        .collect::<Vec<Element<'_, Message>>>(),
-                )
-                .spacing(6),
-            )
-            .height(280)
-            .into()
-        } else {
-            text("Load modules for this Editor to add them.")
-                .size(10)
-                .style(theme::faint_text)
-                .into()
-        };
+                        .collect()
+                });
 
-        let content = column![
-            text(format!("Modules for Unity {}", editor.version)).size(20),
-            text("Only modules that are not already installed are listed.")
-                .size(11)
-                .style(theme::muted_text),
-            text("Installed").size(10).style(theme::faint_text),
-            installed,
-            module_list,
-            checkbox(self.dialog_eula)
-                .label("I accept the module license agreements (--accept-eula).")
-                .on_toggle(Message::DialogEulaToggled)
-                .size(14)
-                .text_size(self.font_size(11.0)),
-            row![
-                space().width(Fill),
-                button(text("Cancel").size(11))
-                    .on_press(Message::CloseModal)
-                    .padding([7.0, 12.0])
-                    .style(button::text),
-                button(text(format!("Install {} module(s)", self.dialog_selected.len())).size(11))
-                    .on_press_maybe(
-                        (!self.dialog_selected.is_empty() && self.dialog_eula)
-                            .then_some(Message::StartInstallModules)
-                    )
-                    .padding([7.0, 12.0])
-                    .style(button::primary),
-            ]
-            .spacing(8),
-        ]
-        .spacing(12);
+                Some(ModalVm::EditorModules(EditorModulesVm {
+                    editor_version: editor.version.clone(),
+                    installed_modules: editor.module_names.clone(),
+                    modules,
+                    selected_count: self.dialog_selected.len(),
+                    accept_eula: self.dialog_eula,
+                    can_install: !self.dialog_selected.is_empty() && self.dialog_eula,
+                }))
+            }
+            Modal::UpgradeProject(project) => {
+                let target_options = self
+                    .editors
+                    .data
+                    .as_ref()
+                    .map(|editors| {
+                        editors
+                            .iter()
+                            .filter(|editor| editor.version != project.version)
+                            .map(|editor| editor.version.clone())
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
 
-        container(content)
-            .width(620)
-            .padding(22)
-            .style(theme::modal)
-            .into()
-    }
-
-    fn upgrade_modal<'a>(&'a self, project: &'a Project) -> Element<'a, Message> {
-        let versions = self
-            .editors
-            .data
-            .as_ref()
-            .map(|editors| {
-                editors
-                    .iter()
-                    .filter(|editor| editor.version != project.version)
-                    .map(|editor| editor.version.clone())
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-
-        let picker: Element<'_, Message> = if versions.is_empty() {
-            text("No other Editor version is installed. Install one on the Editors page first.")
-                .size(11)
-                .style(theme::warning_text)
-                .into()
-        } else {
-            pick_list(
-                versions,
-                self.upgrade_target.clone(),
-                Message::UpgradeTargetChanged,
-            )
-            .text_size(self.font_size(12.0))
-            .width(Fill)
-            .placeholder("Select an installed Editor")
-            .into()
-        };
-
-        let content = column![
-            text("Change project Editor version").size(20),
-            text(&project.title).size(12).style(theme::muted_text),
-            row![
-                column![
-                    text("Current version").size(10).style(theme::faint_text),
-                    text(&project.version).size(12),
-                ]
-                .spacing(2)
-                .width(Fill),
-                column![
-                    text("Project path").size(10).style(theme::faint_text),
-                    text(short_path(&project.path, 60))
-                        .size(10)
-                        .font(iced::Font::MONOSPACE)
-                        .style(theme::muted_text),
-                ]
-                .spacing(2)
-                .width(Fill),
-            ]
-            .spacing(14),
-            text("Target Editor version").size(10).style(theme::faint_text),
-            picker,
-            container(
-                text("This runs `unity projects upgrade <path> --to <version> --yes`. It can update ProjectVersion.txt, open the Editor, and run API upgrades. Commit or back up first.")
-                    .size(10)
-                    .style(theme::warning_text),
-            )
-            .padding(10)
-            .width(Fill)
-            .style(theme::notice_card(theme::Tone::Amber)),
-            checkbox(self.upgrade_confirmed)
-                .label("I understand and want to upgrade this project now.")
-                .on_toggle(Message::UpgradeConfirmed)
-                .size(14)
-                .text_size(self.font_size(11.0)),
-            row![
-                space().width(Fill),
-                button(text("Cancel").size(11))
-                    .on_press(Message::CloseModal)
-                    .padding([7.0, 12.0])
-                    .style(button::text),
-                button(text("Upgrade project").size(11))
-                    .on_press_maybe((self.upgrade_confirmed && self.upgrade_target.is_some()).then_some(Message::StartUpgrade))
-                    .padding([7.0, 12.0])
-                    .style(button::primary),
-            ]
-            .spacing(8),
-        ]
-        .spacing(12);
-
-        container(content)
-            .width(600)
-            .padding(22)
-            .style(theme::modal)
-            .into()
+                Some(ModalVm::UpgradeProject(UpgradeProjectVm {
+                    project_title: project.title.clone(),
+                    project_path_short: short_path(&project.path, 60).into_owned(),
+                    current_version: project.version.clone(),
+                    target_options,
+                    selected_target: self.upgrade_target.clone(),
+                    confirmed: self.upgrade_confirmed,
+                    can_upgrade: self.upgrade_confirmed && self.upgrade_target.is_some(),
+                }))
+            }
+        }
     }
 
     fn first_other_editor_version(&self, current: &str) -> Option<String> {
@@ -1846,6 +1707,160 @@ impl App {
     }
 }
 
+fn ui_error(error: &UnityError) -> UiError {
+    UiError {
+        message: error.message.clone(),
+        detail: error
+            .detail
+            .clone()
+            .filter(|detail| !detail.trim().is_empty()),
+    }
+}
+
+fn load_state<T, U>(loadable: &Loadable<T>, map: impl Fn(&T) -> U) -> LoadState<U> {
+    if loadable.loading {
+        return LoadState::Loading {
+            previous: loadable.data.as_ref().map(&map),
+        };
+    }
+    if let Some(error) = &loadable.error {
+        return LoadState::Failed {
+            error: ui_error(error),
+            previous: loadable.data.as_ref().map(&map),
+        };
+    }
+    match &loadable.data {
+        Some(data) => LoadState::Ready(map(data)),
+        None => LoadState::Idle,
+    }
+}
+
+fn notice_tone(kind: NoticeKind) -> Tone {
+    match kind {
+        NoticeKind::Info => Tone::Info,
+        NoticeKind::Success => Tone::Success,
+        NoticeKind::Error => Tone::Danger,
+    }
+}
+
+fn job_vm(job: &ActiveJob) -> JobVm {
+    JobVm {
+        kind: job.kind.clone(),
+        command: job.command.clone(),
+        phase: match job.state {
+            JobState::Running => JobPhase::Running,
+            JobState::Succeeded => JobPhase::Succeeded,
+            JobState::Failed => JobPhase::Failed,
+            JobState::Cancelled => JobPhase::Cancelled,
+        },
+        progress: job.progress,
+        message: job.message.clone(),
+        error: job.error.as_ref().map(ui_error),
+        logs: job
+            .logs
+            .iter()
+            .map(|line| JobLogVm {
+                is_stderr: line.stream == StreamKind::Stderr,
+                text: line.text.clone(),
+            })
+            .collect(),
+    }
+}
+
+fn editor_row_vm(editor: &Editor) -> EditorRowVm {
+    EditorRowVm {
+        version: editor.version.clone(),
+        architecture: editor.architecture.clone(),
+        is_default: editor.default,
+        modules: if editor.module_names.is_empty() {
+            "No modules reported".to_string()
+        } else {
+            editor.module_names.join(", ")
+        },
+    }
+}
+
+fn project_row_vm(project: &Project, installed: &HashSet<&str>) -> ProjectRowVm {
+    let mut badges = Vec::new();
+    if project.cloud_enabled {
+        badges.push(BadgeVm {
+            label: "Unity Cloud".to_string(),
+            tone: Tone::Info,
+        });
+    }
+    if let Some(vcs) = &project.vcs_provider {
+        badges.push(BadgeVm {
+            label: vcs.clone(),
+            tone: Tone::Neutral,
+        });
+    }
+    if !installed.is_empty() && !installed.contains(project.version.as_str()) {
+        badges.push(BadgeVm {
+            label: "Editor not installed".to_string(),
+            tone: Tone::Warning,
+        });
+    }
+    if project.is_favorite {
+        badges.push(BadgeVm {
+            label: "favorite".to_string(),
+            tone: Tone::Accent,
+        });
+    }
+    if badges.is_empty() {
+        badges.push(BadgeVm {
+            label: "local project".to_string(),
+            tone: Tone::Neutral,
+        });
+    }
+
+    ProjectRowVm {
+        path: project.path.clone(),
+        title: project.title.clone(),
+        version: project.version.clone(),
+        pipeline: project.render_pipeline.as_ref().map(|pipeline| BadgeVm {
+            label: pipeline.clone(),
+            tone: Tone::Highlight,
+        }),
+        build_target: project
+            .build_target
+            .clone()
+            .unwrap_or_else(|| "—".to_string()),
+        short_path: short_path(&project.path, 42).into_owned(),
+        modified: format_epoch_millis(project.last_modified),
+        badges,
+    }
+}
+
+fn stream_tone(stream: &str) -> Tone {
+    let stream = stream.to_lowercase();
+    if stream.contains("lts") || stream.contains("supported") {
+        Tone::Success
+    } else if stream.contains("beta") {
+        Tone::Warning
+    } else if stream.contains("alpha") {
+        Tone::Danger
+    } else {
+        Tone::Neutral
+    }
+}
+
+fn section_kind(title: &str) -> SectionKind {
+    let title = title.to_lowercase();
+    if title.contains("removed") {
+        SectionKind::Removed
+    } else if title.contains("changed") || title.contains("deprecated") {
+        SectionKind::Changed
+    } else if title.contains("added") {
+        SectionKind::Added
+    } else if title.contains("security") {
+        SectionKind::Security
+    } else if title.contains("fixed") {
+        SectionKind::Fixed
+    } else {
+        SectionKind::Other
+    }
+}
+
 fn load_status(cli: UnityCli) -> Task<Message> {
     Task::perform(
         run_blocking(move || Ok(cli.status())),
@@ -1910,26 +1925,10 @@ async fn load_changelog_future(
     .await
 }
 
-pub fn detail_column<'a>(label: &'a str, value: impl IntoFragment<'a>) -> Element<'a, Message> {
-    column![
-        text(label).size(9).style(theme::faint_text),
-        text(value).size(11).style(theme::muted_text),
-    ]
-    .spacing(2)
-    .width(Fill)
-    .into()
-}
-
-pub fn badge<'a>(label: impl IntoFragment<'a>, tone: theme::Tone) -> Element<'a, Message> {
-    container(text(label).size(10))
-        .padding([3.0, 8.0])
-        .style(theme::badge(tone))
-        .into()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use unity_core::models::CliVersion;
 
     fn project(title: &str, path: &str, version: &str) -> Project {
         Project {
@@ -1968,5 +1967,64 @@ mod tests {
         let filtered = app.filtered_projects();
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].0, 0);
+    }
+
+    #[test]
+    fn view_model_maps_cli_status_and_filtered_projects() {
+        let (mut app, _) = App::boot();
+        app.cli_status.data = Some(CliStatus {
+            installed: true,
+            path: Some("/usr/bin/unity".to_string()),
+            path_source: Some("PATH".to_string()),
+            version: Some(CliVersion {
+                version: "1.0.0-beta.15".to_string(),
+                channel: "beta".to_string(),
+                platform: "linux".to_string(),
+                arch: "x86_64".to_string(),
+                ..CliVersion::default()
+            }),
+            ..CliStatus::default()
+        });
+        app.page = Page::Overview;
+
+        let vm = app.view_model();
+        assert!(matches!(
+            &vm.shell.cli,
+            CliConnectionVm::Connected {
+                version: Some(version)
+            } if version == "1.0.0-beta.15"
+        ));
+        match &vm.page {
+            PageVm::Overview(overview) => match &overview.cli {
+                CliCardVm::Ready { details, .. } => {
+                    assert_eq!(details.channel, "beta");
+                    assert_eq!(details.platform, "linux x86_64");
+                }
+                other => panic!("unexpected CLI card: {other:?}"),
+            },
+            other => panic!("unexpected page: {other:?}"),
+        }
+
+        let projects = vec![
+            project("Alpha Game", "/games/alpha", "6000.1.1f1"),
+            project("Beta Tool", "/tools/beta", "6000.2.2f1"),
+        ];
+        app.project_search_index = project_search_keys(&projects);
+        app.projects.data = Some(projects);
+        app.project_search = "beta".to_string();
+        app.page = Page::Projects;
+
+        let vm = app.view_model();
+        match &vm.page {
+            PageVm::Projects(projects) => {
+                assert_eq!(projects.total_count, 2);
+                assert_eq!(projects.visible_count, 1);
+                let rows = projects.projects.data().expect("filtered rows");
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0].title, "Beta Tool");
+                assert_eq!(rows[0].badges[0].label, "local project");
+            }
+            other => panic!("unexpected page: {other:?}"),
+        }
     }
 }

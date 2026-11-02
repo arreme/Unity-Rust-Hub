@@ -11,16 +11,16 @@ name = "unity-rust-hub"
 path = "src/main.rs"
 
 [dependencies]
-chrono = { version = "0.4", default-features = false, features = ["clock"] }
-dirs = "6"
 futures = "0.3"
 iced = { version = "0.14", default-features = false, features = [
   "crisp",
+  "image",
+  "linux-theme-detection",
   "thread-pool",
   "tiny-skia",
   "wayland",
   "x11",
 ] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-unity-core = { path = "../unity-core" }
+unity-hub-controller = { path = "../unity-hub-controller" }
+unity-hub-model = { path = "../unity-hub-model" }
+unity-hub-ui = { path = "../unity-hub-ui" }

@@ -1,5 +1,11 @@
 [workspace]
-members = ["crates/unity-core", "crates/unity-hub"]
+members = [
+  "crates/unity-core",
+  "crates/unity-hub",
+  "crates/unity-hub-controller",
+  "crates/unity-hub-model",
+  "crates/unity-hub-ui",
+]
 default-members = ["crates/unity-hub"]
 resolver = "2"
 

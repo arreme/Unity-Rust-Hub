@@ -2,7 +2,8 @@
 
 Date: 2026-10-31
 Branch: `main`
-Status: implemented
+Status: implemented (historical; the controller/UI split is now documented in
+`docs/design/contract.md`)
 
 ## Goal
 

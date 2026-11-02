@@ -1,0 +1,9 @@
+[package]
+name = "unity-hub-model"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Presentation contract between the Unity Rust Hub controller and UI"
+publish = false
+
+[dependencies]

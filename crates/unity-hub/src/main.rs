@@ -1,12 +1,8 @@
-mod app;
-mod jobs;
-mod settings;
-mod theme;
-mod ui;
-mod util;
-mod views;
+mod runtime;
 
 use std::future::Future;
+
+use runtime::Runtime;
 
 /// iced's default executor creates one worker per CPU. All real work in this
 /// app runs on the dedicated CLI reader or job threads, so two executor
@@ -35,14 +31,14 @@ fn main() -> iced::Result {
         iced::window::icon::from_rgba(include_bytes!("../assets/icon-128.rgba").to_vec(), 128, 128)
             .ok();
 
-    iced::application(app::App::boot, app::App::update, app::App::view)
+    iced::application(Runtime::boot, Runtime::update, Runtime::view)
         .executor::<SmallExecutor>()
         .title("Unity Rust Hub")
-        .theme(app::App::theme)
-        .subscription(app::App::subscription)
+        .theme(Runtime::theme)
+        .subscription(Runtime::subscription)
         .window(iced::window::Settings {
-            size: iced::Size::new(1280.0, 840.0),
-            min_size: Some(iced::Size::new(1040.0, 680.0)),
+            size: unity_hub_ui::WINDOW_SIZE,
+            min_size: Some(unity_hub_ui::MIN_WINDOW_SIZE),
             icon,
             ..Default::default()
         })

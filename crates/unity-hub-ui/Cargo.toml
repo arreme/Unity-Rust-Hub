@@ -1,0 +1,23 @@
+[package]
+name = "unity-hub-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Visual layer and design system for Unity Rust Hub"
+publish = false
+
+[[bin]]
+name = "unity-hub-design-gallery"
+path = "src/bin/gallery.rs"
+
+[dependencies]
+iced = { version = "0.14", default-features = false, features = [
+  "crisp",
+  "image",
+  "linux-theme-detection",
+  "thread-pool",
+  "tiny-skia",
+  "wayland",
+  "x11",
+] }
+unity-hub-model = { path = "../unity-hub-model" }
