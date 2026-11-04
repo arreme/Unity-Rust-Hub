@@ -161,13 +161,135 @@ fn behavior_wording() -> &'static Regex {
             | \bdata\.items\b
             | \b(?:print|prints|printed|write|writes|written|return|returns|returned|report|reports|reported|emit|emits|emitted|output|outputs|outputted)\b
               .{0,120}?\b(?:tsv|ndjson)\b
-            | \bprint(?:s|ed)?\b.{0,120}?\binstead\s+of\b
             | \bnow\s+(?:refuses|stops|fails)\b
-            | \bno\s+longer\s+(?:registers?|installs?|deletes?|returns?|writes?|prints?|accepts?|adds?|creates?|includes?|ships?)\b
+            | \bno\s+longer\s+(?:installs?|deletes?|returns?|writes?|prints?|accepts?|creates?|includes?|ships?)\b
             ",
         )
         .expect("valid regex")
     })
+}
+
+/// High-signal phrases that make an exit-code change in a fix worth surfacing.
+fn fix_contract_phrases() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r"(?isx)
+            \bnew\s+exit\s+codes?\b
+            | \bfor\s+scripts\b
+            | \bwithout\b.{0,80}?\benvelope\b
+            | \boutput\s+shape\b
+            | \bdata\.items\b
+            | \bexits?\s+0\b.{0,180}?\balready\s+installed\b
+            ",
+        )
+        .expect("valid regex")
+    })
+}
+
+/// An exit code paired with "instead of" wording. A passing mention of an exit
+/// code alone does not qualify.
+fn fix_exit_instead_wording() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r"(?isx)\b(?:exits?|exited|exiting)\s+(?:with\s+)?(?:code\s+)?\d+\b
+            .{0,180}?\binstead\s+of\b",
+        )
+        .expect("valid regex")
+    })
+}
+
+/// An exit code paired with "used to" wording. This only counts when the entry
+/// also changes a machine-readable format or concerns an open Editor.
+fn fix_exit_used_to_wording() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r"(?isx)\b(?:exits?|exited|exiting)\s+(?:with\s+)?(?:code\s+)?\d+\b
+            .{0,80}?\b(?:used\s+to|where\s+it\s+used\s+to)\b",
+        )
+        .expect("valid regex")
+    })
+}
+
+/// "It used to ... exit 0" wording. Used only when the entry also changes a
+/// machine-readable format, so an old bug description alone does not match.
+fn fix_reverse_exit_change_wording() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r"(?isx)\b(?:used\s+to|where\s+it\s+used\s+to)\b
+            .{0,100}?\b(?:exits?|exited|exiting)\s+(?:with\s+)?(?:code\s+)?\d+\b",
+        )
+        .expect("valid regex")
+    })
+}
+
+fn fix_now_exit_wording() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"(?is)\bnow\s+(?:exits?|exited|exiting)\b.{0,80}?\b(?:code\s+)?\d+\b")
+            .expect("valid regex")
+    })
+}
+
+/// The exit-code change must also touch a contract surface the app cares
+/// about (machine output, an error code, or an open Editor).
+fn fix_exit_contract_marker() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r"(?i)(?:\berror\s+codes?\b|--format\b|\b(?:json|ndjson|tsv)\b|\benvelope\b|output\s+shape|\bdata\.items\b|running\s+editor|open\s+in\s+a\s+unity\s+editor|already\s+installed)",
+        )
+        .expect("valid regex")
+    })
+}
+
+/// Output-shape changes in fixes: printed/returned data replaced by another
+/// representation. Only used together with [`format_signal`].
+fn fix_output_change_wording() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r"(?isx)
+            \bprint(?:s|ed)?\b.{0,160}?\b(?:instead\s+of|where\s+it\s+used\s+to|used\s+to)\b
+            | \bnow\s+(?:prints?|returns?|writes?|reports?)\b.{0,160}?\b(?:instead\s+of|used\s+to|where\s+it\s+used\s+to)\b
+            ",
+        )
+        .expect("valid regex")
+    })
+}
+
+fn format_signal() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r"(?i)(?:--format\b|\b(?:json|ndjson|tsv)\b|\benvelope\b|output\s+shape|\bdata\.items\b)",
+        )
+        .expect("valid regex")
+    })
+}
+
+fn editor_signal() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"(?i)(?:running\s+editor|open\s+in\s+a\s+unity\s+editor)").expect("valid regex")
+    })
+}
+
+/// A narrower test for `Fixed`/`Security` notes. Bug-fix prose uses words such
+/// as "removed" and "no longer" constantly, so only explicit contract changes
+/// are surfaced here.
+fn fix_contract_wording(text: &str) -> bool {
+    fix_wording().is_match(text)
+        || fix_contract_phrases().is_match(text)
+        || (fix_exit_instead_wording().is_match(text) && fix_exit_contract_marker().is_match(text))
+        || (fix_exit_used_to_wording().is_match(text)
+            && (format_signal().is_match(text) || editor_signal().is_match(text)))
+        || (fix_reverse_exit_change_wording().is_match(text) && format_signal().is_match(text))
+        || (fix_now_exit_wording().is_match(text) && fix_exit_contract_marker().is_match(text))
+        || (fix_output_change_wording().is_match(text) && format_signal().is_match(text))
 }
 
 fn markdown_link() -> &'static Regex {
@@ -306,13 +428,7 @@ fn find_breaking_changes(sections: &[ChangelogSection]) -> Vec<BreakingChange> {
             } else if section_lower.contains("deprecated") {
                 Some("deprecated functionality")
             } else if is_fix_or_security {
-                if fix_wording().is_match(&text_lower) {
-                    Some("explicit breaking or incompatible wording in a fix")
-                } else if behavior_wording().is_match(&text_lower) {
-                    Some("behavior or output-shape change")
-                } else {
-                    None
-                }
+                fix_contract_wording(&text_lower).then_some("behavior or output-shape change")
             } else if breaking_wording().is_match(&text_lower) {
                 // Do not blanket-flag every Changed entry: a release's Changed
                 // section is mostly ordinary behavior updates. Only wording
@@ -392,13 +508,19 @@ mod tests {
 - A command that cannot reach its service because you are offline now exits `7` (`NETWORK_UNREACHABLE`) instead of `6`.
 - For scripts: against an Editor that formats its output, `unity command --format json` prints the result without the `success`, `command`, `parameters` and `target` envelope.
 - `unity docs cache --format json` now returns the cached versions in `data.items`, next to `total`, `nextPage` and `partial`.
-- `unity projects info` prints `key<TAB>value` rows under `--format tsv` and one JSON line with `"type":"result"` under `--format ndjson`, instead of the human block.
-- `unity auth logout --format json` and `--format ndjson` print a success result (`{"signedOut": true}`) instead of the "You have been signed out." notice.
+- `unity setup all` no longer registers the Unity MCP server for coding agents that can run shell commands, which use the `unity` CLI directly.
+- `unity docs <topic>` answers sooner on a cold start when the topic's Editor version is known: it opens or prints the page as soon as the documentation index files read so far hold it, instead of after the whole index has loaded.
 
 ### Fixed
 
+- `unity projects info` prints `key<TAB>value` rows under `--format tsv` and one JSON line with `"type":"result"` under `--format ndjson`, instead of the human block.
+- `unity auth logout --format json` and `--format ndjson` print a success result (`{"signedOut": true}`) instead of the "You have been signed out." notice.
 - `unity install-modules -m <module>` exits 0 when every module you name is already installed, as `unity editor module add` does.
 - `unity projects upgrade` on a project that is already open in a Unity Editor now stops with an error that names the running Editor's process, and exits `6`. It used to launch a second Editor, which refused the open project, and report the upgrade as in progress with exit `0`.
+- `unity command` exits `14` with the `EDITOR_TIMEOUT` error code when the Editor stops a command that ran past `--timeout`, instead of exiting `6` with `COMMAND_FAILED`.
+- `unity uninstall` now reports the Editor it removed under `--format json`, `ndjson` and `tsv`: the json envelope and the ndjson result frame carry `version` and `architecture`, and `tsv` prints them as key and value rows. It used to print nothing and exit 0.
+- `unity self-update` now exits with code 1 and the error code `UPGRADE_NO_BINARY` when the release has no download for your platform, instead of exit 6 with `COMMAND_FAILED`.
+- `--quiet` no longer empties `--format tsv` tables. `unity --quiet --format tsv releases` printed nothing and exited 0, so a script that piped it got no data. It now prints the same rows as without `--quiet`.
 - `unity collab attachments upload` no longer leaves an unfinished attachment behind when the file transfer fails, so you can run the upload again on the same annotation. If the attachment cannot be removed, the error names the `unity collab attachments delete` command that clears it.
 - `unity projects --watch` now follows the project list. A project added or removed from another terminal while the watch runs appears or disappears on the next poll. Before, only the rows already shown refreshed, so the list never changed.
 "#;
@@ -466,6 +588,9 @@ mod tests {
             "auth logout",
             "install-modules",
             "projects upgrade",
+            "unity command exits",
+            "uninstall",
+            "self-update",
         ] {
             let change = parsed
                 .breaking_changes
@@ -483,13 +608,19 @@ mod tests {
     fn beta16_fix_wording_false_positives_stay_quiet() {
         let parsed = parse_changelog(BETA16);
 
-        for needle in ["collab attachments upload", "projects --watch"] {
+        for needle in [
+            "collab attachments upload",
+            "projects --watch",
+            "answers sooner",
+            "--quiet no longer empties",
+            "setup all no longer registers",
+        ] {
             assert!(
                 !parsed
                     .breaking_changes
                     .iter()
                     .any(|change| change.text.contains(needle)),
-                "{needle} is a fix, not a breaking change"
+                "{needle} is a fix or ordinary behavior change, not a breaking change"
             );
         }
     }

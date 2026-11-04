@@ -209,6 +209,10 @@ impl UnityCli {
 
     pub fn editors_running(&self) -> Result<RunningEditors, UnityError> {
         let mut running = self.editors_running_base()?;
+        // Nothing to enrich. Avoid a second CLI invocation when no Editor is open.
+        if running.instances.is_empty() {
+            return Ok(running);
+        }
         // Pipeline status is a beta.16 addition. An older CLI, a stopped
         // Pipeline server, or an unexpected shape must not break the base list.
         if let Ok(pipeline) = self.pipeline_editors() {
