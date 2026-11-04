@@ -201,7 +201,7 @@ fn upgrade_modal(vm: &UpgradeProjectVm) -> Element<'_, UiAction> {
         text("Target Editor version").size(10).style(theme::faint_text),
         picker,
         container(
-            text("This runs `unity projects upgrade <path> --to <version> --yes`. It can update ProjectVersion.txt, open the Editor, and run API upgrades. Commit or back up first.")
+            text("This runs `unity projects upgrade <path> --to <version> --yes`. It can update ProjectVersion.txt, open the Editor, and run API upgrades. The project must not be open in a running Editor: close it first. Commit or back up first.")
                 .size(10)
                 .style(theme::warning_text),
         )

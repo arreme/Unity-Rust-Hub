@@ -246,6 +246,11 @@ pub struct RunningEditorVm {
     pub project_path: String,
     pub editor_version: String,
     pub pid: String,
+    pub phase: Option<String>,
+    pub pipeline_version: Option<String>,
+    pub update_available: bool,
+    pub safe_mode: bool,
+    pub dialog: Option<String>,
 }
 
 // ---------------------------------------------------------------------------

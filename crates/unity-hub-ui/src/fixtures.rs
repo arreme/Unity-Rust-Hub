@@ -74,7 +74,7 @@ fn shell(page: Page) -> ShellVm {
     ShellVm {
         page,
         cli: CliConnectionVm::Connected {
-            version: Some("1.0.0-beta.15".to_string()),
+            version: Some("1.0.0-beta.16".to_string()),
         },
         notice: None,
         job: None,
@@ -96,7 +96,7 @@ fn overview() -> ViewModel {
         PageVm::Overview(OverviewVm {
             cli: CliCardVm::Ready {
                 details: CliDetailsVm {
-                    version: "1.0.0-beta.15".to_string(),
+                    version: "1.0.0-beta.16".to_string(),
                     channel: "beta".to_string(),
                     platform: "linux x86_64".to_string(),
                     runtime: "rust 1.99".to_string(),
@@ -108,8 +108,8 @@ fn overview() -> ViewModel {
                 error: None,
             },
             update: LoadState::Ready(UpdateVm {
-                available: true,
-                current_version: "1.0.0-beta.15".to_string(),
+                available: false,
+                current_version: "1.0.0-beta.16".to_string(),
                 latest_version: "1.0.0-beta.16".to_string(),
             }),
             account: AccountCardVm {
@@ -125,11 +125,28 @@ fn overview() -> ViewModel {
                     }],
                 },
             },
-            running: LoadState::Ready(vec![RunningEditorVm {
-                project_path: "/home/ada/Games/Orbital".to_string(),
-                editor_version: "6000.1.1f1".to_string(),
-                pid: "4242".to_string(),
-            }]),
+            running: LoadState::Ready(vec![
+                RunningEditorVm {
+                    project_path: "/home/ada/Games/Orbital".to_string(),
+                    editor_version: "6000.1.1f1".to_string(),
+                    pid: "4242".to_string(),
+                    phase: Some("ready".to_string()),
+                    pipeline_version: Some("0.9.1-exp.1".to_string()),
+                    update_available: true,
+                    safe_mode: false,
+                    dialog: None,
+                },
+                RunningEditorVm {
+                    project_path: "/home/ada/Tools/LevelKit".to_string(),
+                    editor_version: "2022.3.62f1".to_string(),
+                    pid: "5151".to_string(),
+                    phase: Some("safe mode".to_string()),
+                    pipeline_version: None,
+                    update_available: false,
+                    safe_mode: true,
+                    dialog: Some("Save changes?".to_string()),
+                },
+            ]),
         }),
     )
 }
@@ -292,12 +309,12 @@ fn changelog() -> ViewModel {
         PageVm::Changelog(ChangelogVm {
             loaded: true,
             versions: vec!["1.0.0-beta.15".to_string(), "1.0.0-beta.16".to_string()],
-            selected_target: Some("1.0.0-beta.15".to_string()),
+            selected_target: Some("1.0.0-beta.16".to_string()),
             show_raw: false,
             state: LoadState::Ready(ChangelogDataVm {
-                version: "1.0.0-beta.15".to_string(),
+                version: "1.0.0-beta.16".to_string(),
                 source: "unity-changelog".to_string(),
-                source_detail: "Unity CLI 1.0.0-beta.15 release notes".to_string(),
+                source_detail: "Unity CLI 1.0.0-beta.16 release notes".to_string(),
                 entry_count: 12,
                 breaking_changes: vec![BreakingChangeVm {
                     text: "The list subcommands were removed.".to_string(),
@@ -354,7 +371,7 @@ fn settings() -> ViewModel {
                 },
             ],
             text_scale_percent: 100,
-            engine_info: "1.0.0-beta.15 · beta · linux/x86_64".to_string(),
+            engine_info: "1.0.0-beta.16 · beta · linux/x86_64".to_string(),
         }),
     )
 }

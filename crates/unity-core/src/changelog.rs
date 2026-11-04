@@ -136,13 +136,37 @@ fn breaking_wording() -> &'static Regex {
 }
 
 /// Fix and security notes often say a bug "no longer" happens. That is not a
-/// breaking change, so those sections only flag explicit removal/rename
-/// wording.
+/// breaking change, so those sections only flag explicit breaking or
+/// incompatible wording, plus the high-signal behavior changes below.
 fn fix_wording() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"(?i)\b(breaking|incompatible)\b").expect("valid regex"))
+}
+
+/// Wording that describes a contract change rather than a bug fix: changed
+/// exit codes, output shapes, or a command that now refuses an input.
+fn behavior_wording() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
-        Regex::new(r"(?i)\b(breaking|incompatible|removal|removed|renamed|replaced)\b")
-            .expect("valid regex")
+        Regex::new(
+            r"(?isx)
+            \bnow\s+(?:exits?|returns?|prints?|writes?|reports?|requires?|refuses?|stops?|fails?|accepts?|installs?|registers?|uses?|builds?)\b
+            .{0,160}?\b(?:instead\s+of|where\s+it\s+used\s+to|used\s+to)\b
+            | \bused\s+to\b
+            | \bexit(?:s|ed)?\s+(?:code\s+)?\d+\b
+            | \bexit\s+codes?\b
+            | \bfor\s+scripts\b
+            | \boutput\s+shape\b
+            | \benvelope\b
+            | \bdata\.items\b
+            | \b(?:print|prints|printed|write|writes|written|return|returns|returned|report|reports|reported|emit|emits|emitted|output|outputs|outputted)\b
+              .{0,120}?\b(?:tsv|ndjson)\b
+            | \bprint(?:s|ed)?\b.{0,120}?\binstead\s+of\b
+            | \bnow\s+(?:refuses|stops|fails)\b
+            | \bno\s+longer\s+(?:registers?|installs?|deletes?|returns?|writes?|prints?|accepts?|adds?|creates?|includes?|ships?)\b
+            ",
+        )
+        .expect("valid regex")
     })
 }
 
@@ -282,15 +306,21 @@ fn find_breaking_changes(sections: &[ChangelogSection]) -> Vec<BreakingChange> {
             } else if section_lower.contains("deprecated") {
                 Some("deprecated functionality")
             } else if is_fix_or_security {
-                fix_wording()
-                    .is_match(&text_lower)
-                    .then_some("removal or rename wording in a fix")
+                if fix_wording().is_match(&text_lower) {
+                    Some("explicit breaking or incompatible wording in a fix")
+                } else if behavior_wording().is_match(&text_lower) {
+                    Some("behavior or output-shape change")
+                } else {
+                    None
+                }
             } else if breaking_wording().is_match(&text_lower) {
                 // Do not blanket-flag every Changed entry: a release's Changed
                 // section is mostly ordinary behavior updates. Only wording
                 // that signals removal, a rename, or an incompatibility is a
                 // useful "possible breaking change" candidate.
                 Some("removal, rename, or deprecation wording")
+            } else if behavior_wording().is_match(&text_lower) {
+                Some("behavior or output-shape change")
             } else {
                 None
             };
@@ -354,6 +384,25 @@ mod tests {
 - A crash when the network was unreachable.
 "#;
 
+    const BETA16: &str = r#"## 1.0.0-beta.16
+
+### Changed
+
+- Two new exit codes: `17` (`UNAVAILABLE`) when the Editor is busy loading, compiling or in Safe Mode, and `18` (`AWAITING_INPUT`) when a modal dialog blocks it.
+- A command that cannot reach its service because you are offline now exits `7` (`NETWORK_UNREACHABLE`) instead of `6`.
+- For scripts: against an Editor that formats its output, `unity command --format json` prints the result without the `success`, `command`, `parameters` and `target` envelope.
+- `unity docs cache --format json` now returns the cached versions in `data.items`, next to `total`, `nextPage` and `partial`.
+- `unity projects info` prints `key<TAB>value` rows under `--format tsv` and one JSON line with `"type":"result"` under `--format ndjson`, instead of the human block.
+- `unity auth logout --format json` and `--format ndjson` print a success result (`{"signedOut": true}`) instead of the "You have been signed out." notice.
+
+### Fixed
+
+- `unity install-modules -m <module>` exits 0 when every module you name is already installed, as `unity editor module add` does.
+- `unity projects upgrade` on a project that is already open in a Unity Editor now stops with an error that names the running Editor's process, and exits `6`. It used to launch a second Editor, which refused the open project, and report the upgrade as in progress with exit `0`.
+- `unity collab attachments upload` no longer leaves an unfinished attachment behind when the file transfer fails, so you can run the upload again on the same annotation. If the attachment cannot be removed, the error names the `unity collab attachments delete` command that clears it.
+- `unity projects --watch` now follows the project list. A project added or removed from another terminal while the watch runs appears or disappears on the next poll. Before, only the rows already shown refreshed, so the list never changed.
+"#;
+
     #[test]
     fn parses_versions_sections_and_wrapped_entries() {
         let parsed = parse_changelog(SAMPLE);
@@ -402,5 +451,46 @@ mod tests {
     fn does_not_flag_security_entries_just_for_being_in_security() {
         let parsed = parse_changelog("### Security\n\n- Something was fixed.\n");
         assert!(parsed.breaking_changes.is_empty());
+    }
+
+    #[test]
+    fn beta16_behavior_and_output_changes_are_flagged() {
+        let parsed = parse_changelog(BETA16);
+
+        for needle in [
+            "Two new exit codes",
+            "now exits",
+            "For scripts",
+            "data.items",
+            "projects info",
+            "auth logout",
+            "install-modules",
+            "projects upgrade",
+        ] {
+            let change = parsed
+                .breaking_changes
+                .iter()
+                .find(|change| change.text.contains(needle))
+                .unwrap_or_else(|| panic!("{needle} should be flagged"));
+            assert_eq!(
+                change.reason, "behavior or output-shape change",
+                "{needle} should use the behavior reason"
+            );
+        }
+    }
+
+    #[test]
+    fn beta16_fix_wording_false_positives_stay_quiet() {
+        let parsed = parse_changelog(BETA16);
+
+        for needle in ["collab attachments upload", "projects --watch"] {
+            assert!(
+                !parsed
+                    .breaking_changes
+                    .iter()
+                    .any(|change| change.text.contains(needle)),
+                "{needle} is a fix, not a breaking change"
+            );
+        }
     }
 }

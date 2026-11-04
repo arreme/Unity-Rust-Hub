@@ -10,7 +10,8 @@ use crate::envelope::{parse_data, parse_envelope, parse_items, ValueEnvelope};
 use crate::errors::{message_for_exit_code, UnityError};
 use crate::models::{
     AuthStatus, CliStatus, CliUpdateInfo, CliVersion, Editor, EditorInfo, InstallPath,
-    LicenseStatus, Module, Project, RawChangelog, Release, RunningEditor, RunningEditors,
+    LicenseStatus, Module, PipelineEditors, Project, RawChangelog, Release, RunningEditor,
+    RunningEditors,
 };
 use crate::versions::{
     validate_cli_version, validate_editor_version, validate_module_id, validate_project_path,
@@ -207,6 +208,16 @@ impl UnityCli {
     }
 
     pub fn editors_running(&self) -> Result<RunningEditors, UnityError> {
+        let mut running = self.editors_running_base()?;
+        // Pipeline status is a beta.16 addition. An older CLI, a stopped
+        // Pipeline server, or an unexpected shape must not break the base list.
+        if let Ok(pipeline) = self.pipeline_editors() {
+            merge_pipeline_editors(&mut running, pipeline);
+        }
+        Ok(running)
+    }
+
+    fn editors_running_base(&self) -> Result<RunningEditors, UnityError> {
         let parts = svec(&["editors", "running"]);
         let executed = self.run_args(&parts, "json")?;
         let Some(data) = executed.envelope.data else {
@@ -223,6 +234,11 @@ impl UnityCli {
             UnityError::unexpected_output(format!("Could not parse running Editors: {err}"))
         })?;
         Ok(running)
+    }
+
+    pub fn pipeline_editors(&self) -> Result<PipelineEditors, UnityError> {
+        let executed = self.run_args(&svec(&["pipeline", "editors"]), "json")?;
+        pipeline_editors_from_data(executed.envelope.data)
     }
 
     pub fn releases(
@@ -357,6 +373,91 @@ impl UnityCli {
     pub fn self_update_spec(&self) -> Result<CommandSpec, UnityError> {
         self.spec(&svec(&["self-update", "--yes"]), "ndjson")
     }
+}
+
+fn pipeline_editors_from_data(data: Option<Value>) -> Result<PipelineEditors, UnityError> {
+    let Some(data) = data else {
+        return Ok(PipelineEditors::default());
+    };
+    if data.is_null() {
+        return Ok(PipelineEditors::default());
+    }
+
+    let instances = if data.is_array() {
+        parse_items(Some(data.clone()), &[])?
+    } else {
+        parse_items(
+            data.get("instances").or_else(|| data.get("items")).cloned(),
+            &[],
+        )?
+    };
+    let latest_version = data
+        .get("latestVersion")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let summary = data.get("summary").cloned();
+
+    Ok(PipelineEditors {
+        instances,
+        latest_version,
+        summary,
+    })
+}
+
+fn merge_pipeline_editors(running: &mut RunningEditors, pipeline: PipelineEditors) {
+    for instance in pipeline.instances {
+        let pid = instance.pid;
+        let project_path = instance.project_path.clone();
+        let position = pid
+            .and_then(|pid| {
+                running
+                    .instances
+                    .iter()
+                    .position(|candidate| candidate.pid == Some(pid))
+            })
+            .or_else(|| {
+                project_path.as_deref().and_then(|path| {
+                    running.instances.iter().position(|candidate| {
+                        candidate.project_path.as_deref().is_some_and(|candidate| {
+                            candidate.trim_end_matches(['/', '\\'])
+                                == path.trim_end_matches(['/', '\\'])
+                        })
+                    })
+                })
+            });
+
+        if let Some(index) = position {
+            let target = &mut running.instances[index];
+            if target.project_path.is_none() {
+                target.project_path = instance.project_path.clone();
+            }
+            if target.editor_version.is_none() {
+                target.editor_version = instance.editor_version.clone();
+            }
+            if target.pid.is_none() {
+                target.pid = instance.pid;
+            }
+            if target.port.is_none() {
+                target.port = instance.server_port();
+            }
+            if instance.phase.is_some() {
+                target.phase = instance.phase.clone();
+            }
+            if instance.pipeline_version.is_some() {
+                target.pipeline_version = instance.pipeline_version.clone();
+            }
+            target.update_available |= instance.update_available;
+            if instance.safe_mode.is_some() {
+                target.safe_mode = instance.safe_mode.clone();
+            }
+            if instance.dialog.is_some() {
+                target.dialog = instance.dialog.clone();
+            }
+        } else {
+            running.instances.push(instance.into_running_editor());
+        }
+    }
+    running.count = running.instances.len();
 }
 
 fn envelope_error(envelope: &ValueEnvelope, stderr: &str, exit_code: Option<i32>) -> UnityError {
@@ -736,6 +837,131 @@ fn shell_quote(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::PipelineEditor;
+
+    #[test]
+    fn parses_pipeline_editors_status_fields() {
+        let data = serde_json::json!({
+            "instances": [{
+                "projectName": "Game",
+                "projectPath": "/tmp/Game",
+                "pid": 42,
+                "isRunning": true,
+                "editorPhase": "loading project",
+                "pipelineVersion": "0.9.1-exp.1",
+                "updateAvailable": true,
+                "safeMode": null,
+                "dialog": null,
+                "pipelineServer": { "port": 7800, "isReachable": true }
+            }],
+            "items": [],
+            "latestVersion": "0.10.0-exp.1",
+            "summary": { "totalInstances": 1, "instancesInSafeMode": 0 }
+        });
+
+        let parsed = pipeline_editors_from_data(Some(data)).unwrap();
+        assert_eq!(parsed.instances.len(), 1);
+        assert_eq!(parsed.latest_version.as_deref(), Some("0.10.0-exp.1"));
+        assert_eq!(
+            parsed
+                .summary
+                .as_ref()
+                .and_then(|summary| summary.get("totalInstances"))
+                .and_then(Value::as_u64),
+            Some(1)
+        );
+
+        let editor = &parsed.instances[0];
+        assert_eq!(editor.phase.as_deref(), Some("loading project"));
+        assert_eq!(editor.pipeline_version.as_deref(), Some("0.9.1-exp.1"));
+        assert!(editor.update_available);
+        assert_eq!(editor.server_port(), Some(7800));
+
+        let running = parsed
+            .instances
+            .into_iter()
+            .next()
+            .unwrap()
+            .into_running_editor();
+        assert!(!running.in_safe_mode());
+        assert!(running.dialog_text().is_none());
+    }
+
+    #[test]
+    fn parses_pipeline_editors_items_fallback_and_safe_mode_dialog() {
+        let data = serde_json::json!({
+            "items": [{
+                "projectPath": "/tmp/Game",
+                "pid": 7,
+                "safeMode": {
+                    "detected": true,
+                    "compileErrors": [{ "message": "CS1002: ; expected" }]
+                },
+                "dialog": {
+                    "title": "Save changes?",
+                    "message": "Save before continuing?"
+                }
+            }]
+        });
+
+        let parsed = pipeline_editors_from_data(Some(data)).unwrap();
+        let running = parsed
+            .instances
+            .into_iter()
+            .next()
+            .unwrap()
+            .into_running_editor();
+
+        assert!(running.in_safe_mode());
+        assert_eq!(running.dialog_text().as_deref(), Some("Save changes?"));
+    }
+
+    #[test]
+    fn pipeline_status_merges_by_pid_and_adds_missing_editors() {
+        let mut running = RunningEditors {
+            count: 1,
+            instances: vec![RunningEditor {
+                project_path: Some("/tmp/Game".to_string()),
+                editor_version: Some("6000.6.6f1".to_string()),
+                pid: Some(42),
+                ..RunningEditor::default()
+            }],
+        };
+        let pipeline = PipelineEditors {
+            instances: vec![
+                PipelineEditor {
+                    project_path: Some("/tmp/Game".to_string()),
+                    pid: Some(42),
+                    phase: Some("ready".to_string()),
+                    pipeline_version: Some("0.9.1-exp.1".to_string()),
+                    update_available: true,
+                    ..PipelineEditor::default()
+                },
+                PipelineEditor {
+                    project_path: Some("/tmp/Other".to_string()),
+                    pid: Some(43),
+                    phase: Some("loading project".to_string()),
+                    ..PipelineEditor::default()
+                },
+            ],
+            ..PipelineEditors::default()
+        };
+
+        merge_pipeline_editors(&mut running, pipeline);
+
+        assert_eq!(running.count, 2);
+        assert_eq!(running.instances[0].phase.as_deref(), Some("ready"));
+        assert_eq!(
+            running.instances[0].pipeline_version.as_deref(),
+            Some("0.9.1-exp.1")
+        );
+        assert!(running.instances[0].update_available);
+        assert_eq!(
+            running.instances[1].project_path.as_deref(),
+            Some("/tmp/Other")
+        );
+        assert!(running.instances[1].editor_version.is_none());
+    }
 
     #[test]
     fn display_quotes_paths_with_spaces() {

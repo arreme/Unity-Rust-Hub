@@ -46,7 +46,7 @@ pub fn validate_cli_version(input: &str) -> Result<(), UnityError> {
         return Ok(());
     }
     Err(UnityError::invalid_input(format!(
-        "`{value}` is not a Unity CLI version. Try `latest` or `1.0.0-beta.15`."
+        "`{value}` is not a Unity CLI version. Try `latest` or `1.0.0-beta.16`."
     )))
 }
 

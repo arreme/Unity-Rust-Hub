@@ -339,23 +339,48 @@ fn running_card(
             );
         } else {
             for instance in instances {
-                body = body.push(
-                    container(
-                        column![
-                            text(instance.project_path.as_str()).size(11),
-                            text(format!(
-                                "{} · pid {}",
-                                instance.editor_version, instance.pid
-                            ))
+                let mut details = column![
+                    text(instance.project_path.as_str()).size(11),
+                    text(format!(
+                        "{} · pid {}",
+                        instance.editor_version, instance.pid
+                    ))
+                    .size(9)
+                    .style(theme::faint_text),
+                ]
+                .spacing(2);
+
+                if let Some(phase) = &instance.phase {
+                    details = details.push(
+                        text(format!("Phase: {phase}"))
                             .size(9)
-                            .style(theme::faint_text),
-                        ]
-                        .spacing(2),
-                    )
-                    .padding(8)
-                    .width(Fill)
-                    .style(theme::card),
-                );
+                            .style(theme::muted_text),
+                    );
+                }
+
+                let mut badges = Vec::new();
+                if let Some(version) = &instance.pipeline_version {
+                    badges.push(badge(format!("Pipeline {version}"), Tone::Highlight));
+                }
+                if instance.update_available {
+                    badges.push(badge("update available", Tone::Warning));
+                }
+                if instance.safe_mode {
+                    badges.push(badge("Safe mode", Tone::Danger));
+                }
+                if !badges.is_empty() {
+                    details = details.push(row(badges).spacing(6));
+                }
+
+                if let Some(dialog) = &instance.dialog {
+                    details = details.push(
+                        text(format!("Waiting on dialog: {dialog}"))
+                            .size(9)
+                            .style(theme::warning_text),
+                    );
+                }
+
+                body = body.push(container(details).padding(8).width(Fill).style(theme::card));
             }
         }
     } else if let Some(error) = running.error() {

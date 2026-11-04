@@ -8,7 +8,7 @@ use unity_core::bootstrap;
 use unity_core::changelog::{ChangelogRequest, ChangelogView, CliChangelogProvider};
 use unity_core::models::{
     AuthStatus, CliStatus, CliUpdateInfo, Editor, InstallPreview, LicenseStatus, Module, Project,
-    Release, RunningEditors,
+    Release, RunningEditor, RunningEditors,
 };
 use unity_core::{CommandSpec, UnityCli, UnityError};
 use unity_hub_model::{
@@ -857,13 +857,26 @@ impl App {
                 let Modal::UpgradeProject(project) = &self.modal else {
                     return Task::none();
                 };
+                let project_path = project.path.clone();
                 let Some(target) = self.upgrade_target.clone() else {
                     return Task::none();
                 };
                 if !self.upgrade_confirmed {
                     return Task::none();
                 }
-                match self.cli.upgrade_project_spec(&project.path, &target) {
+                // Best-effort UX guard. The CLI still owns the authoritative
+                // check and reports exit 6 if the project is open.
+                if let Some(editor) = self.running_editor_for_project(&project_path) {
+                    let label = editor
+                        .project_path
+                        .clone()
+                        .unwrap_or_else(|| project_path.clone());
+                    self.notice = Some(Notice::error(format!(
+                        "Close the running Unity Editor for {label} before upgrading this project."
+                    )));
+                    return Task::none();
+                }
+                match self.cli.upgrade_project_spec(&project_path, &target) {
                     Ok(spec) => {
                         if self.start_job("project-upgrade", spec) {
                             self.modal = Modal::None;
@@ -1254,6 +1267,11 @@ impl App {
                             .pid
                             .map(|pid| pid.to_string())
                             .unwrap_or_else(|| "—".to_string()),
+                        phase: instance.phase.clone(),
+                        pipeline_version: instance.pipeline_version.clone(),
+                        update_available: instance.update_available,
+                        safe_mode: instance.in_safe_mode(),
+                        dialog: instance.dialog_text(),
                     })
                     .collect()
             }),
@@ -1633,6 +1651,16 @@ impl App {
             .find(|version| version != current)
     }
 
+    fn running_editor_for_project(&self, path: &str) -> Option<&RunningEditor> {
+        let running = self.running.data.as_ref()?;
+        running.instances.iter().find(|editor| {
+            editor
+                .project_path
+                .as_deref()
+                .is_some_and(|candidate| same_project_path(candidate, path))
+        })
+    }
+
     /// Fills the target when Editors finish loading after the dialog opened.
     fn ensure_upgrade_target(&mut self) {
         if self.upgrade_target.is_some() {
@@ -1714,6 +1742,24 @@ fn ui_error(error: &UnityError) -> UiError {
             .detail
             .clone()
             .filter(|detail| !detail.trim().is_empty()),
+    }
+}
+
+/// Best-effort path comparison for the running-Editor guard. The CLI remains
+/// authoritative, so this only needs to catch the common same-folder spelling.
+fn same_project_path(left: &str, right: &str) -> bool {
+    fn trim(path: &str) -> &str {
+        path.trim().trim_end_matches(['/', '\\'])
+    }
+
+    let left = trim(left);
+    let right = trim(right);
+    if left == right {
+        return true;
+    }
+    match (std::fs::canonicalize(left), std::fs::canonicalize(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => cfg!(windows) && left.eq_ignore_ascii_case(right),
     }
 }
 
@@ -1977,7 +2023,7 @@ mod tests {
             path: Some("/usr/bin/unity".to_string()),
             path_source: Some("PATH".to_string()),
             version: Some(CliVersion {
-                version: "1.0.0-beta.15".to_string(),
+                version: "1.0.0-beta.16".to_string(),
                 channel: "beta".to_string(),
                 platform: "linux".to_string(),
                 arch: "x86_64".to_string(),
@@ -1992,7 +2038,7 @@ mod tests {
             &vm.shell.cli,
             CliConnectionVm::Connected {
                 version: Some(version)
-            } if version == "1.0.0-beta.15"
+            } if version == "1.0.0-beta.16"
         ));
         match &vm.page {
             PageVm::Overview(overview) => match &overview.cli {
@@ -2026,5 +2072,54 @@ mod tests {
             }
             other => panic!("unexpected page: {other:?}"),
         }
+    }
+
+    #[test]
+    fn view_model_maps_rich_running_editor_status() {
+        let (mut app, _) = App::boot();
+        app.page = Page::Overview;
+        app.running.data = Some(RunningEditors {
+            count: 1,
+            instances: vec![RunningEditor {
+                project_path: Some("/games/orbital".to_string()),
+                editor_version: Some("6000.6.6f1".to_string()),
+                pid: Some(4242),
+                phase: Some("safe mode".to_string()),
+                pipeline_version: Some("0.9.1-exp.1".to_string()),
+                update_available: true,
+                safe_mode: Some(serde_json::json!({ "detected": true })),
+                dialog: Some(serde_json::json!({ "title": "Save changes?" })),
+                ..RunningEditor::default()
+            }],
+        });
+
+        let vm = app.view_model();
+        match &vm.page {
+            PageVm::Overview(overview) => {
+                let editors = overview.running.data().expect("running editors");
+                assert_eq!(editors.len(), 1);
+                assert_eq!(editors[0].phase.as_deref(), Some("safe mode"));
+                assert_eq!(editors[0].pipeline_version.as_deref(), Some("0.9.1-exp.1"));
+                assert!(editors[0].update_available);
+                assert!(editors[0].safe_mode);
+                assert_eq!(editors[0].dialog.as_deref(), Some("Save changes?"));
+            }
+            other => panic!("unexpected page: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn upgrade_guard_matches_running_editor_by_project_path() {
+        let (mut app, _) = App::boot();
+        app.running.data = Some(RunningEditors {
+            count: 1,
+            instances: vec![RunningEditor {
+                project_path: Some("/games/orbital/".to_string()),
+                ..RunningEditor::default()
+            }],
+        });
+
+        assert!(app.running_editor_for_project("/games/orbital").is_some());
+        assert!(app.running_editor_for_project("/games/other").is_none());
     }
 }

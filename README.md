@@ -8,7 +8,7 @@ versions, and read release notes without keeping a terminal open.
 No webview, no Node toolchain, no HTML/JS layer. The release build is a single Rust
 binary that renders through iced's software renderer.
 
-The Unity CLI is in beta (`1.0.0-beta.15` at the time of writing). This app is built
+The Unity CLI is in beta (`1.0.0-beta.16` at the time of writing). This app is built
 against its JSON envelope and treats the CLI as the source of truth for every mutation.
 
 ## Features
@@ -18,6 +18,9 @@ against its JSON envelope and treats the CLI as the source of truth for every mu
   sign in to Unity with `unity auth login`.
 - **Editors** — installed versions with modules, Linux/macOS/Windows architecture,
   default-Editor state, and the install location.
+- **Running Editors** — read-only status from `unity editors running`, enriched with
+  `unity pipeline editors` phase, Pipeline version, update availability, Safe Mode, and a
+  blocking dialog.
 - **Releases** — newest releases with LTS/beta/alpha and installed badges.
 - **Editor install** — pick a version or alias (`lts`, `latest`, `6000.3`, exact), load
   the module catalog, preview the download with `--dry-run`, accept module terms
@@ -205,6 +208,18 @@ upgrade does, not when the Editor is closed.
 CLI beta.15 removed the `list` subcommands and deprecated a few flags, so the adapter
 uses the current spellings: `unity projects --all`, `unity modules <version>`,
 `unity releases --offset`, and `unity install-modules --editor-version`.
+
+The adapter is aligned to CLI beta.16:
+
+- Exit codes `17` (`UNAVAILABLE`) and `18` (`AWAITING_INPUT`) are mapped and treated as
+  retryable.
+- `unity install-modules` exiting `0` when every named module is already installed counts
+  as success, even when no result frame is written.
+- `unity projects upgrade` refuses a project that is open in an Editor; the upgrade job
+  surfaces the CLI error, and the app also checks the running-Editor list before starting.
+- The Overview running-Editor card merges `unity editors running` with
+  `unity pipeline editors` to show phase, Pipeline version, update availability, Safe Mode,
+  and a blocking dialog. It stays read-only; dialogs are not answered from the app.
 
 Resolution order for the binary:
 

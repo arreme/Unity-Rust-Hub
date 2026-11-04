@@ -74,9 +74,9 @@ impl std::fmt::Display for UnityError {
 
 impl std::error::Error for UnityError {}
 
-/// Exit-code semantics from the Unity CLI reference.
+/// Exit-code semantics from the Unity CLI reference (beta 16).
 pub fn is_retryable_exit_code(code: i32) -> bool {
-    matches!(code, 7 | 9 | 10 | 12 | 14 | 130 | 143)
+    matches!(code, 7 | 9 | 10 | 12 | 14 | 17 | 18 | 130 | 143)
 }
 
 pub fn code_for_exit_code(code: i32) -> &'static str {
@@ -97,6 +97,8 @@ pub fn code_for_exit_code(code: i32) -> &'static str {
         14 => "TIMEOUT",
         15 => "RUN_FAILED",
         16 => "JOB_SUSPENDED",
+        17 => "UNAVAILABLE",
+        18 => "AWAITING_INPUT",
         130 => "INTERRUPTED",
         141 => "OUTPUT_CLOSED",
         143 => "TERMINATED",
@@ -120,6 +122,8 @@ pub fn message_for_exit_code(code: i32) -> &'static str {
         14 => "The operation timed out.",
         15 => "A build or job finished unsuccessfully.",
         16 => "A job is waiting for a person to resume or approve it.",
+        17 => "The target is busy; wait for it to finish, then retry.",
+        18 => "The target is waiting on a person to answer a dialog or prompt.",
         130 => "The operation was interrupted.",
         141 => "The output reader closed the pipe.",
         143 => "The operation was terminated.",
@@ -133,7 +137,7 @@ mod tests {
 
     #[test]
     fn retryable_codes_match_the_cli_documentation() {
-        for code in [7, 9, 10, 12, 14, 130, 143] {
+        for code in [7, 9, 10, 12, 14, 17, 18, 130, 143] {
             assert!(is_retryable_exit_code(code), "{code} should be retryable");
         }
         for code in [0, 1, 2, 3, 4, 6, 8, 11, 13, 15, 16, 141] {
@@ -144,7 +148,15 @@ mod tests {
     #[test]
     fn exit_code_names_are_stable() {
         assert_eq!(code_for_exit_code(12), "EDITOR_UNREACHABLE");
+        assert_eq!(code_for_exit_code(17), "UNAVAILABLE");
+        assert_eq!(code_for_exit_code(18), "AWAITING_INPUT");
         assert_eq!(code_for_exit_code(130), "INTERRUPTED");
         assert_eq!(code_for_exit_code(99), "ERROR");
+    }
+
+    #[test]
+    fn beta16_exit_codes_have_friendly_messages() {
+        assert!(message_for_exit_code(17).contains("busy"));
+        assert!(message_for_exit_code(18).contains("dialog"));
     }
 }

@@ -200,12 +200,8 @@ impl JobManager {
             let status = wait_for_exit(&child);
             let exit_code = status.and_then(|status| status.code());
             let process_succeeded = status.map(|status| status.success()).unwrap_or(false);
-            let result_succeeded = last_result
-                .as_ref()
-                .and_then(|result| result.get("success"))
-                .and_then(Value::as_bool);
             let was_cancelled = cancelled.load(Ordering::SeqCst) && !process_succeeded;
-            let succeeded = process_succeeded && result_succeeded != Some(false);
+            let succeeded = job_succeeded(process_succeeded, last_result.as_ref());
 
             let error = if was_cancelled {
                 Some(
@@ -399,6 +395,17 @@ fn message_from(object: &serde_json::Map<String, Value>) -> Option<String> {
     None
 }
 
+fn job_succeeded(process_succeeded: bool, last_result: Option<&Value>) -> bool {
+    // `install-modules` exits 0 with no result frame when every named module
+    // is already installed. An exit-0 run is success unless a result frame
+    // explicitly says otherwise.
+    process_succeeded
+        && last_result
+            .and_then(|result| result.get("success"))
+            .and_then(Value::as_bool)
+            != Some(false)
+}
+
 fn job_error(result: Option<&Value>, exit_code: Option<i32>) -> UnityError {
     if let Some(result) = result {
         if let Ok(envelope) = serde_json::from_value::<CliEnvelope<Value>>(result.clone()) {
@@ -467,5 +474,61 @@ mod tests {
 
         assert!(receiver.try_recv().is_ok());
         assert!(receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn exit_zero_without_result_frames_is_success() {
+        // Beta 16: install-modules exits 0 (and may print only the human
+        // "already installed" line) when every named module is installed.
+        assert!(job_succeeded(true, None));
+        assert!(!job_succeeded(false, None));
+    }
+
+    #[test]
+    fn result_frame_can_veto_an_exit_zero() {
+        let failure = serde_json::json!({
+            "type": "result",
+            "success": false,
+            "errors": [{ "code": "PROJECT_OPEN_IN_EDITOR", "message": "Project is open." }]
+        });
+        assert!(!job_succeeded(true, Some(&failure)));
+
+        let success = serde_json::json!({ "type": "result", "success": true });
+        assert!(job_succeeded(true, Some(&success)));
+    }
+
+    #[test]
+    fn job_error_prefers_the_cli_error_frame() {
+        let result = serde_json::json!({
+            "type": "result",
+            "success": false,
+            "errors": [{
+                "code": "PROJECT_OPEN_IN_EDITOR",
+                "message": "The project is already open in Unity Editor (pid 4242).",
+                "detail": "Close that Editor and retry."
+            }]
+        });
+
+        let error = job_error(Some(&result), Some(6));
+
+        assert_eq!(error.code, "PROJECT_OPEN_IN_EDITOR");
+        assert_eq!(
+            error.message,
+            "The project is already open in Unity Editor (pid 4242)."
+        );
+        assert_eq!(
+            error.detail.as_deref(),
+            Some("Close that Editor and retry.")
+        );
+        assert_eq!(error.exit_code, Some(6));
+    }
+
+    #[test]
+    fn job_error_falls_back_to_exit_code_semantics() {
+        let error = job_error(None, Some(6));
+
+        assert_eq!(error.code, "COMMAND_FAILED");
+        assert_eq!(error.message, "The Unity CLI command failed.");
+        assert_eq!(error.exit_code, Some(6));
     }
 }
