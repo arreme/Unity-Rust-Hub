@@ -26,8 +26,10 @@ modules:
       - cargo --offline fetch --manifest-path Cargo.toml --verbose
       - cargo --offline build --release --locked -p unity-hub
       - install -Dm755 target/release/unity-rust-hub /app/bin/unity-rust-hub
-      - sed 's/^Icon=.*/Icon=io.github.arreme.UnityRustHub/' packaging/unity-rust-hub.desktop > /tmp/unity-rust-hub.desktop
-      - install -Dm644 /tmp/unity-rust-hub.desktop /app/share/applications/io.github.arreme.UnityRustHub.desktop
+      # flatpak-builder runs each command with a fresh /tmp, so keep the
+      # generated desktop file in the build directory.
+      - sed 's/^Icon=.*/Icon=io.github.arreme.UnityRustHub/' packaging/unity-rust-hub.desktop > unity-rust-hub.desktop
+      - install -Dm644 unity-rust-hub.desktop /app/share/applications/io.github.arreme.UnityRustHub.desktop
       - |
         for size in 16 20 24 32 40 48 64 256; do
           install -Dm644 "Icon/Icon-png-icons/Icon-${size}x${size}.png" \
