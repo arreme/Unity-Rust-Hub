@@ -33,8 +33,12 @@ Install it through Shelly instead of copying it into place:
 ```bash
 mv UnityRustHub-0.2.1-linux-x86_64.AppImage UnityRustHub.AppImage
 shelly install appimage ./UnityRustHub.AppImage
+shelly list appimage  # note the exact Name Shelly stored
 shelly sync appimage UnityRustHub arreme/Unity-Rust-Hub GitHub
 ```
+
+If you installed the versioned filename instead, use that exact name from
+`shelly list appimage` in place of `UnityRustHub` in the `sync` command.
 
 Then check for and apply updates with:
 
