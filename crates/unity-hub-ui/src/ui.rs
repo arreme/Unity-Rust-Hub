@@ -72,6 +72,16 @@ impl<'a> ScaledText<'a> {
         self
     }
 
+    pub fn shaping(mut self, shaping: text::Shaping) -> Self {
+        self.inner = self.inner.shaping(shaping);
+        self
+    }
+
+    pub fn wrapping(mut self, wrapping: text::Wrapping) -> Self {
+        self.inner = self.inner.wrapping(wrapping);
+        self
+    }
+
     pub fn style(mut self, style: impl Fn(&Theme) -> text::Style + 'a) -> Self {
         self.inner = self.inner.style(style);
         self

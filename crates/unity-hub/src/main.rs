@@ -31,8 +31,13 @@ fn main() -> iced::Result {
         iced::window::icon::from_rgba(include_bytes!("../assets/icon-128.rgba").to_vec(), 128, 128)
             .ok();
 
-    iced::application(Runtime::boot, Runtime::update, Runtime::view)
-        .executor::<SmallExecutor>()
+    let mut app = iced::application(Runtime::boot, Runtime::update, Runtime::view);
+    for font in unity_hub_ui::fonts::ALL {
+        app = app.font(font);
+    }
+
+    app.executor::<SmallExecutor>()
+        .default_font(unity_hub_ui::fonts::SANS)
         .title("Unity Rust Hub")
         .theme(Runtime::theme)
         .subscription(Runtime::subscription)

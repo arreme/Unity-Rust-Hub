@@ -5,6 +5,8 @@
 //! models and emit [`unity_hub_model::UiAction`] values.
 
 mod components;
+pub mod fonts;
+pub mod icons;
 mod modals;
 mod pages;
 mod shell;
