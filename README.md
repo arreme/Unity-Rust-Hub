@@ -24,6 +24,38 @@ Prebuilt binaries and installers are published on the
 The app does not bundle the Unity CLI. Install it from the Overview screen on first
 launch, or point Settings at an existing `unity` binary.
 
+### Updating with Shelly (Arch-based systems)
+
+The AppImage embeds its version so
+[Shelly](https://github.com/Seafoam-Labs/Shelly-ALPM) can track updates.
+Install it through Shelly instead of copying it into place:
+
+```bash
+mv UnityRustHub-0.2.1-linux-x86_64.AppImage UnityRustHub.AppImage
+shelly install appimage ./UnityRustHub.AppImage
+shelly sync appimage UnityRustHub arreme/Unity-Rust-Hub GitHub
+```
+
+Then check for and apply updates with:
+
+```bash
+shelly list-updates appimage
+shelly upgrade appimage
+```
+
+Shelly only tracks AppImages it installed; a manually copied file has no update
+entry until you import and configure it.
+
+In the Shelly GUI, open **App Images → Unity Rust Hub → Update source**,
+choose **GitHub**, and enter `arreme/Unity-Rust-Hub`. Prereleases are skipped
+by default; use `--prerelease` on `shelly sync appimage` or the GUI toggle to
+track them.
+
+Use the stable `UnityRustHub.AppImage` filename.
+
+Do not rename or move the file after installing it, or Shelly will lose the
+update target.
+
 ## Features
 
 - **CLI lifecycle** — detect the executable, show version/channel/platform, check for
@@ -186,7 +218,9 @@ cargo run -p unity-hub-ui --bin unity-hub-design-gallery
 cargo install cargo-packager --version 0.11.8 --locked
 
 # Linux: AppImage, Debian package, pacman package.
-cargo packager --config Packager.toml --formats appimage,deb,pacman
+# VERSION makes appimagetool embed X-AppImage-Version for Shelly.
+VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' Packager.toml | head -n1)" \
+  cargo packager --config Packager.toml --formats appimage,deb,pacman
 
 # Windows: NSIS installer.
 cargo packager --config Packager.toml --formats nsis
