@@ -264,6 +264,8 @@ pub struct PipelineEditor {
     #[serde(default)]
     pub pid: Option<u32>,
     #[serde(default)]
+    pub is_running: Option<bool>,
+    #[serde(default)]
     pub port: Option<u16>,
     #[serde(default, alias = "editorPhase")]
     pub phase: Option<String>,
@@ -281,13 +283,20 @@ pub struct PipelineEditor {
 
 impl PipelineEditor {
     pub fn server_port(&self) -> Option<u16> {
-        self.port.or_else(|| {
-            self.extra
-                .get("pipelineServer")
-                .and_then(|server| server.get("port"))
-                .and_then(Value::as_u64)
-                .and_then(|port| u16::try_from(port).ok())
-        })
+        self.port
+            .or_else(|| {
+                self.extra
+                    .get("serverPort")
+                    .and_then(Value::as_u64)
+                    .and_then(|port| u16::try_from(port).ok())
+            })
+            .or_else(|| {
+                self.extra
+                    .get("pipelineServer")
+                    .and_then(|server| server.get("port"))
+                    .and_then(Value::as_u64)
+                    .and_then(|port| u16::try_from(port).ok())
+            })
     }
 
     pub fn into_running_editor(self) -> RunningEditor {

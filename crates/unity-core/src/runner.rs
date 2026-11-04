@@ -209,10 +209,6 @@ impl UnityCli {
 
     pub fn editors_running(&self) -> Result<RunningEditors, UnityError> {
         let mut running = self.editors_running_base()?;
-        // Nothing to enrich. Avoid a second CLI invocation when no Editor is open.
-        if running.instances.is_empty() {
-            return Ok(running);
-        }
         // Pipeline status is a beta.16 addition. An older CLI, a stopped
         // Pipeline server, or an unexpected shape must not break the base list.
         if let Ok(pipeline) = self.pipeline_editors() {
@@ -390,10 +386,16 @@ fn pipeline_editors_from_data(data: Option<Value>) -> Result<PipelineEditors, Un
     let instances = if data.is_array() {
         parse_items(Some(data.clone()), &[])?
     } else {
-        parse_items(
-            data.get("instances").or_else(|| data.get("items")).cloned(),
-            &[],
-        )?
+        let instances = data.get("instances");
+        let instances_data = match instances {
+            Some(Value::Array(_)) => instances.cloned(),
+            _ => data
+                .get("items")
+                .filter(|items| items.is_array())
+                .cloned()
+                .or_else(|| instances.cloned()),
+        };
+        parse_items(instances_data, &[])?
     };
     let latest_version = data
         .get("latestVersion")
@@ -410,6 +412,11 @@ fn pipeline_editors_from_data(data: Option<Value>) -> Result<PipelineEditors, Un
 
 fn merge_pipeline_editors(running: &mut RunningEditors, pipeline: PipelineEditors) {
     for instance in pipeline.instances {
+        // A stale pipeline row for an Editor that has already quit must not
+        // create a phantom Overview row.
+        if instance.is_running == Some(false) {
+            continue;
+        }
         let pid = instance.pid;
         let project_path = instance.project_path.clone();
         let position = pid
@@ -422,10 +429,10 @@ fn merge_pipeline_editors(running: &mut RunningEditors, pipeline: PipelineEditor
             .or_else(|| {
                 project_path.as_deref().and_then(|path| {
                     running.instances.iter().position(|candidate| {
-                        candidate.project_path.as_deref().is_some_and(|candidate| {
-                            candidate.trim_end_matches(['/', '\\'])
-                                == path.trim_end_matches(['/', '\\'])
-                        })
+                        candidate
+                            .project_path
+                            .as_deref()
+                            .is_some_and(|candidate| same_project_path(candidate, path))
                     })
                 })
             });
@@ -462,6 +469,12 @@ fn merge_pipeline_editors(running: &mut RunningEditors, pipeline: PipelineEditor
         }
     }
     running.count = running.instances.len();
+}
+
+fn same_project_path(left: &str, right: &str) -> bool {
+    let left = left.trim().trim_end_matches(['/', '\\']);
+    let right = right.trim().trim_end_matches(['/', '\\']);
+    left == right || (cfg!(windows) && left.eq_ignore_ascii_case(right))
 }
 
 fn envelope_error(envelope: &ValueEnvelope, stderr: &str, exit_code: Option<i32>) -> UnityError {
@@ -965,6 +978,103 @@ mod tests {
             Some("/tmp/Other")
         );
         assert!(running.instances[1].editor_version.is_none());
+    }
+
+    #[test]
+    fn pipeline_only_instances_are_added_to_an_empty_base() {
+        let mut running = RunningEditors::default();
+        let pipeline = PipelineEditors {
+            instances: vec![PipelineEditor {
+                project_path: Some("/tmp/Game".to_string()),
+                pid: Some(7),
+                is_running: Some(true),
+                phase: Some("loading project".to_string()),
+                ..PipelineEditor::default()
+            }],
+            ..PipelineEditors::default()
+        };
+
+        merge_pipeline_editors(&mut running, pipeline);
+
+        assert_eq!(running.count, 1);
+        assert_eq!(
+            running.instances[0].project_path.as_deref(),
+            Some("/tmp/Game")
+        );
+        assert_eq!(
+            running.instances[0].phase.as_deref(),
+            Some("loading project")
+        );
+        assert!(running.instances[0].editor_version.is_none());
+    }
+
+    #[test]
+    fn pipeline_instances_merge_by_path_when_neither_has_a_pid() {
+        let mut running = RunningEditors {
+            count: 1,
+            instances: vec![RunningEditor {
+                project_path: Some("/tmp/Game/".to_string()),
+                ..RunningEditor::default()
+            }],
+        };
+        let pipeline = PipelineEditors {
+            instances: vec![PipelineEditor {
+                project_path: Some("/tmp/Game".to_string()),
+                phase: Some("ready".to_string()),
+                ..PipelineEditor::default()
+            }],
+            ..PipelineEditors::default()
+        };
+
+        merge_pipeline_editors(&mut running, pipeline);
+
+        assert_eq!(running.count, 1);
+        assert_eq!(running.instances.len(), 1);
+        assert_eq!(running.instances[0].phase.as_deref(), Some("ready"));
+    }
+
+    #[test]
+    fn stopped_pipeline_instances_are_not_added() {
+        let mut running = RunningEditors::default();
+        let pipeline = PipelineEditors {
+            instances: vec![PipelineEditor {
+                project_path: Some("/tmp/Game".to_string()),
+                pid: Some(7),
+                is_running: Some(false),
+                ..PipelineEditor::default()
+            }],
+            ..PipelineEditors::default()
+        };
+
+        merge_pipeline_editors(&mut running, pipeline);
+
+        assert_eq!(running.count, 0);
+        assert!(running.instances.is_empty());
+    }
+
+    #[test]
+    fn pipeline_editor_server_port_falls_back_to_the_top_level_field() {
+        let editor: PipelineEditor =
+            serde_json::from_value(serde_json::json!({ "serverPort": 7801 })).unwrap();
+        assert_eq!(editor.server_port(), Some(7801));
+    }
+
+    #[test]
+    fn pipeline_editors_falls_back_to_items_when_instances_is_unusable() {
+        for instances in [Value::Null, Value::String("not-a-list".to_string())] {
+            let data = serde_json::json!({
+                "instances": instances,
+                "items": [{ "projectPath": "/tmp/Game", "pid": 7 }]
+            });
+
+            let parsed = pipeline_editors_from_data(Some(data)).unwrap();
+
+            assert_eq!(parsed.instances.len(), 1);
+            assert_eq!(
+                parsed.instances[0].project_path.as_deref(),
+                Some("/tmp/Game")
+            );
+        }
     }
 
     #[test]

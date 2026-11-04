@@ -162,7 +162,7 @@ fn behavior_wording() -> &'static Regex {
             | \b(?:print|prints|printed|write|writes|written|return|returns|returned|report|reports|reported|emit|emits|emitted|output|outputs|outputted)\b
               .{0,120}?\b(?:tsv|ndjson)\b
             | \bnow\s+(?:refuses|stops|fails)\b
-            | \bno\s+longer\s+(?:installs?|deletes?|returns?|writes?|prints?|accepts?|creates?|includes?|ships?)\b
+            | \bno\s+longer\s+(?:registers?|installs?|deletes?|returns?|writes?|prints?|accepts?|adds?|creates?|includes?|ships?)\b
             ",
         )
         .expect("valid regex")
@@ -184,6 +184,57 @@ fn fix_contract_phrases() -> &'static Regex {
             ",
         )
         .expect("valid regex")
+    })
+}
+
+/// A command that now refuses an input, immediately after its `unity` name.
+fn fix_command_refusal_wording() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"(?isx)\bunity\s+[a-z][a-z0-9.-]*\b.{0,80}?\bnow\s+refuses?\b")
+            .expect("valid regex")
+    })
+}
+
+/// A command that no longer installs or deletes something, immediately after
+/// its `unity` name. These are contract changes even when no exit code moves.
+fn fix_command_destructive_wording() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r"(?isx)\bunity\s+[a-z][a-z0-9.-]*\b.{0,80}?
+            \bno\s+longer\s+(?:installs?|deletes?)\b",
+        )
+        .expect("valid regex")
+    })
+}
+
+/// Other command behavior changes only count when the entry also mentions a
+/// machine-readable contract (not a bare exit number).
+fn fix_command_other_wording() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r"(?isx)\bunity\s+[a-z][a-z0-9.-]*\b.{0,80}?
+            \b(?:now\s+(?:stops|fails)
+            | no\s+longer\s+(?:prints?|creates?|registers?|adds?))\b",
+        )
+        .expect("valid regex")
+    })
+}
+
+fn fix_command_strong_marker() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"(?i)(?:\berror\s+codes?\b|--format\b|\b(?:json|ndjson|tsv)\b)")
+            .expect("valid regex")
+    })
+}
+
+fn fix_command_exit_marker() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"(?i)\bexit(?:s|ed)?\s+(?:with\s+)?(?:code\s+)?\d+\b").expect("valid regex")
     })
 }
 
@@ -284,6 +335,11 @@ fn editor_signal() -> &'static Regex {
 fn fix_contract_wording(text: &str) -> bool {
     fix_wording().is_match(text)
         || fix_contract_phrases().is_match(text)
+        || (fix_command_refusal_wording().is_match(text)
+            && fix_command_exit_marker().is_match(text))
+        || fix_command_destructive_wording().is_match(text)
+        || (fix_command_other_wording().is_match(text)
+            && fix_command_strong_marker().is_match(text))
         || (fix_exit_instead_wording().is_match(text) && fix_exit_contract_marker().is_match(text))
         || (fix_exit_used_to_wording().is_match(text)
             && (format_signal().is_match(text) || editor_signal().is_match(text)))
@@ -520,6 +576,9 @@ mod tests {
 - `unity command` exits `14` with the `EDITOR_TIMEOUT` error code when the Editor stops a command that ran past `--timeout`, instead of exiting `6` with `COMMAND_FAILED`.
 - `unity uninstall` now reports the Editor it removed under `--format json`, `ndjson` and `tsv`: the json envelope and the ndjson result frame carry `version` and `architecture`, and `tsv` prints them as key and value rows. It used to print nothing and exit 0.
 - `unity self-update` now exits with code 1 and the error code `UPGRADE_NO_BINARY` when the release has no download for your platform, instead of exit 6 with `COMMAND_FAILED`.
+- `unity install <version> --changeset <changeset>` no longer installs the public build of that version when the changeset belongs to a different build. It now exits `11` (`RELEASE_NOT_FOUND`) and installs nothing.
+- `unity uninstall` no longer deletes an Editor whose architecture the Hub's editor list does not record. Without `--architecture` it now stops with a message and removes nothing.
+- `unity self-update --rollback` now refuses to run together with `--dry-run`, `--check`, `--changelog`, `--target` or `--channel`, and exits `2` without changing anything.
 - `--quiet` no longer empties `--format tsv` tables. `unity --quiet --format tsv releases` printed nothing and exited 0, so a script that piped it got no data. It now prints the same rows as without `--quiet`.
 - `unity collab attachments upload` no longer leaves an unfinished attachment behind when the file transfer fails, so you can run the upload again on the same annotation. If the attachment cannot be removed, the error names the `unity collab attachments delete` command that clears it.
 - `unity projects --watch` now follows the project list. A project added or removed from another terminal while the watch runs appears or disappears on the next poll. Before, only the rows already shown refreshed, so the list never changed.
@@ -591,6 +650,10 @@ mod tests {
             "unity command exits",
             "uninstall",
             "self-update",
+            "setup all",
+            "changeset",
+            "uninstall no longer deletes",
+            "self-update --rollback",
         ] {
             let change = parsed
                 .breaking_changes
@@ -613,7 +676,6 @@ mod tests {
             "projects --watch",
             "answers sooner",
             "--quiet no longer empties",
-            "setup all no longer registers",
         ] {
             assert!(
                 !parsed

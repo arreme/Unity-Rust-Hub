@@ -842,7 +842,7 @@ impl App {
                 self.upgrade_target = self.first_other_editor_version(&project.version);
                 self.upgrade_confirmed = false;
                 self.modal = Modal::UpgradeProject(project);
-                Task::none()
+                self.refresh_running_editors()
             }
             Message::UpgradeTargetChanged(version) => {
                 self.upgrade_target = Some(version);
@@ -1150,6 +1150,10 @@ impl App {
             self.editors.begin();
             tasks.push(load_editors(self.cli.clone()));
         }
+        if (force || self.running.data.is_none()) && !self.running.loading {
+            self.running.begin();
+            tasks.push(load_running(self.cli.clone()));
+        }
 
         Task::batch(tasks)
     }
@@ -1165,6 +1169,15 @@ impl App {
             load_changelog_future(self.cli.clone(), self.changelog_target.clone()),
             Message::ChangelogLoaded,
         )
+    }
+
+    /// Refreshes the running-Editor list unless a read is already in flight.
+    fn refresh_running_editors(&mut self) -> Task<Message> {
+        if self.running.loading {
+            return Task::none();
+        }
+        self.running.begin();
+        load_running(self.cli.clone())
     }
 
     fn refresh_status(&mut self) -> Task<Message> {
@@ -2121,5 +2134,29 @@ mod tests {
 
         assert!(app.running_editor_for_project("/games/orbital").is_some());
         assert!(app.running_editor_for_project("/games/other").is_none());
+    }
+
+    #[test]
+    fn opening_upgrade_dialog_starts_a_running_editor_refresh() {
+        let (mut app, _) = App::boot();
+        app.projects.data = Some(vec![project("Alpha", "/games/alpha", "6000.1.1f1")]);
+        app.editors.data = Some(vec![Editor {
+            version: "6000.2.2f1".to_string(),
+            ..Editor::default()
+        }]);
+
+        let _task = app.update(Message::OpenUpgrade("/games/alpha".to_string()));
+
+        assert!(app.running.loading);
+        assert!(matches!(app.modal, Modal::UpgradeProject(_)));
+    }
+
+    #[test]
+    fn projects_force_load_starts_a_running_editor_refresh() {
+        let (mut app, _) = App::boot();
+
+        let _task = app.load_projects_page(true);
+
+        assert!(app.running.loading);
     }
 }
