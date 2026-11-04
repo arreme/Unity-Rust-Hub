@@ -173,9 +173,9 @@ sudo pacman -Rns unity-rust-hub
 ```
 
 The PKGBUILD uses this working tree instead of a remote tarball, so the first build
-needs network access for crates.io. Bump `pkgver` when the workspace version changes.
-Build dependencies: `base-devel` and a Rust/cargo toolchain (the `rust` or `rustup`
-package).
+needs network access for crates.io. `scripts/set-version.sh` keeps `pkgver` in sync
+with the workspace version. Build dependencies: `base-devel` and a Rust/cargo
+toolchain (the `rust` or `rustup` package).
 
 ### Per-user install script (no sudo)
 
@@ -211,6 +211,22 @@ Render every screen/modal/job fixture without a Unity CLI:
 ```bash
 cargo run -p unity-hub-ui --bin unity-hub-design-gallery
 ```
+
+### Version bumps and releases
+
+Use the version helper instead of editing version fields by hand:
+
+```bash
+./scripts/set-version.sh 0.3.0          # update files only
+./scripts/set-version.sh 0.3.0 --commit # update and commit
+./scripts/set-version.sh 0.3.0 --tag    # commit and tag v0.3.0
+./scripts/set-version.sh 0.3.0 --release --yes
+```
+
+The script updates `Cargo.toml`, `Packager.toml`, `packaging/arch/PKGBUILD`,
+`Cargo.lock`, and the AppImage example in this README. `--release` pushes the
+branch and tag, which starts the GitHub release workflow. It requires a clean
+worktree and runs the workspace tests unless `--no-verify` is passed.
 
 ### Packaging a release locally
 
