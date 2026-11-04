@@ -97,7 +97,39 @@ jobs:
         run: cargo install cargo-packager --version 0.11.8 --locked
 
       - name: Build packages
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
         run: cargo packager --config Packager.toml --formats appimage,deb,pacman
+
+      - name: Verify AppImage version metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${{ needs.verify.outputs.version }}"
+
+          mapfile -t appimages < <(find dist -maxdepth 1 -type f -name '*.AppImage' -print)
+          if [[ "${#appimages[@]}" -ne 1 ]]; then
+            printf 'expected exactly one AppImage in dist, found %d\n' "${#appimages[@]}" >&2
+            printf '%s\n' "${appimages[@]}" >&2
+            exit 1
+          fi
+
+          appimage="${appimages[0]}"
+          extract_dir="$(mktemp -d)"
+          trap 'rm -rf "$extract_dir"' EXIT
+
+          (
+            cd "$extract_dir"
+            "$GITHUB_WORKSPACE/$appimage" --appimage-extract >/dev/null
+          )
+
+          desktop="$(find "$extract_dir/squashfs-root" -maxdepth 1 -name '*.desktop' -print -quit)"
+          if [[ -z "$desktop" ]]; then
+            echo "no .desktop file found in AppImage" >&2
+            exit 1
+          fi
+
+          grep -qx "X-AppImage-Version=${VERSION}" "$desktop"
 
       - name: Rename packages and add raw binary
         shell: bash
@@ -109,6 +141,7 @@ jobs:
           for f in dist/*.AppImage; do
             mv "$f" "dist/UnityRustHub-${VERSION}-linux-x86_64.AppImage"
           done
+          test -f "dist/UnityRustHub-${VERSION}-linux-x86_64.AppImage"
           for f in dist/*.deb; do
             mv "$f" "dist/UnityRustHub-${VERSION}-linux-amd64.deb"
           done
