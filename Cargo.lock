@@ -3591,7 +3591,7 @@ checksum = "ca718471876992059f251e33aafc334346ada08042b7661dd1fe313a9bced557"
 
 [[package]]
 name = "unity-core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "dirs",
  "regex",
@@ -3601,7 +3601,7 @@ dependencies = [
 
 [[package]]
 name = "unity-hub"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "futures",
  "iced",
@@ -3612,7 +3612,7 @@ dependencies = [
 
 [[package]]
 name = "unity-hub-controller"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "chrono",
  "dirs",
@@ -3626,11 +3626,11 @@ dependencies = [
 
 [[package]]
 name = "unity-hub-model"
-version = "0.2.0"
+version = "0.2.1"
 
 [[package]]
 name = "unity-hub-ui"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "iced",
  "unity-hub-model",
