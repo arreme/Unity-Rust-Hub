@@ -11,6 +11,19 @@ binary that renders through iced's software renderer.
 The Unity CLI is in beta (`1.0.0-beta.16` at the time of writing). This app is built
 against its JSON envelope and treats the CLI as the source of truth for every mutation.
 
+## Download
+
+Prebuilt binaries and installers are published on the
+[Releases](https://github.com/arreme/Unity-Rust-Hub/releases) page:
+
+- **Linux** — AppImage, Debian package, pacman package, Flatpak bundle, or a raw binary.
+  On Arch-based systems, Shelly can install the pacman package or the Flatpak bundle.
+- **Windows** — `*-windows-x64-setup.exe` installer, or the raw `*-portable.exe`.
+- **macOS** — DMG for Apple Silicon (`arm64`) or Intel (`x86_64`), plus a zipped `.app`.
+
+The app does not bundle the Unity CLI. Install it from the Overview screen on first
+launch, or point Settings at an existing `unity` binary.
+
 ## Features
 
 - **CLI lifecycle** — detect the executable, show version/channel/platform, check for
@@ -167,6 +180,24 @@ Render every screen/modal/job fixture without a Unity CLI:
 cargo run -p unity-hub-ui --bin unity-hub-design-gallery
 ```
 
+### Packaging a release locally
+
+```bash
+cargo install cargo-packager --version 0.11.8 --locked
+
+# Linux: AppImage, Debian package, pacman package.
+cargo packager --config Packager.toml --formats appimage,deb,pacman
+
+# Windows: NSIS installer.
+cargo packager --config Packager.toml --formats nsis
+
+# macOS: .app bundle and DMG.
+cargo packager --config Packager.toml --formats app,dmg
+```
+
+Artifacts are written to `dist/`. The GitHub release workflow runs the same
+commands on native runners and attaches the results to a tagged release.
+
 Live adapter smoke test against a real Unity CLI (ignored by default):
 
 ```bash
@@ -277,7 +308,8 @@ Resolution order for the binary:
 - Changelog breaking flags are heuristics over English release notes, not a guarantee.
 - Jobs are not persisted across app restarts; closing the window cancels them.
 - Only one job may run at a time.
-- Linux is the tested platform. macOS/Windows code paths are implemented but not CI-built.
+- Linux is the most exercised platform. macOS/Windows builds run in CI, but the runtime
+  behavior there is less tested than on Linux.
 - The raw changelog is shown as unformatted text.
 
 ## Documentation

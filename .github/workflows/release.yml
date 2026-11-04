@@ -1,0 +1,341 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to release (e.g. v0.2.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  verify:
+    name: Verify version and tag
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Verify tag and versions
+        id: version
+        shell: bash
+        env:
+          REQUESTED_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+
+          if [ -n "${REQUESTED_TAG}" ]; then
+            TAG="${REQUESTED_TAG}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+
+          VERSION="$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "unity-hub") | .version')"
+          PKG_VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' Packager.toml | head -n1)"
+
+          test "${TAG}" = "v${VERSION}" || {
+            echo "Tag ${TAG} does not match workspace version v${VERSION}" >&2
+            exit 1
+          }
+          test "${VERSION}" = "${PKG_VERSION}" || {
+            echo "Packager.toml version ${PKG_VERSION} does not match Cargo.toml ${VERSION}" >&2
+            exit 1
+          }
+
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+  linux:
+    name: Linux x86_64
+    needs: verify
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    env:
+      APPIMAGE_EXTRACT_AND_RUN: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.verify.outputs.tag }}
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-linux
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libxkbcommon-dev libwayland-dev libx11-dev \
+            libxcursor-dev libxrandr-dev libxi-dev libxcb1-dev \
+            libxkbcommon-x11-dev libfontconfig1-dev \
+            libfuse2 patchelf fakeroot libarchive-tools file
+
+      - name: Test
+        run: cargo test --workspace --locked
+
+      - name: Install cargo-packager
+        run: cargo install cargo-packager --version 0.11.8 --locked
+
+      - name: Build packages
+        run: cargo packager --config Packager.toml --formats appimage,deb,pacman
+
+      - name: Rename packages and add raw binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${{ needs.verify.outputs.version }}"
+
+          shopt -s nullglob
+          for f in dist/*.AppImage; do
+            mv "$f" "dist/UnityRustHub-${VERSION}-linux-x86_64.AppImage"
+          done
+          for f in dist/*.deb; do
+            mv "$f" "dist/UnityRustHub-${VERSION}-linux-amd64.deb"
+          done
+
+          cp target/release/unity-rust-hub \
+            "dist/UnityRustHub-${VERSION}-linux-x86_64"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-linux
+          path: dist/*
+          if-no-files-found: error
+
+  pacman:
+    name: Arch pacman package
+    needs: [verify, linux]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-linux
+          path: pkg
+
+      - name: Build pacman package in an Arch container
+        run: |
+          docker run --rm -v "$PWD/pkg:/pkg" archlinux:base-devel bash -c '
+            set -euo pipefail
+            pacman -Syu --noconfirm
+            useradd -m builder
+            chown -R builder:builder /pkg
+            cd /pkg
+            runuser -u builder -- makepkg --nodeps --noconfirm
+          '
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-pacman
+          path: pkg/*.pkg.tar.zst
+          if-no-files-found: error
+
+  windows:
+    name: Windows x64
+    needs: verify
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.verify.outputs.tag }}
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-windows
+
+      - name: Install NSIS
+        run: choco install nsis -y --no-progress
+
+      - name: Install cargo-packager
+        run: cargo install cargo-packager --version 0.11.8 --locked
+
+      - name: Build installer
+        run: cargo packager --config Packager.toml --formats nsis
+
+      - name: Rename installer and add raw binary
+        shell: pwsh
+        run: |
+          $version = "${{ needs.verify.outputs.version }}"
+
+          Get-ChildItem dist -Filter *.exe | ForEach-Object {
+            Rename-Item $_.FullName "UnityRustHub-$version-windows-x64-setup.exe"
+          }
+
+          Copy-Item target/release/unity-rust-hub.exe `
+            "dist/UnityRustHub-$version-windows-x64-portable.exe"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-windows
+          path: dist/*
+          if-no-files-found: error
+
+  macos:
+    name: macOS ${{ matrix.arch }}
+    needs: verify
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macOS 15 arm64 runner (Apple Silicon).
+          - runner: macos-15
+            arch: arm64
+          # Intel runner; GitHub supports this label until August 2027.
+          - runner: macos-15-intel
+            arch: x86_64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.verify.outputs.tag }}
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-macos-${{ matrix.arch }}
+
+      - name: Install cargo-packager
+        run: cargo install cargo-packager --version 0.11.8 --locked
+
+      - name: Build app and DMG
+        run: cargo packager --config Packager.toml --formats app,dmg
+
+      - name: Rename DMG and zip app bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${{ needs.verify.outputs.version }}"
+          ARCH="${{ matrix.arch }}"
+
+          shopt -s nullglob
+          for f in dist/*.dmg; do
+            mv "$f" "dist/UnityRustHub-${VERSION}-macos-${ARCH}.dmg"
+          done
+
+          APP="$(find dist -name '*.app' -print -quit)"
+          test -n "${APP}"
+          ditto -c -k --keepParent "${APP}" \
+            "dist/UnityRustHub-${VERSION}-macos-${ARCH}.app.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-macos-${{ matrix.arch }}
+          path: |
+            dist/*.dmg
+            dist/*.app.zip
+          if-no-files-found: error
+
+  flatpak:
+    name: Flatpak x86_64
+    needs: verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.verify.outputs.tag }}
+
+      - name: Install Flatpak
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y flatpak flatpak-builder python3-venv
+          flatpak remote-add --user --if-not-exists flathub \
+            https://flathub.org/repo/flathub.flatpakrepo
+          flatpak install --user -y flathub \
+            org.freedesktop.Platform//25.08 \
+            org.freedesktop.Sdk//25.08 \
+            org.freedesktop.Sdk.Extension.rust-stable//25.08
+
+      - name: Generate Cargo sources
+        run: |
+          python3 -m venv /tmp/flatpak-venv
+          /tmp/flatpak-venv/bin/pip install aiohttp tomlkit pyyaml
+          curl -fsSL \
+            https://raw.githubusercontent.com/flatpak/flatpak-builder-tools/master/cargo/flatpak-cargo-generator.py \
+            -o /tmp/flatpak-cargo-generator.py
+          /tmp/flatpak-venv/bin/python /tmp/flatpak-cargo-generator.py \
+            Cargo.lock -o packaging/flatpak/cargo-sources.json
+
+      - name: Build Flatpak bundle
+        run: |
+          VERSION="${{ needs.verify.outputs.version }}"
+          flatpak-builder \
+            --repo=flatpak-repo \
+            --force-clean \
+            --disable-rofiles-fuse \
+            flatpak-build \
+            packaging/flatpak/io.github.arreme.UnityRustHub.yml
+          flatpak build-bundle \
+            flatpak-repo \
+            "UnityRustHub-${VERSION}-x86_64.flatpak" \
+            io.github.arreme.UnityRustHub
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-flatpak
+          path: UnityRustHub-*-x86_64.flatpak
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub Release
+    needs: [verify, linux, pacman, windows, macos, flatpak]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+
+      - name: Generate checksums
+        run: |
+          cd dist
+          find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%f\n' \
+            | sort | xargs -r sha256sum > /tmp/SHA256SUMS
+          mv /tmp/SHA256SUMS SHA256SUMS
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.verify.outputs.tag }}
+          name: Unity Rust Hub ${{ needs.verify.outputs.version }}
+          generate_release_notes: true
+          prerelease: ${{ contains(needs.verify.outputs.version, '-') }}
+          files: dist/*
+          fail_on_unmatched_files: true
+          body: |
+            ## Install
+
+            | Platform | File |
+            |---|---|
+            | Windows | `UnityRustHub-*-windows-x64-setup.exe` (or the raw `*-portable.exe`) |
+            | macOS Apple Silicon | `UnityRustHub-*-macos-arm64.dmg` |
+            | macOS Intel | `UnityRustHub-*-macos-x86_64.dmg` |
+            | Linux | `*.AppImage`, `*.deb`, `*.pkg.tar.zst` (pacman), or the raw binary |
+            | Flatpak | `UnityRustHub-*-x86_64.flatpak` |
+
+            On Arch-based systems, Shelly can install the pacman package or the Flatpak bundle directly.
+
+            The app does not bundle the Unity CLI. Install it from the Overview screen on first launch.

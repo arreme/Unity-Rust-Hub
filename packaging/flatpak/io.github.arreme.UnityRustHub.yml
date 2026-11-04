@@ -1,0 +1,40 @@
+app-id: io.github.arreme.UnityRustHub
+runtime: org.freedesktop.Platform
+runtime-version: '25.08'
+sdk: org.freedesktop.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: unity-rust-hub
+
+finish-args:
+  - --share=network
+  - --share=ipc
+  - --socket=wayland
+  - --socket=fallback-x11
+  # The app manages Unity projects and the Unity CLI's home-directory state.
+  - --filesystem=home
+
+modules:
+  - name: unity-rust-hub
+    buildsystem: simple
+    build-options:
+      append-path: /usr/lib/sdk/rust-stable/bin
+      env:
+        CARGO_HOME: /run/build/unity-rust-hub/cargo
+        CARGO_NET_OFFLINE: 'true'
+    build-commands:
+      - cargo --offline fetch --manifest-path Cargo.toml --verbose
+      - cargo --offline build --release --locked -p unity-hub
+      - install -Dm755 target/release/unity-rust-hub /app/bin/unity-rust-hub
+      - sed 's/^Icon=.*/Icon=io.github.arreme.UnityRustHub/' packaging/unity-rust-hub.desktop > /tmp/unity-rust-hub.desktop
+      - install -Dm644 /tmp/unity-rust-hub.desktop /app/share/applications/io.github.arreme.UnityRustHub.desktop
+      - |
+        for size in 16 20 24 32 40 48 64 256; do
+          install -Dm644 "Icon/Icon-png-icons/Icon-${size}x${size}.png" \
+            "/app/share/icons/hicolor/${size}x${size}/apps/io.github.arreme.UnityRustHub.png"
+        done
+      - install -Dm644 LICENSE /app/share/licenses/io.github.arreme.UnityRustHub/LICENSE
+    sources:
+      - type: dir
+        path: ../..
+      - cargo-sources.json

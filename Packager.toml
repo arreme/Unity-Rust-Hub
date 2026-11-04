@@ -1,0 +1,82 @@
+# cargo-packager configuration.
+#
+# Keep `version` in sync with [workspace.package].version in Cargo.toml.
+# The release workflow fails when the tag, Cargo.toml, and this file disagree.
+#
+# Local check (the explicit --config is required because the workspace root is a
+# virtual manifest, so cargo-packager cannot auto-detect this file):
+#   cargo packager --config Packager.toml --formats appimage,deb,pacman
+#
+# Platform defaults are used when --formats is omitted:
+#   Linux   -> deb, AppImage, pacman
+#   macOS   -> app, DMG
+#   Windows -> NSIS
+
+name = "unity-hub"
+product-name = "Unity Rust Hub"
+identifier = "io.github.arreme.UnityRustHub"
+version = "0.2.0"
+description = "Native iced desktop UI for the Unity CLI"
+long-description = "Manage the Unity CLI, Editors, modules, and projects from a native desktop app."
+homepage = "https://github.com/arreme/Unity-Rust-Hub"
+authors = ["Arreme"]
+publisher = "Arreme"
+copyright = "Copyright © 2026 Arreme"
+license-file = "LICENSE"
+category = "DeveloperTool"
+
+out-dir = "dist"
+binaries-dir = "target/release"
+before-packaging-command = "cargo build --release --locked -p unity-hub"
+
+binaries = [
+  { path = "unity-rust-hub", main = true },
+]
+
+icons = [
+  "Icon/Icon.png",
+  "Icon/Icon-png-icons/Icon-*.png",
+]
+
+[macos]
+# Unsigned by default. To sign/notarize, add:
+# signing-identity = "Developer ID Application: Your Name (TEAMID)"
+# and provide APPLE_CERTIFICATE, APPLE_CERTIFICATE_PASSWORD, APPLE_ID,
+# APPLE_PASSWORD, and APPLE_TEAM_ID in the release environment.
+minimum-system-version = "11.0"
+
+[deb]
+depends = [
+  "libc6",
+  "libx11-6",
+  "libxcursor1",
+  "libxrandr2",
+  "libxi6",
+  "libxkbcommon0",
+  "libwayland-client0",
+]
+section = "devel"
+priority = "optional"
+
+[pacman]
+depends = [
+  "glibc",
+  "libx11",
+  "libxcursor",
+  "libxrandr",
+  "libxi",
+  "libxkbcommon",
+  "wayland",
+]
+
+[nsis]
+installMode = "currentUser"
+installer-icon = "Icon/unity-rust-hub.ico"
+compression = "lzma"
+appdata-paths = ["$APPDATA/unity-rust-hub"]
+
+[windows]
+# Unsigned by default. To enable Authenticode, import your PFX and add:
+# certificate-thumbprint = "YOUR_CERT_THUMBPRINT"
+digest-algorithm = "sha256"
+timestamp-url = "http://timestamp.digicert.com"
