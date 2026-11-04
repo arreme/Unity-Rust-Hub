@@ -116,7 +116,7 @@ jobs:
           cp target/release/unity-rust-hub \
             "dist/UnityRustHub-${VERSION}-linux-x86_64"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: release-linux
           path: dist/*
@@ -144,7 +144,7 @@ jobs:
             runuser -u builder -- makepkg --nodeps --noconfirm
           '
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: release-pacman
           path: pkg/*.pkg.tar.zst
@@ -186,7 +186,7 @@ jobs:
           Copy-Item target/release/unity-rust-hub.exe `
             "dist/UnityRustHub-$version-windows-x64-portable.exe"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: release-windows
           path: dist/*
@@ -240,7 +240,7 @@ jobs:
           ditto -c -k --keepParent "${APP}" \
             "dist/UnityRustHub-${VERSION}-macos-${ARCH}.app.zip"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: release-macos-${{ matrix.arch }}
           path: |
