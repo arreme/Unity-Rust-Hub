@@ -40,10 +40,14 @@ Options:
                   triggers the GitHub release/package workflow.
   --yes, -y       Skip the --release confirmation prompt.
   --no-verify     Skip Cargo.lock refresh and the test suite. Cargo.lock will
-                  be stale unless you update it yourself.
+                  be stale unless you update it yourself. Only valid in
+                  update-only mode; cannot be combined with git operations.
   --allow-dirty   Allow update-only mode in a dirty worktree. Cannot be used
                   with --commit, --tag, or --release.
   -h, --help      Show this help.
+
+Git commit and tag signing follow your repository configuration. Unlock your
+signing key before using --commit, --tag, or --release.
 
 Examples:
   ./scripts/set-version.sh 0.3.0
@@ -108,16 +112,16 @@ if ((ALLOW_DIRTY)) && ((COMMIT || TAG || RELEASE)); then
   die "--allow-dirty cannot be combined with git operations"
 fi
 
+if ((VERIFY == 0)) && ((COMMIT || TAG || RELEASE)); then
+  die "--no-verify cannot be combined with --commit, --tag, or --release; a stale Cargo.lock breaks the release workflow"
+fi
+
 [[ -d "$ROOT" ]] || die "repository root not found: $ROOT"
 cd "$ROOT"
 
 for file in Cargo.toml Packager.toml packaging/arch/PKGBUILD README.md; do
   [[ -f "$file" ]] || die "missing $file (run from the repository root or set SET_VERSION_ROOT)"
 done
-
-current_cargo="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
-current_packager="$(sed -n 's/^version = "\(.*\)"/\1/p' Packager.toml | head -n1)"
-current_pkgver="$(sed -n 's/^pkgver=//p' packaging/arch/PKGBUILD | head -n1)"
 
 if ((COMMIT || TAG || RELEASE)); then
   git rev-parse --is-inside-work-tree >/dev/null 2>&1 ||
@@ -137,17 +141,13 @@ sed -i "s/^version = \".*\"/version = \"$VERSION\"/" Packager.toml
 sed -i "s/^pkgver=.*/pkgver=$VERSION/" packaging/arch/PKGBUILD
 sed -i "s/^pkgrel=.*/pkgrel=1/" packaging/arch/PKGBUILD
 
-escape_sed() {
-  printf '%s' "$1" | sed 's/[.[\*^$]/\\&/g'
-}
-
-for old_version in "$current_cargo" "$current_packager" "$current_pkgver"; do
-  [[ -n "$old_version" ]] || continue
-  old_escaped="$(escape_sed "$old_version")"
-  sed -i \
-    "s/UnityRustHub-${old_escaped}-linux-x86_64\\.AppImage/UnityRustHub-${VERSION}-linux-x86_64.AppImage/g" \
+readme_had_example=0
+if grep -qE 'UnityRustHub-[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?-linux-x86_64\.AppImage' README.md; then
+  readme_had_example=1
+  sed -i -E \
+    "s/UnityRustHub-[0-9]+\\.[0-9]+\\.[0-9]+([+-][0-9A-Za-z.-]+)?-linux-x86_64\\.AppImage/UnityRustHub-${VERSION}-linux-x86_64.AppImage/g" \
     README.md
-done
+fi
 
 grep -qx "version = \"$VERSION\"" Cargo.toml ||
   die "Cargo.toml does not contain version $VERSION"
@@ -155,6 +155,11 @@ grep -qx "version = \"$VERSION\"" Packager.toml ||
   die "Packager.toml does not contain version $VERSION"
 grep -qx "pkgver=$VERSION" packaging/arch/PKGBUILD ||
   die "packaging/arch/PKGBUILD does not contain pkgver=$VERSION"
+
+if ((readme_had_example)); then
+  grep -qF "UnityRustHub-${VERSION}-linux-x86_64.AppImage" README.md ||
+    die "README.md still has a stale AppImage example"
+fi
 
 if ((VERIFY)); then
   info "refreshing Cargo.lock"
@@ -175,8 +180,9 @@ if ((COMMIT)); then
 
   if git diff --cached --quiet; then
     info "no file changes to commit"
-  else
-    git commit -m "chore: release $VERSION"
+  elif ! git commit -m "chore: release $VERSION"; then
+    git reset -q
+    die "git commit failed; version changes are unstaged. Check your git signing configuration."
   fi
 fi
 
@@ -184,7 +190,9 @@ if ((TAG)); then
   if git rev-parse -q --verify "refs/tags/v$VERSION" >/dev/null; then
     die "tag v$VERSION already exists"
   fi
-  git tag -a "v$VERSION" -m "Unity Rust Hub $VERSION"
+  if ! git tag -a "v$VERSION" -m "Unity Rust Hub $VERSION"; then
+    die "git tag failed; the commit exists but tag v$VERSION was not created. Check your git signing configuration."
+  fi
   info "created tag v$VERSION"
 fi
 

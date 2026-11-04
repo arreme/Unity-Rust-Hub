@@ -226,7 +226,9 @@ Use the version helper instead of editing version fields by hand:
 The script updates `Cargo.toml`, `Packager.toml`, `packaging/arch/PKGBUILD`,
 `Cargo.lock`, and the AppImage example in this README. `--release` pushes the
 branch and tag, which starts the GitHub release workflow. It requires a clean
-worktree and runs the workspace tests unless `--no-verify` is passed.
+worktree and runs the workspace tests. `--no-verify` is update-only; it cannot
+be combined with the git flags because a stale `Cargo.lock` would fail the
+release workflow.
 
 ### Packaging a release locally
 
