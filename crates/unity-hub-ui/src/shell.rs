@@ -1,15 +1,32 @@
-use iced::widget::{button, column, container, row, scrollable, space};
-use iced::{Center, Element, Fill};
+use iced::widget::{button, column, container, row, space};
+use iced::{Center, Element, Fill, Padding};
 
-use unity_hub_model::{CliConnectionVm, JobPhase, JobVm, NoticeVm, Page, UiAction, ViewModel};
+use unity_hub_model::{
+    CliConnectionVm, JobPhase, JobVm, NoticeVm, Page, Tone, UiAction, ViewModel,
+};
 
-use crate::components::badge;
+use crate::components::{self, badge, icon_tile, notice, scroll, status_dot, ButtonKind};
+use crate::fonts;
+use crate::icons::{self, icon};
 use crate::pages;
 use crate::theme;
+use crate::tokens::{font, spacing};
 use crate::ui::text;
 
+const SIDEBAR_WIDTH: f32 = 228.0;
+
+/// Sidebar plus a scrolling page. Each page draws its own title, so there is
+/// no top bar.
 pub fn view(vm: &ViewModel) -> Element<'_, UiAction> {
-    let mut content = column![].spacing(16).width(Fill).padding(24);
+    let mut content = column![]
+        .spacing(spacing::SECTION)
+        .width(Fill)
+        .padding(Padding {
+            top: spacing::PAGE_TOP,
+            right: spacing::PAGE_X,
+            bottom: 48.0,
+            left: spacing::PAGE_X,
+        });
 
     if let Some(notice) = &vm.shell.notice {
         content = content.push(notice_view(notice));
@@ -21,208 +38,220 @@ pub fn view(vm: &ViewModel) -> Element<'_, UiAction> {
         content = content.push(job_view(job));
     }
 
-    let main = column![topbar(vm), scrollable(content).height(Fill).width(Fill)]
+    let main = container(scroll(content).height(Fill).width(Fill))
         .width(Fill)
-        .height(Fill);
+        .height(Fill)
+        .style(theme::page);
 
-    row![sidebar(vm), main].height(Fill).width(Fill).into()
+    row![
+        sidebar(vm),
+        container(space())
+            .width(1)
+            .height(Fill)
+            .style(theme::vertical_line),
+        main
+    ]
+    .height(Fill)
+    .width(Fill)
+    .into()
 }
 
 fn sidebar(vm: &ViewModel) -> Element<'_, UiAction> {
     let brand = row![
-        container(text("U").size(18).style(theme::accent_text))
-            .width(38)
-            .height(38)
-            .center(38)
-            .style(theme::badge(unity_hub_model::Tone::Accent)),
+        icon_tile(icons::BOX, Tone::Neutral, 36.0),
         column![
-            text("Unity Rust Hub").size(14),
-            text("Native · iced").size(10).style(theme::faint_text),
+            text("Unity Rust Hub")
+                .size(font::BODY_LARGE)
+                .font(fonts::SEMIBOLD),
+            text(concat!("v", env!("CARGO_PKG_VERSION")))
+                .size(font::SMALL)
+                .style(theme::faint_text),
         ]
         .spacing(1),
     ]
-    .spacing(10)
+    .spacing(12)
     .align_y(Center);
 
-    let nav = column(
+    let nav_item = |page: Page| -> Element<'_, UiAction> {
+        let active = vm.shell.page == page;
+
+        button(
+            row![
+                icon(page_icon(page), font::ICON),
+                text(page_label(page)).size(font::BODY).font(if active {
+                    fonts::MEDIUM
+                } else {
+                    fonts::SANS
+                }),
+            ]
+            .spacing(12)
+            .align_y(Center),
+        )
+        .width(Fill)
+        .padding([10.0, 12.0])
+        .style(theme::nav_button(active))
+        .on_press(UiAction::Navigate(page))
+        .into()
+    };
+
+    let primary_nav = column(
         Page::ALL
             .iter()
-            .map(|page| {
-                button(text(page_label(*page)).size(13))
-                    .width(Fill)
-                    .padding([10.0, 12.0])
-                    .style(theme::nav_button(vm.shell.page == *page))
-                    .on_press(UiAction::Navigate(*page))
-                    .into()
-            })
-            .collect::<Vec<Element<'_, UiAction>>>(),
+            .filter(|page| **page != Page::Settings)
+            .map(|page| nav_item(*page))
+            .collect::<Vec<_>>(),
     )
     .spacing(4);
 
-    let (dot_style, status, version): (
-        fn(&iced::Theme) -> iced::widget::text::Style,
-        &str,
-        String,
-    ) = match &vm.shell.cli {
-        CliConnectionVm::Checking => (
-            theme::muted_text,
-            "Checking CLI…",
-            "not detected".to_string(),
-        ),
+    let (tone, status, version): (Tone, &str, String) = match &vm.shell.cli {
+        CliConnectionVm::Checking => (Tone::Neutral, "Checking CLI…", "—".to_string()),
         CliConnectionVm::Connected { version } => (
-            theme::success_text,
+            Tone::Success,
             "CLI connected",
             version
                 .clone()
-                .unwrap_or_else(|| "not detected".to_string()),
+                .unwrap_or_else(|| "unknown version".to_string()),
         ),
-        CliConnectionVm::Missing => (
-            theme::danger_text,
-            "CLI missing",
-            "not detected".to_string(),
-        ),
+        CliConnectionVm::Missing => (Tone::Danger, "CLI missing", "not detected".to_string()),
     };
 
     let footer = container(
-        column![
-            row![
-                container(text("●").size(9).style(dot_style)),
-                text(status).size(11),
+        row![
+            status_dot(tone),
+            column![
+                text(status).size(font::SMALL).font(fonts::MEDIUM),
+                text(version)
+                    .size(font::CAPTION)
+                    .font(fonts::MONO)
+                    .style(theme::faint_text),
             ]
-            .spacing(6)
-            .align_y(Center),
-            text(version).size(10).style(theme::faint_text),
+            .spacing(1),
         ]
-        .spacing(3),
+        .spacing(10)
+        .align_y(Center),
     )
-    .padding(10)
+    .padding([12.0, 14.0])
     .width(Fill)
-    .style(theme::card);
+    .style(theme::outline);
 
     container(
         column![
-            brand,
-            nav,
+            container(brand).padding(Padding {
+                top: 0.0,
+                right: 8.0,
+                bottom: 20.0,
+                left: 8.0,
+            }),
+            primary_nav,
             space().height(Fill),
+            nav_item(Page::Settings),
+            space().height(8),
             footer,
-            text("All mutations go through the official Unity CLI.")
-                .size(9)
-                .style(theme::faint_text),
         ]
-        .spacing(18)
+        .spacing(4)
         .width(Fill)
         .height(Fill),
     )
-    .width(232)
+    .width(SIDEBAR_WIDTH)
     .height(Fill)
-    .padding(16)
+    .padding([24.0, 16.0])
     .style(theme::sidebar)
     .into()
 }
 
-fn topbar(vm: &ViewModel) -> Element<'_, UiAction> {
-    let cli_badge = match &vm.shell.cli {
-        CliConnectionVm::Checking => badge("checking CLI…", unity_hub_model::Tone::Neutral),
-        CliConnectionVm::Connected {
-            version: Some(version),
-        } => badge(version.clone(), unity_hub_model::Tone::Success),
-        CliConnectionVm::Connected { version: None } | CliConnectionVm::Missing => {
-            badge("CLI not found", unity_hub_model::Tone::Danger)
-        }
+fn notice_view(notice_vm: &NoticeVm) -> Element<'_, UiAction> {
+    let glyph = match notice_vm.tone {
+        Tone::Success => icons::CIRCLE_CHECK,
+        Tone::Danger => icons::CIRCLE_ALERT,
+        Tone::Warning => icons::TRIANGLE_ALERT,
+        _ => icons::INFO,
     };
 
-    container(
+    notice(
+        notice_vm.tone,
+        glyph,
         row![
-            text(page_title(vm.shell.page)).size(17),
-            space().width(Fill),
-            cli_badge,
-            button(text("Refresh").size(11))
-                .on_press(UiAction::Refresh)
-                .padding([6.0, 10.0])
-                .style(button::text),
-        ]
-        .spacing(10)
-        .align_y(Center),
-    )
-    .padding([12.0, 22.0])
-    .width(Fill)
-    .style(theme::topbar)
-    .into()
-}
-
-fn notice_view(notice: &NoticeVm) -> Element<'_, UiAction> {
-    container(
-        row![
-            text(notice.text.as_str()).size(12).width(Fill),
-            button(text("Dismiss").size(10))
+            text(notice_vm.text.as_str()).size(font::BODY).width(Fill),
+            button(icon(icons::X, font::ICON_SMALL))
                 .on_press(UiAction::DismissNotice)
-                .padding([4.0, 8.0])
-                .style(button::text),
+                .padding(6)
+                .style(theme::button_ghost),
         ]
         .spacing(10)
         .align_y(Center),
     )
-    .padding([10.0, 12.0])
-    .width(Fill)
-    .style(theme::notice_card(notice.tone))
-    .into()
 }
 
 fn job_view(job: &JobVm) -> Element<'_, UiAction> {
-    let state_tone = match job.phase {
-        JobPhase::Succeeded => unity_hub_model::Tone::Success,
-        JobPhase::Failed => unity_hub_model::Tone::Danger,
-        JobPhase::Cancelled => unity_hub_model::Tone::Warning,
-        JobPhase::Running => unity_hub_model::Tone::Info,
+    let (tone, glyph) = match job.phase {
+        JobPhase::Succeeded => (Tone::Success, icons::CIRCLE_CHECK),
+        JobPhase::Failed => (Tone::Danger, icons::CIRCLE_X),
+        JobPhase::Cancelled => (Tone::Warning, icons::BAN),
+        JobPhase::Running => (Tone::Neutral, icons::LOADER),
     };
     let running = job.phase == JobPhase::Running;
 
+    let action: Element<'_, UiAction> = if running {
+        components::button("Cancel", ButtonKind::Danger)
+            .on_press(UiAction::CancelJob)
+            .padding(components::COMPACT)
+            .into()
+    } else {
+        components::button("Dismiss", ButtonKind::Secondary)
+            .on_press(UiAction::DismissJob)
+            .padding(components::COMPACT)
+            .into()
+    };
+
     let header = row![
-        text(job.kind.as_str()).size(13).width(Fill),
-        badge(job_phase_label(job.phase), state_tone),
-        if running {
-            Element::from(
-                button(text("Cancel").size(10))
-                    .on_press(UiAction::CancelJob)
-                    .padding([4.0, 8.0])
-                    .style(button::danger),
-            )
-        } else {
-            Element::from(
-                button(text("Dismiss").size(10))
-                    .on_press(UiAction::DismissJob)
-                    .padding([4.0, 8.0])
-                    .style(button::text),
-            )
-        },
+        icon_tile(glyph, tone, 40.0),
+        column![
+            text(job.kind.as_str())
+                .size(font::CARD_TITLE)
+                .font(fonts::SEMIBOLD),
+            text(job.command.as_str())
+                .size(font::MONO)
+                .font(fonts::MONO)
+                .style(theme::faint_text),
+        ]
+        .spacing(2)
+        .width(Fill),
+        badge(job_phase_label(job.phase), tone),
+        action,
     ]
-    .spacing(8)
+    .spacing(14)
     .align_y(Center);
 
-    let mut body = column![header].spacing(8);
+    let mut body = column![header].spacing(16);
 
     if running {
         body = body.push(
-            iced::widget::progress_bar(0.0..=100.0, job.progress)
-                .length(Fill)
-                .girth(6.0),
+            row![
+                iced::widget::progress_bar(0.0..=100.0, job.progress)
+                    .length(Fill)
+                    .girth(6.0)
+                    .style(theme::progress_bar),
+                text(format!("{:.0}%", job.progress))
+                    .size(font::SMALL)
+                    .font(fonts::MONO)
+                    .style(theme::muted_text),
+            ]
+            .spacing(12)
+            .align_y(Center),
         );
     }
 
     if let Some(message) = &job.message {
-        body = body.push(text(message.as_str()).size(11).style(theme::muted_text));
+        body = body.push(
+            text(message.as_str())
+                .size(font::BODY)
+                .style(theme::muted_text),
+        );
     }
 
     if let Some(error) = &job.error {
-        body = body.push(text(error.text()).size(11).style(theme::danger_text));
+        body = body.push(components::error_text(error));
     }
-
-    body = body.push(
-        text(job.command.as_str())
-            .size(9)
-            .font(iced::Font::MONOSPACE)
-            .style(theme::faint_text),
-    );
 
     if !job.logs.is_empty() {
         let mut log_text = String::new();
@@ -236,24 +265,25 @@ fn job_view(job: &JobVm) -> Element<'_, UiAction> {
 
         body = body.push(
             container(
-                scrollable(
+                scroll(
                     text(log_text)
-                        .size(9)
-                        .font(iced::Font::MONOSPACE)
+                        .size(font::MONO)
+                        .font(fonts::MONO)
+                        .line_height(1.55)
                         .style(theme::muted_text),
                 )
-                .height(150),
+                .height(160),
             )
-            .padding(8)
+            .padding([12.0, 14.0])
             .width(Fill)
-            .style(theme::card),
+            .style(theme::inset),
         );
     }
 
     container(body)
-        .padding(14)
+        .padding(spacing::CARD)
         .width(Fill)
-        .style(theme::job_card)
+        .style(theme::card)
         .into()
 }
 
@@ -266,22 +296,22 @@ fn job_phase_label(phase: JobPhase) -> &'static str {
     }
 }
 
+fn page_icon(page: Page) -> char {
+    match page {
+        Page::Overview => icons::DASHBOARD,
+        Page::Editors => icons::BOX,
+        Page::Projects => icons::FOLDERS,
+        Page::Changelog => icons::NEWSPAPER,
+        Page::Settings => icons::SETTINGS,
+    }
+}
+
 pub fn page_label(page: Page) -> &'static str {
     match page {
         Page::Overview => "Overview",
         Page::Editors => "Editors",
         Page::Projects => "Projects",
         Page::Changelog => "Changelog",
-        Page::Settings => "Settings",
-    }
-}
-
-pub fn page_title(page: Page) -> &'static str {
-    match page {
-        Page::Overview => "Overview",
-        Page::Editors => "Editors & modules",
-        Page::Projects => "Projects",
-        Page::Changelog => "Changelog & breaking changes",
         Page::Settings => "Settings",
     }
 }

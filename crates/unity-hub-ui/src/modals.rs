@@ -1,12 +1,21 @@
-use iced::widget::{button, checkbox, column, container, pick_list, row, scrollable, space};
-use iced::{Element, Fill};
+use iced::widget::{column, container, pick_list, row, space};
+use iced::{Center, Element, Fill};
 
 use unity_hub_model::{
     EditorModulesVm, InstallCliVm, ModalVm, ModuleOptionVm, Tone, UiAction, UpgradeProjectVm,
 };
 
+use crate::components::{
+    button, caption, checkbox, divided, divider, error_text, field_label, hint, icon_button,
+    loading, mono, notice, scroll, ButtonKind, PICK_LIST_PADDING,
+};
+use crate::fonts;
+use crate::icons::{self, icon};
 use crate::theme;
+use crate::tokens::font;
 use crate::ui::{self, text};
+
+const DIALOG_WIDTH: f32 = 560.0;
 
 pub fn view(modal: &ModalVm) -> Element<'_, UiAction> {
     let card = match modal {
@@ -15,222 +24,290 @@ pub fn view(modal: &ModalVm) -> Element<'_, UiAction> {
         ModalVm::UpgradeProject(vm) => upgrade_modal(vm),
     };
 
-    container(iced::widget::center(card))
+    container(iced::widget::center(card).padding(24))
         .width(Fill)
         .height(Fill)
         .style(theme::modal_screen)
         .into()
 }
 
-fn install_cli_modal(vm: &InstallCliVm) -> Element<'_, UiAction> {
-    let content = column![
-        text("Install the Unity CLI").size(20),
-        text("Unity's official installer runs locally. This app does not bundle the CLI.")
-            .size(11)
-            .style(theme::muted_text),
-        text("Release channel").size(10).style(theme::faint_text),
-        pick_list(
-            vm.channels.clone(),
-            Some(vm.selected_channel.clone()),
-            UiAction::CliChannelChanged,
-        )
-        .text_size(ui::font_size(12.0))
+/// Shared dialog frame: title and subtitle with a round close button, the
+/// body, and the actions right-aligned under a hairline.
+fn dialog<'a>(
+    title: impl Into<String>,
+    subtitle: impl Into<String>,
+    body: Element<'a, UiAction>,
+    actions: Element<'a, UiAction>,
+) -> Element<'a, UiAction> {
+    let header = row![
+        column![
+            text(title.into())
+                .size(font::MODAL_TITLE)
+                .font(fonts::SEMIBOLD),
+            text(subtitle.into())
+                .size(font::BODY_LARGE)
+                .style(theme::muted_text),
+        ]
+        .spacing(4)
         .width(Fill),
+        iced::widget::button(
+            container(icon(icons::X, font::ICON_SMALL))
+                .width(20)
+                .height(20)
+                .center(20)
+        )
+        .on_press(UiAction::CloseModal)
+        .padding(8)
+        .style(theme::button_round),
+    ]
+    .spacing(16)
+    .align_y(iced::Alignment::Start);
+
+    container(
+        column![
+            header,
+            body,
+            divider(),
+            row![space().width(Fill), actions].align_y(Center),
+        ]
+        .spacing(22),
+    )
+    .width(DIALOG_WIDTH)
+    .padding(28)
+    .style(theme::modal)
+    .into()
+}
+
+fn labelled<'a>(label: &'a str, control: Element<'a, UiAction>) -> Element<'a, UiAction> {
+    column![field_label(label), control].spacing(8).into()
+}
+
+fn styled_pick_list<'a>(
+    options: Vec<String>,
+    selected: Option<String>,
+    on_select: impl Fn(String) -> UiAction + 'a,
+    placeholder: &str,
+) -> Element<'a, UiAction> {
+    pick_list(options, selected, on_select)
+        .text_size(ui::font_size(font::BODY))
+        .padding(PICK_LIST_PADDING)
+        .handle(icons::pick_list_handle(font::ICON_SMALL))
+        .style(theme::pick_list)
+        .menu_style(theme::menu)
+        .width(Fill)
+        .placeholder(placeholder.to_string())
+        .into()
+}
+
+fn install_cli_modal(vm: &InstallCliVm) -> Element<'_, UiAction> {
+    let body = column![
+        labelled(
+            "Release channel",
+            styled_pick_list(
+                vm.channels.clone(),
+                Some(vm.selected_channel.clone()),
+                UiAction::CliChannelChanged,
+                "Select a channel",
+            ),
+        ),
         container(
             column![
-                text("Official installer command")
-                    .size(10)
-                    .style(theme::faint_text),
+                caption("Official installer command"),
                 text(vm.command_preview.as_str())
-                    .size(11)
-                    .font(iced::Font::MONOSPACE)
-                    .style(theme::accent_text),
-                text("UNITY_CLI_SKIP_SETUP=1 is set so the installer does not block on its interactive setup.")
-                    .size(9)
-                    .style(theme::faint_text),
+                    .size(font::MONO)
+                    .font(fonts::MONO)
+                    .line_height(1.55),
+                hint("UNITY_CLI_SKIP_SETUP=1 is set so the installer does not block on its interactive setup."),
             ]
-            .spacing(5),
+            .spacing(8),
         )
-        .padding(10)
+        .padding([14.0, 16.0])
         .width(Fill)
-        .style(theme::card),
-        checkbox(vm.consent)
-            .label("I understand this downloads and executes Unity's installer script from unity.com.")
-            .on_toggle(UiAction::CliConsentToggled)
-            .size(14)
-            .text_size(ui::font_size(11.0)),
-        row![
-            space().width(Fill),
-            button(text("Cancel").size(11))
-                .on_press(UiAction::CloseModal)
-                .padding([7.0, 12.0])
-                .style(button::text),
-            button(text("Run installer").size(11))
-                .on_press_maybe(vm.can_install.then_some(UiAction::InstallCli))
-                .padding([7.0, 12.0])
-                .style(button::primary),
-        ]
-        .spacing(8),
+        .style(theme::raised),
+        checkbox(
+            "I understand this downloads and executes Unity's installer script from unity.com",
+            vm.consent,
+            UiAction::CliConsentToggled,
+        ),
     ]
-    .spacing(12);
+    .spacing(20);
 
-    container(content)
-        .width(560)
-        .padding(22)
-        .style(theme::modal)
-        .into()
+    let actions = row![
+        button("Cancel", ButtonKind::Ghost).on_press(UiAction::CloseModal),
+        icon_button(icons::DOWNLOAD, "Run installer", ButtonKind::Primary)
+            .on_press_maybe(vm.can_install.then_some(UiAction::InstallCli)),
+    ]
+    .spacing(8);
+
+    dialog(
+        "Install the Unity CLI",
+        "Unity's official installer runs locally. This app does not bundle the CLI.",
+        body.into(),
+        actions.into(),
+    )
 }
 
 fn editor_modules_modal(vm: &EditorModulesVm) -> Element<'_, UiAction> {
     let installed: Element<'_, UiAction> = if vm.installed_modules.is_empty() {
-        text("No modules reported.")
-            .size(10)
-            .style(theme::faint_text)
-            .into()
+        hint("No modules reported.")
     } else {
         text(vm.installed_modules.join(" · "))
-            .size(10)
-            .style(theme::success_text)
+            .size(font::BODY)
+            .style(theme::muted_text)
             .into()
     };
 
     let module_list: Element<'_, UiAction> = if let Some(error) = vm.modules.error() {
-        text(error.text()).size(10).style(theme::danger_text).into()
+        error_text(error)
     } else if let Some(modules) = vm.modules.data() {
-        scrollable(column(modules.iter().map(module_checkbox).collect::<Vec<_>>()).spacing(6))
-            .height(280)
+        let list = divided(
+            modules
+                .iter()
+                .map(|module| {
+                    container(module_checkbox(module))
+                        .padding([13.0, 16.0])
+                        .width(Fill)
+                        .into()
+                })
+                .collect(),
+        );
+        container(container(scroll(list)).max_height(280))
+            .width(Fill)
+            .style(theme::outline)
             .into()
     } else if vm.modules.is_loading() {
-        text("Loading modules…")
-            .size(11)
-            .style(theme::muted_text)
-            .into()
+        loading("Loading modules…")
     } else {
-        text("Load modules for this Editor to add them.")
-            .size(10)
-            .style(theme::faint_text)
-            .into()
+        hint("Load modules for this Editor to add them.")
     };
 
-    let content = column![
-        text(format!("Modules for Unity {}", vm.editor_version)).size(20),
-        text("Only modules that are not already installed are listed.")
-            .size(11)
-            .style(theme::muted_text),
-        text("Installed").size(10).style(theme::faint_text),
-        installed,
-        module_list,
-        checkbox(vm.accept_eula)
-            .label("I accept the module license agreements (--accept-eula).")
-            .on_toggle(UiAction::DialogEulaToggled)
-            .size(14)
-            .text_size(ui::font_size(11.0)),
-        row![
-            space().width(Fill),
-            button(text("Cancel").size(11))
-                .on_press(UiAction::CloseModal)
-                .padding([7.0, 12.0])
-                .style(button::text),
-            button(text(format!("Install {} module(s)", vm.selected_count)).size(11))
-                .on_press_maybe(vm.can_install.then_some(UiAction::StartInstallModules))
-                .padding([7.0, 12.0])
-                .style(button::primary),
-        ]
-        .spacing(8),
+    let body = column![
+        labelled("Installed", installed),
+        labelled("Available", module_list),
+        checkbox(
+            "I accept the module license agreements (--accept-eula)",
+            vm.accept_eula,
+            UiAction::DialogEulaToggled,
+        ),
     ]
-    .spacing(12);
+    .spacing(20);
 
-    container(content)
-        .width(620)
-        .padding(22)
-        .style(theme::modal)
-        .into()
+    let actions = row![
+        button("Cancel", ButtonKind::Ghost).on_press(UiAction::CloseModal),
+        icon_button(
+            icons::DOWNLOAD,
+            format!("Install {} module(s)", vm.selected_count),
+            ButtonKind::Primary,
+        )
+        .on_press_maybe(vm.can_install.then_some(UiAction::StartInstallModules)),
+    ]
+    .spacing(8);
+
+    dialog(
+        format!("Modules for Unity {}", vm.editor_version),
+        "Only modules that are not already installed are listed.",
+        body.into(),
+        actions.into(),
+    )
 }
 
 fn module_checkbox(module: &ModuleOptionVm) -> Element<'static, UiAction> {
     let id = module.id.clone();
-    checkbox(module.selected)
-        .label(module.label.clone())
-        .on_toggle(move |value| UiAction::ToggleDialogModule(id.clone(), value))
-        .size(14)
-        .text_size(ui::font_size(10.0))
-        .into()
+    checkbox(module.label.clone(), module.selected, move |value| {
+        UiAction::ToggleDialogModule(id.clone(), value)
+    })
+    .width(Fill)
+    .into()
+}
+
+fn version_cell<'a>(label: &'a str, version: String, end: bool) -> Element<'a, UiAction> {
+    let content = column![
+        caption(label),
+        text(version).size(font::BODY_LARGE + 1.0).font(fonts::MONO),
+    ]
+    .spacing(4);
+
+    if end {
+        container(content.align_x(iced::Alignment::End))
+            .width(Fill)
+            .align_right(Fill)
+            .into()
+    } else {
+        container(content).width(Fill).into()
+    }
 }
 
 fn upgrade_modal(vm: &UpgradeProjectVm) -> Element<'_, UiAction> {
     let picker: Element<'_, UiAction> = if vm.target_options.is_empty() {
-        text("No other Editor version is installed. Install one on the Editors page first.")
-            .size(11)
-            .style(theme::warning_text)
-            .into()
+        notice(
+            Tone::Warning,
+            icons::TRIANGLE_ALERT,
+            text("No other Editor version is installed. Install one on the Editors page first.")
+                .size(font::BODY)
+                .style(theme::muted_text),
+        )
     } else {
-        pick_list(
+        styled_pick_list(
             vm.target_options.clone(),
             vm.selected_target.clone(),
             UiAction::UpgradeTargetChanged,
+            "Select an installed Editor",
         )
-        .text_size(ui::font_size(12.0))
-        .width(Fill)
-        .placeholder("Select an installed Editor")
-        .into()
     };
 
-    let content = column![
-        text("Change project Editor version").size(20),
-        text(vm.project_title.as_str())
-            .size(12)
-            .style(theme::muted_text),
+    let strip = container(
         row![
-            column![
-                text("Current version").size(10).style(theme::faint_text),
-                text(vm.current_version.as_str()).size(12),
-            ]
-            .spacing(2)
-            .width(Fill),
-            column![
-                text("Project path").size(10).style(theme::faint_text),
-                text(vm.project_path_short.as_str())
-                    .size(10)
-                    .font(iced::Font::MONOSPACE)
-                    .style(theme::muted_text),
-            ]
-            .spacing(2)
-            .width(Fill),
+            version_cell("Current", vm.current_version.clone(), false),
+            icon(icons::ARROW_RIGHT, font::ICON).style(theme::faint_text),
+            version_cell(
+                "Target",
+                vm.selected_target
+                    .clone()
+                    .unwrap_or_else(|| "—".to_string()),
+                true,
+            ),
         ]
-        .spacing(14),
-        text("Target Editor version").size(10).style(theme::faint_text),
-        picker,
-        container(
-            text("This runs `unity projects upgrade <path> --to <version> --yes`. It can update ProjectVersion.txt, open the Editor, and run API upgrades. The project must not be open in a running Editor: close it first. Commit or back up first.")
-                .size(10)
-                .style(theme::warning_text),
-        )
-        .padding(10)
-        .width(Fill)
-        .style(theme::notice_card(Tone::Warning)),
-        checkbox(vm.confirmed)
-            .label("I understand and want to upgrade this project now.")
-            .on_toggle(UiAction::UpgradeConfirmed)
-            .size(14)
-            .text_size(ui::font_size(11.0)),
-        row![
-            space().width(Fill),
-            button(text("Cancel").size(11))
-                .on_press(UiAction::CloseModal)
-                .padding([7.0, 12.0])
-                .style(button::text),
-            button(text("Upgrade project").size(11))
-                .on_press_maybe(vm.can_upgrade.then_some(UiAction::StartUpgrade))
-                .padding([7.0, 12.0])
-                .style(button::primary),
+        .spacing(16)
+        .align_y(Center),
+    )
+    .padding([18.0, 20.0])
+    .width(Fill)
+    .style(theme::raised);
+
+    let body = column![
+        strip,
+        column![
+            labelled("Target Editor version", picker),
+            mono(vm.project_path_short.as_str()),
         ]
         .spacing(8),
+        notice(
+            Tone::Warning,
+            icons::TRIANGLE_ALERT,
+            text("Runs `unity projects upgrade <path> --to <version> --yes`. It can update ProjectVersion.txt, open the Editor, and run API upgrades. Close the project in any running Editor and commit or back up first.")
+                .size(font::BODY)
+                .line_height(1.55)
+                .style(theme::muted_text),
+        ),
+        checkbox(
+            "I understand and want to upgrade this project now",
+            vm.confirmed,
+            UiAction::UpgradeConfirmed,
+        ),
     ]
-    .spacing(12);
+    .spacing(20);
 
-    container(content)
-        .width(600)
-        .padding(22)
-        .style(theme::modal)
-        .into()
+    let actions = row![
+        button("Cancel", ButtonKind::Ghost).on_press(UiAction::CloseModal),
+        button("Upgrade project", ButtonKind::Primary)
+            .on_press_maybe(vm.can_upgrade.then_some(UiAction::StartUpgrade)),
+    ]
+    .spacing(8);
+
+    dialog(
+        "Change Editor version",
+        vm.project_title.as_str(),
+        body.into(),
+        actions.into(),
+    )
 }

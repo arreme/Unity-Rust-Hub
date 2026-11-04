@@ -1,145 +1,145 @@
-use iced::widget::{button, column, container, pick_list, row, space, text_input};
-use iced::{Element, Fill};
+use iced::widget::{column, container, row};
+use iced::{Center, Element, Fill};
 
-use unity_hub_model::{SettingsVm, TextScaleOptionVm, Tone, UiAction};
+use unity_hub_model::{SettingsVm, Tone, UiAction};
 
-use crate::components::{badge, card, detail_column, page_header};
+use crate::components::{
+    badge, button, group, hint, list_row, mono, page_header, segmented, setting_row, text_input,
+    ButtonKind,
+};
+use crate::icons;
 use crate::theme;
-use crate::ui::{self, text};
+use crate::tokens::{font, spacing};
+use crate::ui::text;
+
+const MAX_WIDTH: f32 = 860.0;
 
 pub fn view(vm: &SettingsVm) -> Element<'_, UiAction> {
-    let mut page = column![page_header(
-        "CONFIGURATION",
-        "Settings",
-        "Point the app at a specific CLI binary and adjust text readability.",
-    )]
-    .spacing(16);
-
-    page = page.push(
-        row![cli_location_card(vm), app_data_card(vm)]
-            .spacing(16)
-            .align_y(iced::Alignment::Start),
-    );
-    page = page.push(appearance_card(vm));
-    page = page.push(about_card(vm));
-
-    page.into()
-}
-
-fn cli_location_card(vm: &SettingsVm) -> Element<'_, UiAction> {
-    let body =
+    container(
         column![
-        row![
-            detail_column("Resolved executable", vm.resolved_executable.as_str()),
-            detail_column("Resolved via", vm.resolved_via.as_str()),
+            page_header(
+                "Settings",
+                "Point the app at a specific CLI binary and adjust readability.",
+                None,
+            ),
+            cli_group(vm),
+            appearance_group(vm),
+            app_data_group(vm),
+            about_group(vm),
         ]
-        .spacing(16),
-        text("Manual CLI path override")
-            .size(9)
-            .style(theme::faint_text),
-        text_input("/home/you/.local/bin/unity", &vm.cli_path_input)
-            .on_input(UiAction::CliPathChanged)
-            .padding(8)
-            .size(ui::font_size(11.0))
-            .width(Fill),
-        text("Leave empty to use the install receipt, UNITY_CLI_HOME, platform defaults, and PATH.")
-            .size(9)
-            .style(theme::faint_text),
-        row![
-            button(text("Save path").size(10))
-                .on_press(UiAction::SaveCliPath)
-                .padding([6.0, 10.0])
-                .style(button::primary),
-            button(text("Clear override").size(10))
-                .on_press(UiAction::ClearCliPath)
-                .padding([6.0, 10.0])
-                .style(button::text),
-            space().width(Fill),
-            button(text("Re-check").size(10))
-                .on_press(UiAction::Refresh)
-                .padding([6.0, 10.0])
-                .style(button::secondary),
-        ]
-        .spacing(7)
-        .align_y(iced::Alignment::Center),
-    ]
-        .spacing(10);
-
-    card("Unity CLI location", body.into())
+        .spacing(28),
+    )
+    .max_width(MAX_WIDTH)
+    .into()
 }
 
-fn app_data_card(vm: &SettingsVm) -> Element<'_, UiAction> {
-    let body = column![
-        detail_column("Config directory", vm.config_dir.as_str()),
-        detail_column("Settings file", vm.settings_file.as_str()),
-        text("Nothing is stored except the optional CLI path and the text-size preference. Credentials and Unity account state stay in the CLI and the OS keyring.")
-            .size(10)
-            .style(theme::muted_text),
-    ]
-    .spacing(10);
-
-    card("App data", body.into())
+fn value<'a>(label: &'a str) -> Element<'a, UiAction> {
+    text(label)
+        .size(font::BODY_LARGE)
+        .style(theme::muted_text)
+        .into()
 }
 
-fn appearance_card(vm: &SettingsVm) -> Element<'_, UiAction> {
-    let selected = vm
+fn cli_group(vm: &SettingsVm) -> Element<'_, UiAction> {
+    let override_row = list_row(
+        column![
+            column![
+                text("Manual path override").size(font::BODY_LARGE),
+                hint("Leave empty to use the install receipt, UNITY_CLI_HOME, platform defaults, and PATH."),
+            ]
+            .spacing(2),
+            row![
+                text_input("/home/you/.local/bin/unity", &vm.cli_path_input)
+                    .on_input(UiAction::CliPathChanged)
+                    .icon(icons::input_icon(icons::TERMINAL, font::ICON_SMALL))
+                    .width(Fill),
+                button("Save path", ButtonKind::Primary).on_press(UiAction::SaveCliPath),
+                button("Clear", ButtonKind::Ghost).on_press(UiAction::ClearCliPath),
+            ]
+            .spacing(8)
+            .align_y(Center),
+        ]
+        .spacing(spacing::SMALL + 2.0),
+    );
+
+    group(
+        "Unity CLI",
+        vec![
+            setting_row(
+                "Resolved executable",
+                None,
+                row![
+                    mono(vm.resolved_executable.as_str()),
+                    badge(vm.resolved_via.clone(), Tone::Neutral),
+                ]
+                .spacing(10)
+                .align_y(Center)
+                .into(),
+            ),
+            override_row,
+            setting_row(
+                "Check the CLI again",
+                None,
+                button("Re-check", ButtonKind::Secondary)
+                    .on_press(UiAction::Refresh)
+                    .padding(crate::components::COMPACT)
+                    .into(),
+            ),
+        ],
+    )
+}
+
+fn appearance_group(vm: &SettingsVm) -> Element<'_, UiAction> {
+    let sizes = vm
         .text_scale_options
         .iter()
-        .find(|option| option.percent == vm.text_scale_percent)
-        .cloned();
+        .map(|option| {
+            (
+                option.label.clone(),
+                option.percent == vm.text_scale_percent,
+                UiAction::TextScaleChanged(option.percent),
+            )
+        })
+        .collect();
 
-    let body = column![
-        text("Text size").size(9).style(theme::faint_text),
-        pick_list(
-            vm.text_scale_options.clone(),
-            selected,
-            |option: TextScaleOptionVm| UiAction::TextScaleChanged(option.percent),
-        )
-        .text_size(ui::font_size(12.0))
-        .width(220),
-        text("Scales text throughout the app. Controls and layout keep their current size.")
-            .size(9)
-            .style(theme::faint_text),
-        container(
-            text("Preview: The quick brown fox jumps over the lazy dog.")
-                .size(12)
-                .style(theme::muted_text),
-        )
-        .padding(10)
-        .width(Fill)
-        .style(theme::card),
-    ]
-    .spacing(9);
-
-    card("Appearance", body.into())
+    group(
+        "Appearance",
+        vec![
+            setting_row(
+                "Text size",
+                Some("Scales text only; controls keep their size."),
+                segmented(sizes),
+            ),
+            list_row(
+                text("The quick brown fox jumps over the lazy dog.")
+                    .size(font::BODY_LARGE)
+                    .style(theme::muted_text),
+            ),
+        ],
+    )
 }
 
-fn about_card(vm: &SettingsVm) -> Element<'_, UiAction> {
-    let body = column![
-        row![
-            detail_column("App version", env!("CARGO_PKG_VERSION")),
-            detail_column("UI", "iced 0.14 · native Rust"),
-            detail_column("CLI adapter", "unity-core"),
-        ]
-        .spacing(16),
-        text("Engine").size(9).style(theme::faint_text),
-        text(vm.engine_info.as_str())
-            .size(11)
-            .style(theme::muted_text),
-        text("Linux builds use iced's software renderer (tiny-skia), so there is no webview or GPU API requirement.")
-            .size(10)
-            .style(theme::faint_text),
-        text("CLI calls opt out of telemetry (DO_NOT_TRACK=1) and run one at a time to keep memory low.")
-            .size(10)
-            .style(theme::faint_text),
-        row![
-            badge("Unity CLI docs", Tone::Accent),
-            badge("Unity CLI reference", Tone::Info),
-            badge("Release notes", Tone::Highlight),
-        ]
-        .spacing(5),
-    ]
-    .spacing(9);
+fn app_data_group(vm: &SettingsVm) -> Element<'_, UiAction> {
+    group(
+        "App data",
+        vec![
+            setting_row("Config directory", None, mono(vm.config_dir.as_str())),
+            setting_row("Settings file", None, mono(vm.settings_file.as_str())),
+            list_row(hint(
+                "Only the optional CLI path and the text size are stored. Credentials and account state stay in the CLI and the OS keyring.",
+            )),
+        ],
+    )
+}
 
-    card("About", body.into())
+fn about_group(vm: &SettingsVm) -> Element<'_, UiAction> {
+    group(
+        "About",
+        vec![
+            setting_row("App version", None, value(env!("CARGO_PKG_VERSION"))),
+            setting_row("UI", None, value("iced 0.14 · native Rust")),
+            setting_row("CLI adapter", None, value("unity-core")),
+            setting_row("Engine", None, value(vm.engine_info.as_str())),
+        ],
+    )
 }

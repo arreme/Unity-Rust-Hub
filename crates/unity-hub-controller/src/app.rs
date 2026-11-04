@@ -1120,6 +1120,15 @@ impl App {
             self.running.begin();
             tasks.push(load_running(self.cli.clone()));
         }
+        // The summary row counts installed Editors and registered projects.
+        if (force || self.editors.data.is_none()) && !self.editors.loading {
+            self.editors.begin();
+            tasks.push(load_editors(self.cli.clone()));
+        }
+        if (force || self.projects.data.is_none()) && !self.projects.loading {
+            self.projects.begin();
+            tasks.push(load_projects(self.cli.clone()));
+        }
 
         Task::batch(tasks)
     }
@@ -1288,6 +1297,8 @@ impl App {
                     })
                     .collect()
             }),
+            editor_count: self.editors.data.as_ref().map(Vec::len),
+            project_count: self.projects.data.as_ref().map(Vec::len),
         }
     }
 
@@ -1831,11 +1842,7 @@ fn editor_row_vm(editor: &Editor) -> EditorRowVm {
         version: editor.version.clone(),
         architecture: editor.architecture.clone(),
         is_default: editor.default,
-        modules: if editor.module_names.is_empty() {
-            "No modules reported".to_string()
-        } else {
-            editor.module_names.join(", ")
-        },
+        modules: editor.module_names.clone(),
     }
 }
 
@@ -2054,13 +2061,17 @@ mod tests {
             } if version == "1.0.0-beta.16"
         ));
         match &vm.page {
-            PageVm::Overview(overview) => match &overview.cli {
-                CliCardVm::Ready { details, .. } => {
-                    assert_eq!(details.channel, "beta");
-                    assert_eq!(details.platform, "linux x86_64");
+            PageVm::Overview(overview) => {
+                match &overview.cli {
+                    CliCardVm::Ready { details, .. } => {
+                        assert_eq!(details.channel, "beta");
+                        assert_eq!(details.platform, "linux x86_64");
+                    }
+                    other => panic!("unexpected CLI card: {other:?}"),
                 }
-                other => panic!("unexpected CLI card: {other:?}"),
-            },
+                assert_eq!(overview.editor_count, None);
+                assert_eq!(overview.project_count, None);
+            }
             other => panic!("unexpected page: {other:?}"),
         }
 

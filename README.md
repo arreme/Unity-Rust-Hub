@@ -111,7 +111,7 @@ crates/unity-hub-ui/        Visual layer; depends only on unity-hub-model + iced
   src/theme.rs              iced theme/styles built from tokens.
   src/components.rs         Shared cards, badges, tables, headers.
   src/pages/                overview, editors, projects, changelog, settings.
-  src/shell.rs              Sidebar, top bar, notice and job cards.
+  src/shell.rs              Sidebar, notice and job cards.
   src/modals.rs             Full-screen dialog screens.
   src/fixtures.rs           Deterministic content for every screen/state.
   src/bin/gallery.rs        CLI-free design gallery.
@@ -314,7 +314,8 @@ Resolution order for the binary:
 
 ## UI notes
 
-- The shell is a fixed sidebar plus a scrollable content area and top bar.
+- The shell is a fixed sidebar plus a scrollable content area; each page draws its
+  own title and actions, so there is no top bar.
 - Tables are built from header and row containers rather than `iced::widget::table`;
   the table widget caused a rendering stall with live data in iced 0.14.
 - Dialogs replace the shell with a full-screen view instead of using `stack!`. Stacked
@@ -331,6 +332,7 @@ Resolution order for the binary:
 - The window icon is compiled in as raw RGBA, which lets the build drop iced's
   `image` feature and its image codecs. The custom theme means Linux theme detection
   is not linked either.
+- The UI bundles Inter, JetBrains Mono, and Lucide icon subsets (`scripts/subset-fonts.sh`).
 - The theme is built from the design tokens in
   `crates/unity-hub-ui/src/tokens.rs`; component styles live in
   `crates/unity-hub-ui/src/theme.rs`.
