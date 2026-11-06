@@ -329,12 +329,88 @@ fn editor_signal() -> &'static Regex {
     })
 }
 
+/// "The message and the exit code stay the same" is the opposite of a contract
+/// change, so such an entry must not be flagged just for mentioning an exit
+/// code.
+fn unchanged_wording() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r"(?isx)
+            \b(?:exit\s+codes?|error\s+codes?|messages?|output)\b
+            .{0,80}?
+            \b(?:stays?|remains?)\s+the\s+same\b
+            | \b(?:exit\s+codes?|error\s+codes?|messages?)\b
+            .{0,80}?
+            \bunchanged\b
+            | \bno\s+change\s+to\s+(?:the\s+)?(?:exit\s+codes?|messages?|output)\b
+            ",
+        )
+        .expect("valid regex")
+    })
+}
+
+/// A `Fixed` entry that moves a command's exit code: "now fails with exit code
+/// 6 ... It used to exit 0".
+fn fix_now_exit_change_wording() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r"(?isx)
+            \bnow\s+(?:exits?|fails?|stops?|prints?|returns?)\b
+            .{0,200}?
+            (?:exit\s+code\s+\d+|exits?\s+(?:with\s+)?\d+)
+            .{0,300}?
+            \bused\s+to\s+(?:exit|print|return)\b
+            ",
+        )
+        .expect("valid regex")
+    })
+}
+
+/// A `Fixed` entry that changes how a provider failure is described, naming the
+/// new stable error code: "no longer say a token is invalid ... exit 7 with
+/// `VCS_PROVIDER_UNREACHABLE`".
+fn fix_diagnosis_wording() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r"(?isx)\bno\s+longer\s+(?:say|says|report|reports|treat|treats|describe|describes|blame|blames)\b",
+        )
+        .expect("valid regex")
+    })
+}
+
+fn named_error_code() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        // The heuristic lowercases entries before matching, so a code such as
+        // `VCS_PROVIDER_UNREACHABLE` arrives here in lowercase.
+        Regex::new(r"(?i)\b[a-z][a-z0-9]+(?:_[a-z0-9]+){2,}\b").expect("valid regex")
+    })
+}
+
+/// A `Fixed` entry that changes what a named flag does and what a run exits
+/// with: "`install-modules` now respects `--architecture` ... exits 2 ...
+/// instead of using the installed build".
+fn fix_flag_contract_wording() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"(?isx)\B--[a-z][a-z0-9-]+\b.{0,400}?\binstead\s+of\b").expect("valid regex")
+    })
+}
+
 /// A narrower test for `Fixed`/`Security` notes. Bug-fix prose uses words such
 /// as "removed" and "no longer" constantly, so only explicit contract changes
 /// are surfaced here.
 fn fix_contract_wording(text: &str) -> bool {
     fix_wording().is_match(text)
         || fix_contract_phrases().is_match(text)
+        || fix_now_exit_change_wording().is_match(text)
+        || (fix_diagnosis_wording().is_match(text)
+            && fix_command_exit_marker().is_match(text)
+            && named_error_code().is_match(text))
+        || (fix_flag_contract_wording().is_match(text) && fix_command_exit_marker().is_match(text))
         || (fix_command_refusal_wording().is_match(text)
             && fix_command_exit_marker().is_match(text))
         || fix_command_destructive_wording().is_match(text)
@@ -479,12 +555,20 @@ fn find_breaking_changes(sections: &[ChangelogSection]) -> Vec<BreakingChange> {
             section_lower.contains("fixed") || section_lower.contains("security");
         for entry in &section.entries {
             let text_lower = entry.to_ascii_lowercase();
+            // "The exit code stays the same" is not a contract change, even
+            // though it names an exit code. Explicit breaking wording still
+            // counts on its own.
+            let unchanged =
+                unchanged_wording().is_match(&text_lower) && !fix_wording().is_match(&text_lower);
             let reason = if section_lower.contains("removed") {
                 Some("removed functionality")
             } else if section_lower.contains("deprecated") {
                 Some("deprecated functionality")
             } else if is_fix_or_security {
-                fix_contract_wording(&text_lower).then_some("behavior or output-shape change")
+                (!unchanged && fix_contract_wording(&text_lower))
+                    .then_some("behavior or output-shape change")
+            } else if unchanged {
+                None
             } else if breaking_wording().is_match(&text_lower) {
                 // Do not blanket-flag every Changed entry: a release's Changed
                 // section is mostly ordinary behavior updates. Only wording
@@ -583,6 +667,126 @@ mod tests {
 - `unity collab attachments upload` no longer leaves an unfinished attachment behind when the file transfer fails, so you can run the upload again on the same annotation. If the attachment cannot be removed, the error names the `unity collab attachments delete` command that clears it.
 - `unity projects --watch` now follows the project list. A project added or removed from another terminal while the watch runs appears or disappears on the next poll. Before, only the rows already shown refreshed, so the list never changed.
 "#;
+
+    const BETA17: &str = r##"### Added
+
+- `unity plugin install` and `unity plugin upgrade` warn you before they download a beta build of a plugin, so you know it isn't a stable release. With `--format json` the warning is in the output's `warnings`.
+
+- A plugin can declare other plugins it needs. `unity plugin install` and `unity plugin upgrade` install the required ones first, each with its own license step, `unity plugin remove` refuses a plugin an installed plugin requires, and `unity plugin --json` lists each entry's `dependencies`.
+
+- `unity install --headless` installs the headless Linux Editor, which runs with no display. The version picker also asks which one you want, with the regular Editor selected. Without either, you get the regular Editor, even on a machine with no display. The headless Editor leaves out the modules it can't use, such as iOS.
+
+- `unity pipeline automation apps versions create <app-id> --version <version>` adds a draft version to a Pipeline Automation app, empty or copied from an existing version with `--base-version`.
+
+- `unity pipeline automation apps create` creates a Pipeline Automation app and its first draft version from options, or from a JSON file with `--file`.
+
+- `unity pipeline cloud-build builds timeline <build-number> --build-target <target>` shows how many seconds each phase of a build took, from waiting for a machine through upload. It is available on staging only for now, and on production it stops with an error before sending any request.
+
+### Changed
+
+- `unity skill install` installs the Unity skills from a newer release of the Unity-Technologies/skills repository. The `unity-cli` skill now covers streamed command output and the `antigravity` and `qwen` skills clients, and `new-unity-project` now upgrades a project to Unity 6000.7 or later with `unity projects upgrade`.
+
+- `unity docs` opens the common page for a bare name that several script reference pages share: `unity docs Start` opens `MonoBehaviour.Start` and `unity docs Log` opens `Debug.Log`, instead of a search. A name with no clear common owner still opens a search.
+
+- `unity plugin upgrade` updates a plugin's agent skill only where it is already installed: user-wide, or in the current project. Run it from a project to refresh that project's copy. It no longer copies the skill into every AI client that has Unity's skill.
+
+- `unity plugin install <id> --local` writes the plugin's agent skill into the current project, for each AI client whose project already has Unity's skill. Claude Desktop is skipped, because its skills are global only.
+
+- `unity projects link vcs --rollback --delete-remote` no longer deletes the remote repository unconfirmed when it can't ask (a machine format, `--non-interactive`, no terminal on stdin, or CI). It now fails with `LINK_VCS_DELETE_REMOTE_REQUIRES_YES` (exit `2`) before it reads or detaches anything, only where a delete could happen (a run with no origin or a self-hosted origin is unchanged); pass the new `--yes` (`-y`) to delete without asking. On a terminal it still asks, and `--yes` skips the question.
+
+- A `unity self-update` that fails because of your machine or network no longer sends a crash report: a download that stalls, a download that doesn't match its checksum or goes missing, an operating system that refuses to start the new binary, a denied or full disk, and a file the system won't replace. The message and the exit code stay the same, and the error no longer suggests `unity bug` for the checksum, stall and blocked-launch cases.
+
+- When the Unity release service can't be reached, `unity install` and `unity editors default latest` or `lts` now fall back to Unity 6000.0.85f2 and 6000.3.28f1 LTS, up from 6000.0.64f1 and 6000.3.10f1.
+
+- Crash reports leave out problems on your side, such as a full disk, a denied permission, a network failure or not being signed in, and the same failure is reported at most once an hour. A crash no longer holds up the prompt for more than about a second and a half when you run the CLI in a terminal.
+
+- If you opted in to analytics, a crash report carries the same anonymous device id analytics uses. Without that consent it carries no id.
+
+- Turning off **Send crash reports** in the Unity Hub's settings now turns off the CLI's crash reports too. `UNITY_NO_CRASH_REPORT` still turns them off on its own.
+
+- Updated usage analytics defaults for new installs.
+
+### Fixed
+
+- `unity mcp` waits for an asynchronous Editor test run to finish, and marks a capture that writes a file as able to overwrite one, with Pipeline packages that name their parameters in kebab-case (`async-tests`, `output-path`).
+
+- The install scripts install the latest beta again when no stable release exists yet, instead of failing. `UNITY_CLI_CHANNEL` set to a channel still installs only from that channel.
+
+- `unity pipeline list`, `unity status` and every command that finds a running Editor by its project now find an Editor launched with its `-projectPath` argument in quotes, such as `"-projectPath" "C:\My Project"`. Such an Editor was not listed at all.
+
+- `unity skill install`, `unity skill refresh` and `unity setup` install the latest published Unity skills, even on a machine that has never run the CLI before. Previously a first install could write the skills from before the most recent update. When the skills registry can't be reached, only the skills built into the CLI are installed, and the `unity-cli` skill always matches your CLI version.
+
+- `unity skill refresh --format json` and `--format ndjson` now write a result for every run. The JSON envelope or the final `result` line lists each tracked install the refresh looked at, with what it did: `refreshed`, `up-to-date`, `pruned`, `skipped` or `conflict` (`would-update`, `would-skip` or `would-prune` under `--dry-run`), plus a `skipReason` when the row was left alone or pruned for a reason. Before, they printed nothing, even when there was nothing to refresh.
+
+- An extra argument on `unity cloud`, `unity context`, `unity build`, `unity pipeline` and `unity projects` commands (except `unity pipeline automation` and `unity pipeline cloud-build`), for example `unity cloud status extra`, now prints `error: too many arguments` and exits `2`, like every other command. It used to exit `1` with "isn't supported with these options". A missing required argument on these commands (again except `unity pipeline automation` and `unity pipeline cloud-build`), for example `unity context use`, now prints `error: missing required argument` and exits `2` instead of `1`.
+
+- `unity vcs setup`, `unity projects create`, `unity projects link vcs` and `unity projects clone --vcs` no longer say a GitHub or GitLab token is invalid when the provider can't be reached. They exit 7 with `VCS_PROVIDER_UNREACHABLE`, and still exit 3 with `VCS_TOKEN_INVALID` when the provider rejects the token.
+
+- `unity ci init --provider gitlab` now generates a job that runs in a project folder whose name starts with a dash, such as `-rf`.
+
+- `unity pipeline install` and `unity pipeline upgrade` under `--format tsv` now print their result as `key<TAB>value` lines under a header row, one line per field (`packageId`, `version`, `projectPath`, `alreadyInstalled`; and `previousVersion`, `upgraded`, `alreadyLatest` for upgrade). Before, a script got one headerless row of positional cells and could not tell which cell was which. The `json` and `ndjson` output is unchanged.
+
+- `unity install-modules` now respects `--architecture` when one build of the version is installed: an invalid value exits 2 in every mode, and an architecture that is not installed exits 6 with a not-found message for `--list`, `--all`, named modules (`-m`) and the module picker, instead of using the installed build.
+
+- `unity projects create`, `unity projects link vcs` (flag form and URL form) and `unity vcs setup` with `--git-token-from-stdin` (or the deprecated `--git-token-stdin`) no longer fall back to a stored login (a Git credential helper, `gh` or `glab`) when stdin is empty. They now fail with exit code 4 (`VCS_TOKEN_REQUIRED`) and create or push nothing, so a script that pipes an empty variable cannot act as whoever is signed in. `UNITY_GITHUB_TOKEN` and `UNITY_GITLAB_TOKEN` still apply. An interactive terminal on stdin reads no token, so the flag in a terminal now fails the same way instead of using the stored login.
+
+- `unity projects create --cloud-project <name>` now fails with exit code 6 when the organization has no project, or more than one, matching that name. It used to exit 0 with only a warning. The project is still created locally, unlinked, and the error names its path.
+
+- Creating a Unity Cloud project with `--coppa unspecified` now works on `unity projects create`, `projects link cloud`, `projects link vcs` and `vcs setup`. The Cloud request was refused with HTTP 400, so the project stayed unlinked.
+
+- `unity projects create --vcs github` or `--vcs gitlab` with a `--git-token` now exits `7` (`VCS_PROVIDER_UNREACHABLE`) when the token check cannot reach the provider (offline, a failed DNS lookup, a refused connection, or a proxy that is down), and `14` (`ETIMEDOUT` or `ECONNABORTED`) when it times out, instead of reporting the token as invalid (exit `3`). Nothing is written in either case.
+
+- `--quiet` no longer blanks the human answer of commands whose result is a sentence or a table. `unity docs cache --quiet` now prints "No documentation is cached..." on stdout instead of nothing, and `context`, `auth accounts`, `config`, `editors running`, `skill`, `doctor` and the other commands listed in the deviation keep their answer under `--quiet`. The `plugin` not-installed hint now goes to stderr, so `--quiet` drops it.
+
+- `unity license status` no longer reports `signedIn: true` with `authMode: "oauth"` when nobody is signed in and the sign-in service refuses the CLI. It now reports the saved sign-in, or signed out when none is saved, matching `unity auth status`.
+
+- `unity test` now refuses a `--junit-output` that is the same file as `--output` on the report folder's own terms, instead of letting the JUnit report overwrite the NUnit one. Names that differ by letter case, the dotless and dotted `i`, or Unicode form are only a candidate, and the file system decides, component by component from the first path component that differs: a spelling that exists while the other does not is a different file, two that exist are compared by file identity (a dangling link, whose target cannot be looked up, is judged by its link entry and never counts as a different file), and two that are absent are probed with a file created under the first name in a scratch folder inside the nearest existing folder, removed again, so nothing is created or removed at the report paths (a probe that cannot be made or read proves nothing and does not refuse the run), and right before the JUnit report is written the two files are compared by identity once more, so a link or an 8.3 short name created by the NUnit write cannot send the JUnit report over it (NTFS through WSL keeps `É` and `É` as two files and folds `ı` into `I`, a folding folder makes `É` and `É` one).
+
+- Commands that talk to a running Unity Editor, such as `unity command`, `unity recompile`, `unity job`, `unity logs --console` and `unity projects audit`, no longer crash when the current directory can't be read or no longer exists (a permission refusal such as macOS blocking a protected folder, or a folder deleted under your shell). They skip it, and with several Editors open ask you to pick one with `--project-path`. A relative `--project-path` needs a readable directory, so pass an absolute one instead.
+
+- `unity projects link cloud` links a project whose `ProjectSettings.asset`, as the Editor wrote it, no longer names a cloud project, where it refused with the stale link from the Hub's project list.
+
+- `unity projects link cloud` now exits with code 7 (14 for a timeout) when Unity's services can't be reached (for example behind a dead proxy), instead of exit 6. Unity Cloud commands whose sign-in step gets no answer from Unity's services now say the services can't be reached, instead of telling you to run `unity auth login`.
+
+- `unity projects clone --vcs uvcs` now registers the project with its Unity Version Control link, workspace location included, even when the workspace cannot be read back from `cm`, so `unity projects unlink vcs` finds the workspace it removes instead of reporting the project as already unlinked or naming the wrong folder.
+
+- `unity projects unlink vcs` on Windows no longer refuses a project at the root of its Unity Version Control workspace just because the path differs in letter case (for example `C:\work\game` against the `c:\work\game` that `cm` reports), so it removes the workspace without `--unlink-workspace`. A project below the workspace root is still refused.
+
+- `unity projects clone --vcs uvcs` of a repository you already cloned into another folder no longer fails with "workspace already exists": the second clone gets a workspace named for its folder (`<repo>_<folder>`), and a name still taken is reported with the `cm workspace delete` command to free it.
+
+- On Windows, `unity projects clone --subpath` registers the project with backslashes only (`C:\dir\Sub\Game`), instead of a path that mixed `\` and `/`.
+
+- `unity projects unlink vcs` treats a project whose registry row records its workspace folder itself (as the Hub writes it) as linked to that folder, instead of refusing with a folder two levels above it or removing the `.plastic` there.
+
+- On Windows, pressing Ctrl-C while a command shows its spinner no longer leaves the Windows Terminal tab and taskbar progress indicator spinning.
+
+- `unity terms status --quiet` now prints the same table as a run without `--quiet`, and prints "No installed Editors found." when no Editor is installed, instead of printing nothing.
+
+- On Windows, `unity hub install` now names the expected publisher, `Unity Technologies SF`, when it refuses an installer whose signature does not check out, instead of the macOS Developer ID.
+
+- On Windows, `UNITY_PAGER=more` and `PAGER=more` now page long listings; the pager lookup also finds `.com` programs.
+
+- A `UNITY_PAGER` or `PAGER` that cannot be found now prints a warning on stderr instead of silently printing the listing unpaged.
+
+- A sign-in refresh that times out, and a service-account token exchange that gets no answer from the network, no longer send a crash report. The messages and exit codes are unchanged.
+
+- `unity vcs doctor`, `hooks`, `status`, `switch`, `sync` and `worktree` now say what to check when git cannot be started (not installed, not on your `PATH`, or not allowed to run), under the new error code `GIT_START_FAILED`.
+
+- `unity context` reports an accounts database it cannot write to with the same message and `LOCAL_STORE_UNWRITABLE` code as `unity auth`.
+
+- A pipeline artifact the build does not list, an accounts database `context` cannot write to and a git that cannot be started no longer send a crash report.
+
+- `unity mcp configure` writes the config file when it sits on a different drive than its temporary copy, which happens when `AppData` is redirected, as with a packaged Claude Desktop. Previously it failed with "The system cannot move the file to a different disk drive" and left the config untouched.
+
+- `unity mcp configure` now exits with code 1, instead of 6, when it can't write a config file (for example a read-only folder) in the human, `tsv` and `github` formats; `--format json` and `ndjson` already used 1. Scripts that check for exit 6 on a failed write should check for 1.
+
+- `unity watch test` no longer skips a file change on a busy machine. A slow poll under heavy load used to push the next check far out, so a change could land in the gap and go unnoticed until the following one.
+
+- The one-time privacy notice now matches your analytics setting on every first command. Before, a machine with analytics on could be told how to turn it on instead of how to turn it off.
+
+### Security
+
+- `unity projects close --force` now signals a process only if it is a Unity Editor that did not start after the Editor's recorded start time, and checks again before each signal. A stale or tampered editor record that names a process that is not a Unity Editor, or one that started after the recorded time, is refused with a message, and that process is left running."##;
 
     #[test]
     fn parses_versions_sections_and_wrapped_entries() {
@@ -683,6 +887,52 @@ mod tests {
                     .iter()
                     .any(|change| change.text.contains(needle)),
                 "{needle} is a fix or ordinary behavior change, not a breaking change"
+            );
+        }
+    }
+
+    #[test]
+    fn beta17_contract_changes_are_flagged() {
+        let parsed = parse_changelog(BETA17);
+
+        for needle in [
+            "link vcs --rollback",
+            "mcp configure",
+            "VCS_PROVIDER_UNREACHABLE",
+            "cloud-project",
+            "too many arguments",
+            "now respects --architecture",
+        ] {
+            let change = parsed
+                .breaking_changes
+                .iter()
+                .find(|change| change.text.contains(needle))
+                .unwrap_or_else(|| panic!("{needle} should be flagged"));
+            assert_eq!(change.reason, "behavior or output-shape change");
+        }
+    }
+
+    #[test]
+    fn beta17_telemetry_and_fix_noise_stays_quiet() {
+        let parsed = parse_changelog(BETA17);
+
+        for needle in [
+            // The exit code explicitly stays the same: no contract change.
+            "no longer sends a crash report",
+            // Internal paging, pagination and privacy fixes.
+            "UNITY_PAGER=more",
+            "privacy notice",
+            // Security hardening that changes no output or exit code.
+            "projects close --force",
+            // A fix to how a watch polls files.
+            "watch test",
+        ] {
+            assert!(
+                !parsed
+                    .breaking_changes
+                    .iter()
+                    .any(|change| change.text.contains(needle)),
+                "{needle} is not a contract change"
             );
         }
     }

@@ -284,6 +284,10 @@ pub struct InstallEditorVm {
     pub version_input: String,
     pub modules: LoadState<Vec<ModuleOptionVm>>,
     pub available_count: usize,
+    /// Install the headless Editor (`--headless`), a CLI beta.17 option.
+    pub headless: bool,
+    /// False on platforms without a headless build (Linux only).
+    pub headless_available: bool,
     pub accept_eula: bool,
     pub can_install: bool,
     pub preview: Option<InstallPreviewVm>,
@@ -425,6 +429,8 @@ pub struct InstallCliVm {
 #[derive(Debug, Clone)]
 pub struct EditorModulesVm {
     pub editor_version: String,
+    /// The build the modules belong to; two builds can share a version.
+    pub architecture: String,
     pub installed_modules: Vec<String>,
     pub modules: LoadState<Vec<ModuleOptionVm>>,
     pub selected_count: usize,

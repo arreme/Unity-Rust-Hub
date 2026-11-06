@@ -203,9 +203,18 @@ fn editor_modules_modal(vm: &EditorModulesVm) -> Element<'_, UiAction> {
     ]
     .spacing(8);
 
+    let subtitle = if vm.architecture.trim().is_empty() {
+        "Only modules that are not already installed are listed.".to_string()
+    } else {
+        format!(
+            "{} build · Only modules that are not already installed are listed.",
+            vm.architecture
+        )
+    };
+
     dialog(
         format!("Modules for Unity {}", vm.editor_version),
-        "Only modules that are not already installed are listed.",
+        subtitle,
         body.into(),
         actions.into(),
     )

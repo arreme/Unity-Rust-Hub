@@ -14,8 +14,8 @@ use crate::models::{
     RunningEditors,
 };
 use crate::versions::{
-    validate_cli_version, validate_editor_version, validate_module_id, validate_project_path,
-    validate_release_stream,
+    validate_architecture, validate_cli_version, validate_editor_version, validate_module_id,
+    validate_project_path, validate_release_stream,
 };
 
 /// The standard opt-out signal. The CLI's analytics/update callback adds a
@@ -266,8 +266,17 @@ impl UnityCli {
         parse_items(executed.envelope.data, &[])
     }
 
-    pub fn modules(&self, version: &str) -> Result<Vec<Module>, UnityError> {
-        let parts = modules_parts(version)?;
+    /// Lists the module catalog for an Editor version.
+    ///
+    /// `architecture` disambiguates the two builds the CLI can install for the
+    /// same version (for example `arm64` and `x86_64` on Apple Silicon). It is
+    /// optional because a version installed once has only one build.
+    pub fn modules(
+        &self,
+        version: &str,
+        architecture: Option<&str>,
+    ) -> Result<Vec<Module>, UnityError> {
+        let parts = modules_parts(version, architecture)?;
         let executed = self.run_args(&parts, "json")?;
         parse_items(executed.envelope.data, &[])
     }
@@ -329,10 +338,14 @@ impl UnityCli {
     }
 
     /// Runs `unity install <version> --dry-run` and returns the raw preview.
-    pub fn dry_run_install(&self, version: &str, modules: &[String]) -> Result<Value, UnityError> {
-        validate_editor_version(version)?;
-        let mut parts = svec(&["install", version, "--yes", "--dry-run"]);
-        append_modules(&mut parts, modules)?;
+    pub fn dry_run_install(
+        &self,
+        version: &str,
+        modules: &[String],
+        headless: bool,
+    ) -> Result<Value, UnityError> {
+        let mut parts = install_parts(version, modules, headless, false)?;
+        parts.push("--dry-run".to_string());
         let executed = self.run_args(&parts, "json")?;
         Ok(executed.envelope.data.unwrap_or(Value::Null))
     }
@@ -341,24 +354,21 @@ impl UnityCli {
         &self,
         version: &str,
         modules: &[String],
+        headless: bool,
         accept_eula: bool,
     ) -> Result<CommandSpec, UnityError> {
-        validate_editor_version(version)?;
-        let mut parts = svec(&["install", version, "--yes"]);
-        append_modules(&mut parts, modules)?;
-        if accept_eula {
-            parts.push("--accept-eula".to_string());
-        }
+        let parts = install_parts(version, modules, headless, accept_eula)?;
         self.spec(&parts, "ndjson")
     }
 
     pub fn install_modules_spec(
         &self,
         version: &str,
+        architecture: Option<&str>,
         modules: &[String],
         accept_eula: bool,
     ) -> Result<CommandSpec, UnityError> {
-        let parts = install_modules_parts(version, modules, accept_eula)?;
+        let parts = install_modules_parts(version, architecture, modules, accept_eula)?;
         self.spec(&parts, "ndjson")
     }
 
@@ -792,9 +802,43 @@ fn releases_parts(
     Ok(parts)
 }
 
-fn modules_parts(version: &str) -> Result<Vec<String>, UnityError> {
+fn modules_parts(version: &str, architecture: Option<&str>) -> Result<Vec<String>, UnityError> {
     validate_editor_version(version)?;
-    Ok(svec(&["modules", version]))
+    let mut parts = svec(&["modules", version]);
+    append_architecture(&mut parts, architecture)?;
+    Ok(parts)
+}
+
+pub fn install_parts(
+    version: &str,
+    modules: &[String],
+    headless: bool,
+    accept_eula: bool,
+) -> Result<Vec<String>, UnityError> {
+    validate_editor_version(version)?;
+    if headless && !headless_editor_supported() {
+        return Err(UnityError::invalid_input(
+            "The headless Editor is only available on Linux.",
+        ));
+    }
+    let mut parts = svec(&["install", version, "--yes"]);
+    append_modules(&mut parts, modules)?;
+    if headless {
+        // The headless build leaves out modules it cannot use, such as iOS.
+        parts.push("--headless".to_string());
+    }
+    if accept_eula {
+        parts.push("--accept-eula".to_string());
+    }
+    Ok(parts)
+}
+
+/// Whether this platform can install the headless Unity Editor.
+///
+/// The CLI ships the headless build for Linux only, so the window that does
+/// not need a display is offered only there.
+pub fn headless_editor_supported() -> bool {
+    cfg!(target_os = "linux")
 }
 
 fn projects_parts() -> Vec<String> {
@@ -809,6 +853,7 @@ fn open_project_parts(path: &str) -> Result<Vec<String>, UnityError> {
 
 fn install_modules_parts(
     version: &str,
+    architecture: Option<&str>,
     modules: &[String],
     accept_eula: bool,
 ) -> Result<Vec<String>, UnityError> {
@@ -819,6 +864,11 @@ fn install_modules_parts(
         ));
     }
     let mut parts = svec(&["install-modules", "--editor-version", version, "--yes"]);
+    // CLI beta.17 makes `install-modules` respect `--architecture` when one
+    // build of the version is installed, and fail when the named build is not.
+    // Passing the architecture of the row the user opened keeps the module
+    // install on that build instead of whatever the CLI picks.
+    append_architecture(&mut parts, architecture)?;
     append_modules(&mut parts, modules)?;
     if accept_eula {
         parts.push("--accept-eula".to_string());
@@ -836,6 +886,20 @@ fn auth_status_from_error(error: &UnityError) -> Option<AuthStatus> {
 
 fn auth_login_parts() -> Vec<String> {
     svec(&["auth", "login"])
+}
+
+fn append_architecture(
+    parts: &mut Vec<String>,
+    architecture: Option<&str>,
+) -> Result<(), UnityError> {
+    let Some(architecture) = architecture else {
+        return Ok(());
+    };
+    let Some(architecture) = validate_architecture(architecture)? else {
+        return Ok(());
+    };
+    parts.extend(["--architecture".to_string(), architecture]);
+    Ok(())
 }
 
 fn append_modules(parts: &mut Vec<String>, modules: &[String]) -> Result<(), UnityError> {
@@ -1119,9 +1183,72 @@ mod tests {
     #[test]
     fn modules_uses_the_flat_listing_without_the_removed_list_subcommand() {
         assert_eq!(
-            modules_parts("6000.6.6f1").unwrap(),
+            modules_parts("6000.6.6f1", None).unwrap(),
             svec(&["modules", "6000.6.6f1"])
         );
+    }
+
+    #[test]
+    fn modules_forward_the_architecture_when_a_row_names_one() {
+        assert_eq!(
+            modules_parts("6000.6.6f1", Some("arm64")).unwrap(),
+            svec(&["modules", "6000.6.6f1", "--architecture", "arm64"])
+        );
+        // An older registry row can leave the architecture empty; the CLI then
+        // picks the only build it knows about.
+        assert_eq!(
+            modules_parts("6000.6.6f1", Some(" ")).unwrap(),
+            svec(&["modules", "6000.6.6f1"])
+        );
+    }
+
+    #[test]
+    fn install_modules_forward_the_architecture() {
+        let parts = install_modules_parts(
+            "6000.6.6f1",
+            Some("arm64"),
+            &["windows-il2cpp".to_string()],
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            &parts[..4],
+            &["install-modules", "--editor-version", "6000.6.6f1", "--yes"]
+        );
+        let architecture = parts
+            .iter()
+            .position(|part| part == "--architecture")
+            .expect("--architecture");
+        assert_eq!(parts[architecture + 1], "arm64");
+    }
+
+    #[test]
+    fn headless_installs_add_the_flag_only_when_requested() {
+        let modules = vec!["linux-il2cpp".to_string()];
+        let regular = install_parts("6000.6.6f1", &modules, false, true).unwrap();
+        assert!(!regular.contains(&"--headless".to_string()));
+
+        let headless = install_parts("6000.6.6f1", &modules, true, true);
+        if headless_editor_supported() {
+            assert!(headless.unwrap().contains(&"--headless".to_string()));
+        } else {
+            // The headless build is Linux-only; other platforms refuse it
+            // instead of sending a flag their CLI does not know.
+            assert!(headless.is_err());
+        }
+    }
+
+    #[test]
+    fn dry_run_install_accepts_the_headless_flag() {
+        let parts = install_parts("6000.6.6f1", &[], true, false);
+        if headless_editor_supported() {
+            let parts = parts.unwrap();
+            assert_eq!(parts[0], "install");
+            assert!(parts.contains(&"--yes".to_string()));
+            assert!(parts.contains(&"--headless".to_string()));
+        } else {
+            assert!(parts.is_err());
+        }
     }
 
     #[test]
@@ -1135,7 +1262,8 @@ mod tests {
     #[test]
     fn install_modules_uses_the_current_editor_version_flag() {
         let parts =
-            install_modules_parts("6000.6.6f1", &["windows-il2cpp".to_string()], true).unwrap();
+            install_modules_parts("6000.6.6f1", None, &["windows-il2cpp".to_string()], true)
+                .unwrap();
         assert_eq!(parts[0], "install-modules");
         assert_eq!(parts[1], "--editor-version");
         assert_eq!(parts[2], "6000.6.6f1");

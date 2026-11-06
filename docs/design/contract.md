@@ -82,8 +82,8 @@ fixture when a new state needs review.
 - Installed Editors: loading, error, empty, one/many, default badge, long module
   list.
 - Install a new Editor: version input, module catalog loading/error/empty/loaded,
-  select all/clear, EULA, preview loading/ready/raw fallback, install enabled
-  and disabled.
+  select all/clear, headless option on Linux with the CLI's availability note,
+  EULA, preview loading/ready/raw fallback, install enabled and disabled.
 - Available releases: loading, error, empty, installed badge, use action,
   stream tones.
 
@@ -115,8 +115,9 @@ fixture when a new state needs review.
 
 - Install CLI: channel picker, installer command preview, consent checkbox,
   disabled/enabled run action.
-- Editor modules: installed module list, available module loading/error/empty/
-  loaded, selection count, EULA, disabled/enabled install.
+- Editor modules: installed module list for one build (version + architecture),
+  available module loading/error/empty/loaded, selection count, EULA,
+  disabled/enabled install.
 - Project upgrade: current version/path, target picker, no target installed
   warning, confirmation, disabled/enabled upgrade.
 

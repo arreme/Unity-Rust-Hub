@@ -203,6 +203,7 @@ pub struct App {
     pub cli_consent: bool,
     pub install_version: String,
     pub selected_modules: BTreeSet<String>,
+    pub install_headless: bool,
     pub accept_eula: bool,
     pub preview: Option<InstallPreview>,
     pub preview_raw: Option<Value>,
@@ -241,11 +242,12 @@ pub enum Message {
     LoadModules,
     ToggleModule(String, bool),
     SelectAllModules(bool),
+    HeadlessToggled(bool),
     AcceptEulaToggled(bool),
     PreviewInstall,
     StartInstallEditor,
     UseRelease(String),
-    OpenModules(String),
+    OpenModules(String, String),
     CloseModal,
     ToggleDialogModule(String, bool),
     DialogEulaToggled(bool),
@@ -302,11 +304,14 @@ impl From<UiAction> for Message {
             UiAction::LoadModules => Self::LoadModules,
             UiAction::ToggleModule(id, value) => Self::ToggleModule(id, value),
             UiAction::SelectAllModules(value) => Self::SelectAllModules(value),
+            UiAction::HeadlessToggled(value) => Self::HeadlessToggled(value),
             UiAction::AcceptEulaToggled(value) => Self::AcceptEulaToggled(value),
             UiAction::PreviewInstall => Self::PreviewInstall,
             UiAction::StartInstallEditor => Self::StartInstallEditor,
             UiAction::UseRelease(version) => Self::UseRelease(version),
-            UiAction::OpenEditorModules(version) => Self::OpenModules(version),
+            UiAction::OpenEditorModules(version, architecture) => {
+                Self::OpenModules(version, architecture)
+            }
             UiAction::CloseModal => Self::CloseModal,
             UiAction::ToggleDialogModule(id, value) => Self::ToggleDialogModule(id, value),
             UiAction::DialogEulaToggled(value) => Self::DialogEulaToggled(value),
@@ -362,6 +367,7 @@ impl App {
             cli_consent: false,
             install_version: "lts".to_string(),
             selected_modules: BTreeSet::new(),
+            install_headless: false,
             accept_eula: false,
             preview: None,
             preview_raw: None,
@@ -657,7 +663,7 @@ impl App {
                 Task::perform(
                     run_blocking({
                         let cli = self.cli.clone();
-                        move || cli.modules(&version)
+                        move || cli.modules(&version, None)
                     }),
                     Message::ModulesLoaded,
                 )
@@ -684,6 +690,10 @@ impl App {
                 }
                 Task::none()
             }
+            Message::HeadlessToggled(value) => {
+                self.install_headless = value;
+                Task::none()
+            }
             Message::AcceptEulaToggled(value) => {
                 self.accept_eula = value;
                 Task::none()
@@ -695,7 +705,8 @@ impl App {
                 Task::perform(
                     run_blocking({
                         let cli = self.cli.clone();
-                        move || cli.dry_run_install(&version, &modules)
+                        let headless = self.install_headless;
+                        move || cli.dry_run_install(&version, &modules, headless)
                     }),
                     Message::PreviewLoaded,
                 )
@@ -705,12 +716,14 @@ impl App {
                 match self.cli.install_editor_spec(
                     &self.install_version,
                     &modules,
+                    self.install_headless,
                     self.accept_eula,
                 ) {
                     Ok(spec) => {
                         if self.start_job("editor-install", spec) {
                             self.modules.data = None;
                             self.selected_modules.clear();
+                            self.install_headless = false;
                             self.accept_eula = false;
                         }
                     }
@@ -727,17 +740,24 @@ impl App {
                 Task::perform(
                     run_blocking({
                         let cli = self.cli.clone();
-                        move || cli.modules(&version)
+                        move || cli.modules(&version, None)
                     }),
                     Message::ModulesLoaded,
                 )
             }
-            Message::OpenModules(version) => {
+            Message::OpenModules(version, architecture) => {
                 let Some(editor) = self
                     .editors
                     .data
                     .as_ref()
-                    .and_then(|editors| editors.iter().find(|editor| editor.version == version))
+                    .and_then(|editors| {
+                        editors
+                            .iter()
+                            .find(|editor| {
+                                editor.version == version && editor.architecture == architecture
+                            })
+                            .or_else(|| editors.iter().find(|editor| editor.version == version))
+                    })
                     .cloned()
                 else {
                     return Task::none();
@@ -746,11 +766,12 @@ impl App {
                 self.dialog_selected.clear();
                 self.dialog_eula = false;
                 let version = editor.version.clone();
+                let architecture = editor.architecture.clone();
                 self.modal = Modal::EditorModules(editor);
                 Task::perform(
                     run_blocking({
                         let cli = self.cli.clone();
-                        move || cli.modules(&version)
+                        move || cli.modules(&version, Some(&architecture))
                     }),
                     Message::DialogModulesLoaded,
                 )
@@ -779,10 +800,13 @@ impl App {
                     return Task::none();
                 }
                 let modules: Vec<String> = self.dialog_selected.iter().cloned().collect();
-                match self
-                    .cli
-                    .install_modules_spec(&editor.version, &modules, self.dialog_eula)
-                {
+                let architecture = editor.architecture.clone();
+                match self.cli.install_modules_spec(
+                    &editor.version,
+                    Some(&architecture),
+                    &modules,
+                    self.dialog_eula,
+                ) {
                     Ok(spec) => {
                         if self.start_job("module-install", spec) {
                             self.modal = Modal::None;
@@ -1476,6 +1500,8 @@ impl App {
             version_input: self.install_version.clone(),
             modules,
             available_count,
+            headless: self.install_headless && unity_core::runner::headless_editor_supported(),
+            headless_available: unity_core::runner::headless_editor_supported(),
             accept_eula: self.accept_eula,
             can_install: self.selected_modules.is_empty() || self.accept_eula,
             preview,
@@ -1632,6 +1658,7 @@ impl App {
 
                 Some(ModalVm::EditorModules(EditorModulesVm {
                     editor_version: editor.version.clone(),
+                    architecture: editor.architecture.clone(),
                     installed_modules: editor.module_names.clone(),
                     modules,
                     selected_count: self.dialog_selected.len(),
@@ -2160,6 +2187,38 @@ mod tests {
 
         assert!(app.running.loading);
         assert!(matches!(app.modal, Modal::UpgradeProject(_)));
+    }
+
+    #[test]
+    fn headless_install_option_follows_the_platform() {
+        let (mut app, _) = App::boot();
+        app.page = Page::Editors;
+        let _ = app.update(Message::HeadlessToggled(true));
+
+        let vm = app.view_model();
+        let PageVm::Editors(editors) = &vm.page else {
+            panic!("expected the Editors page");
+        };
+        let supported = unity_core::runner::headless_editor_supported();
+        assert_eq!(editors.install.headless_available, supported);
+        assert_eq!(editors.install.headless, supported);
+    }
+
+    #[test]
+    fn module_dialog_keeps_the_architecture_of_the_opened_build() {
+        let (mut app, _) = App::boot();
+        app.modal = Modal::EditorModules(Editor {
+            version: "6000.6.6f1".to_string(),
+            architecture: "arm64".to_string(),
+            ..Editor::default()
+        });
+
+        let vm = app.view_model();
+        let Some(ModalVm::EditorModules(modules)) = vm.modal else {
+            panic!("expected the modules dialog");
+        };
+        assert_eq!(modules.editor_version, "6000.6.6f1");
+        assert_eq!(modules.architecture, "arm64");
     }
 
     #[test]

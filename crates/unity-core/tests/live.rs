@@ -45,8 +45,14 @@ fn reads_real_cli_data() {
     );
 
     let first_version = editors[0].version.clone();
-    let modules = cli.modules(&first_version).expect("unity modules");
-    println!("modules for {first_version}: {}", modules.len());
+    let first_architecture = editors[0].architecture.clone();
+    let modules = cli
+        .modules(&first_version, Some(&first_architecture))
+        .expect("unity modules");
+    println!(
+        "modules for {first_version} ({first_architecture}): {}",
+        modules.len()
+    );
     assert!(!modules.is_empty());
 
     let info = cli.editor_info(&first_version).expect("unity editors info");

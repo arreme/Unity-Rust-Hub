@@ -74,7 +74,11 @@ impl std::fmt::Display for UnityError {
 
 impl std::error::Error for UnityError {}
 
-/// Exit-code semantics from the Unity CLI reference (beta 16).
+/// Exit-code semantics from the Unity CLI reference (beta 17).
+///
+/// Beta 17 adds no exit code of its own; it only moves some commands onto the
+/// existing codes (`unity mcp configure` write failures are now `1`, and
+/// argument errors are `2`), so the table below is unchanged.
 pub fn is_retryable_exit_code(code: i32) -> bool {
     matches!(code, 7 | 9 | 10 | 12 | 14 | 17 | 18 | 130 | 143)
 }

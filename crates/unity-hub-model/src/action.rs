@@ -24,11 +24,14 @@ pub enum UiAction {
     LoadModules,
     ToggleModule(String, bool),
     SelectAllModules(bool),
+    HeadlessToggled(bool),
     AcceptEulaToggled(bool),
     PreviewInstall,
     StartInstallEditor,
     UseRelease(String),
-    OpenEditorModules(String),
+    /// Version and architecture identify one installed build, because the CLI
+    /// can have an `arm64` and an `x86_64` Editor of the same version.
+    OpenEditorModules(String, String),
     CloseModal,
     ToggleDialogModule(String, bool),
     DialogEulaToggled(bool),

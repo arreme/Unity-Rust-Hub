@@ -74,7 +74,7 @@ fn shell(page: Page) -> ShellVm {
     ShellVm {
         page,
         cli: CliConnectionVm::Connected {
-            version: Some("1.0.0-beta.16".to_string()),
+            version: Some("1.0.0-beta.17".to_string()),
         },
         notice: None,
         job: None,
@@ -96,7 +96,7 @@ fn overview() -> ViewModel {
         PageVm::Overview(OverviewVm {
             cli: CliCardVm::Ready {
                 details: CliDetailsVm {
-                    version: "1.0.0-beta.16".to_string(),
+                    version: "1.0.0-beta.17".to_string(),
                     channel: "beta".to_string(),
                     platform: "linux x86_64".to_string(),
                     runtime: "rust 1.99".to_string(),
@@ -109,8 +109,8 @@ fn overview() -> ViewModel {
             },
             update: LoadState::Ready(UpdateVm {
                 available: false,
-                current_version: "1.0.0-beta.16".to_string(),
-                latest_version: "1.0.0-beta.16".to_string(),
+                current_version: "1.0.0-beta.17".to_string(),
+                latest_version: "1.0.0-beta.17".to_string(),
             }),
             account: AccountCardVm {
                 auth: AuthVm::SignedIn {
@@ -237,6 +237,8 @@ fn editors() -> ViewModel {
                     },
                 ]),
                 available_count: 2,
+                headless: false,
+                headless_available: true,
                 accept_eula: false,
                 can_install: true,
                 preview: None,
@@ -314,13 +316,13 @@ fn changelog() -> ViewModel {
         Page::Changelog,
         PageVm::Changelog(ChangelogVm {
             loaded: true,
-            versions: vec!["1.0.0-beta.15".to_string(), "1.0.0-beta.16".to_string()],
-            selected_target: Some("1.0.0-beta.16".to_string()),
+            versions: vec!["1.0.0-beta.16".to_string(), "1.0.0-beta.17".to_string()],
+            selected_target: Some("1.0.0-beta.17".to_string()),
             show_raw: false,
             state: LoadState::Ready(ChangelogDataVm {
-                version: "1.0.0-beta.16".to_string(),
+                version: "1.0.0-beta.17".to_string(),
                 source: "unity-changelog".to_string(),
-                source_detail: "Unity CLI 1.0.0-beta.16 release notes".to_string(),
+                source_detail: "Unity CLI 1.0.0-beta.17 release notes".to_string(),
                 entry_count: 12,
                 breaking_changes: vec![BreakingChangeVm {
                     text: "The list subcommands were removed.".to_string(),
@@ -377,7 +379,7 @@ fn settings() -> ViewModel {
                 },
             ],
             text_scale_percent: 100,
-            engine_info: "1.0.0-beta.16 · beta · linux/x86_64".to_string(),
+            engine_info: "1.0.0-beta.17 · beta · linux/x86_64".to_string(),
         }),
     )
 }
@@ -402,6 +404,7 @@ fn editor_modules_modal() -> ViewModel {
     let mut vm = editors();
     vm.modal = Some(ModalVm::EditorModules(EditorModulesVm {
         editor_version: "6000.1.1f1".to_string(),
+        architecture: "x86_64".to_string(),
         installed_modules: vec!["linux-il2cpp".to_string(), "linux-server".to_string()],
         modules: LoadState::Ready(vec![
             ModuleOptionVm {

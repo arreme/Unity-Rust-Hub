@@ -8,7 +8,7 @@ versions, and read release notes without keeping a terminal open.
 No webview, no Node toolchain, no HTML/JS layer. The release build is a single Rust
 binary that renders through iced's software renderer.
 
-The Unity CLI is in beta (`1.0.0-beta.16` at the time of writing). This app is built
+The Unity CLI is in beta (`1.0.0-beta.17` at the time of writing). This app is built
 against its JSON envelope and treats the CLI as the source of truth for every mutation.
 
 ## Download
@@ -73,8 +73,12 @@ update target.
 - **Releases** — newest releases with LTS/beta/alpha and installed badges.
 - **Editor install** — pick a version or alias (`lts`, `latest`, `6000.3`, exact), load
   the module catalog, preview the download with `--dry-run`, accept module terms
-  explicitly, then install with live NDJSON progress and a cancellable raw log.
-- **Modules** — add modules to an installed Editor with `install-modules`.
+  explicitly, then install with live NDJSON progress and a cancellable raw log. On Linux
+  the same card can install the headless Editor (`--headless`), which runs without a
+  display.
+- **Modules** — add modules to an installed Editor with `install-modules`, pinned to the
+  architecture of the row you opened (`--architecture`) so an `arm64` and an `x86_64`
+  build of the same version never get mixed up.
 - **Projects** — every project in the Hub registry, its Editor version, render pipeline,
   build target, cloud/VCS badges, an Open action, and a guarded upgrade dialog.
 - **Changelog** — `unity changelog` rendered as sections with readable bullet points and
@@ -296,10 +300,19 @@ CLI beta.15 removed the `list` subcommands and deprecated a few flags, so the ad
 uses the current spellings: `unity projects --all`, `unity modules <version>`,
 `unity releases --offset`, and `unity install-modules --editor-version`.
 
-The adapter is aligned to CLI beta.16:
+The adapter is aligned to CLI beta.17:
 
 - Exit codes `17` (`UNAVAILABLE`) and `18` (`AWAITING_INPUT`) are mapped and treated as
   retryable.
+- `unity install --headless` installs the headless Linux Editor. The install card offers
+  it only where the CLI ships that build, and the dry run previews it too.
+- `unity modules` and `unity install-modules` take the row's `--architecture`; CLI beta.17
+  makes `install-modules` refuse a build it cannot find instead of silently using the
+  installed one. The module dialog names the build it manages.
+- CLI beta.17 moves some command failures onto different exit codes (for example a failed
+  `unity mcp configure` write is now `1`, and argument errors are `2`). The app passes CLI
+  codes and messages through unchanged, and the changelog heuristic flags these contract
+  changes without flagging fixes that explicitly keep the exit code.
 - `unity install-modules` exiting `0` when every named module is already installed counts
   as success, even when no result frame is written.
 - `unity projects upgrade` refuses a project that is open in an Editor; the upgrade job

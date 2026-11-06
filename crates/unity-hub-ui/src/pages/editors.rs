@@ -72,7 +72,10 @@ fn editor_row(editor: &EditorRowVm) -> Element<'_, UiAction> {
             cell(mono(editor.architecture.as_str()), FillPortion(2)),
             cell(modules, FillPortion(5)),
             button("Manage modules", ButtonKind::Secondary)
-                .on_press(UiAction::OpenEditorModules(editor.version.clone()))
+                .on_press(UiAction::OpenEditorModules(
+                    editor.version.clone(),
+                    editor.architecture.clone(),
+                ))
                 .padding(components::COMPACT),
         ]
         .spacing(16)
@@ -172,6 +175,22 @@ fn install_card(install: &InstallEditorVm) -> Element<'_, UiAction> {
         body = body.push(hint(
             "Load a version to choose modules. Installing without modules is allowed.",
         ));
+    }
+
+    if install.headless_available {
+        body = body.push(
+            column![
+                checkbox(
+                    "Install the headless Editor (--headless, runs without a display)",
+                    install.headless,
+                    UiAction::HeadlessToggled,
+                ),
+                hint(
+                    "Headless builds are Linux-only and version-dependent: the CLI reports INSTALL_HEADLESS_UNAVAILABLE when a version has none. Modules it cannot use, such as iOS, are skipped.",
+                ),
+            ]
+            .spacing(6),
+        );
     }
 
     body = body.push(checkbox(

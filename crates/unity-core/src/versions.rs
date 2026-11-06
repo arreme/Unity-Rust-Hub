@@ -46,7 +46,7 @@ pub fn validate_cli_version(input: &str) -> Result<(), UnityError> {
         return Ok(());
     }
     Err(UnityError::invalid_input(format!(
-        "`{value}` is not a Unity CLI version. Try `latest` or `1.0.0-beta.16`."
+        "`{value}` is not a Unity CLI version. Try `latest` or `1.0.0-beta.17`."
     )))
 }
 
@@ -63,6 +63,30 @@ pub fn validate_module_id(input: &str) -> Result<(), UnityError> {
         )));
     }
     Ok(())
+}
+
+fn architecture_name() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"^[A-Za-z0-9][A-Za-z0-9_]{1,31}$").expect("valid regex"))
+}
+
+/// Normalizes the Editor architecture the CLI accepts as `--architecture`
+/// (`x86_64` or `arm64`).
+///
+/// Older CLI builds and registry rows can leave it empty, so an empty value
+/// means "let the CLI decide" rather than an error. Anything else must look
+/// like a plain architecture token so it can never be read as a flag.
+pub fn validate_architecture(input: &str) -> Result<Option<String>, UnityError> {
+    let value = input.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    if architecture_name().is_match(value) {
+        return Ok(Some(value.to_string()));
+    }
+    Err(UnityError::invalid_input(format!(
+        "`{value}` is not a valid Editor architecture. Use `x86_64` or `arm64`."
+    )))
 }
 
 /// Validates the release stream filter accepted by `unity releases --stream`.
@@ -136,6 +160,22 @@ mod tests {
         assert!(validate_cli_version("1.0.0-beta.14").is_ok());
         assert!(validate_cli_version("latest").is_ok());
         assert!(validate_cli_version("1.0").is_err());
+    }
+
+    #[test]
+    fn validates_architectures() {
+        assert_eq!(
+            validate_architecture(" x86_64 ").unwrap().as_deref(),
+            Some("x86_64")
+        );
+        assert_eq!(
+            validate_architecture("arm64").unwrap().as_deref(),
+            Some("arm64")
+        );
+        assert_eq!(validate_architecture("").unwrap(), None);
+        for value in ["--headless", "x86_64; rm -rf /", "$(id)"] {
+            assert!(validate_architecture(value).is_err(), "{value} should fail");
+        }
     }
 
     #[test]
