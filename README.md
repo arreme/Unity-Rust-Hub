@@ -93,6 +93,14 @@ update target.
   remediation command is always visible and copyable, and only runs after an explicit
   click when the adapter has a builder for it. Dismissals are scoped to the CLI version,
   so a refresh does not re-stack a banner but a new CLI shows it once.
+- **Actionable errors** — every failed read and job shows the CLI's stable code, its
+  message verbatim, the detail, and one code-specific next step: sign in, retry, pick
+  another release, open a project, install git, enter a VCS token, fix permissions, or
+  copy the CLI's own remediation. Retry repeats reads only; an install, upgrade,
+  sign-in, or CLI update that already started is never replayed. Network and
+  provider-unreachable errors name the proxy the CLI will use when one is configured,
+  and say the app has no proxy setting when none is. Unknown codes keep generic
+  rendering instead of guessing.
 
 ## Stack
 
@@ -321,6 +329,13 @@ The adapter is aligned to CLI beta.17:
   changes without flagging fixes that explicitly keep the exit code.
 - `unity install-modules` exiting `0` when every named module is already installed counts
   as success, even when no result frame is written.
+- Error codes drive the remediation table in `unity-core` (`AUTH_ERROR`,
+  `NETWORK_UNREACHABLE`, `VCS_PROVIDER_UNREACHABLE`, `INSTALL_LOCKED`,
+  `RELEASE_NOT_FOUND`, `EDITOR_UNREACHABLE`, `TIMEOUT`, `UNAVAILABLE`,
+  `STATUS_SAFE_MODE`, `AWAITING_INPUT`, `VCS_TOKEN_REQUIRED`, `GIT_START_FAILED`,
+  `LOCAL_STORE_UNWRITABLE`, `LINK_VCS_DELETE_REMOTE_REQUIRES_YES`,
+  `INSTALL_HEADLESS_UNAVAILABLE`, `BAD_ARGS`). CLI `remediation` wins over the code,
+  and the code wins over the exit code.
 - `unity projects upgrade` refuses a project that is open in an Editor; the upgrade job
   surfaces the CLI error, and the app also checks the running-Editor list before starting.
 - The Overview running-Editor card merges `unity editors running` with
@@ -372,6 +387,9 @@ Resolution order for the binary:
   so the installer's interactive setup does not hang under the GUI.
 - Module license acceptance is never implied. `--accept-eula` is passed only after the
   matching checkbox is checked.
+- A failed command never triggers an automatic retry. Retry is offered only on a failed
+  read, re-runs the exact request that failed, and is absent for any job that already
+  started a mutation.
 - Project upgrades require a second confirmation and warn that the project on disk can
   change. Commit or back up first.
 - No credentials are read, stored, or forwarded. Changelog Markdown is displayed as

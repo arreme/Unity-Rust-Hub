@@ -199,6 +199,10 @@ fn install_card(install: &InstallEditorVm) -> Element<'_, UiAction> {
         UiAction::AcceptEulaToggled,
     ));
 
+    if let Some(error) = &install.preview_error {
+        body = body.push(error_text(error));
+    }
+
     if let Some(preview) = &install.preview {
         body = body.push(
             container(

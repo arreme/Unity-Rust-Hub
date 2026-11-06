@@ -6,6 +6,7 @@ use iced::{Subscription, Task};
 use serde_json::Value;
 use unity_core::bootstrap;
 use unity_core::changelog::{ChangelogRequest, ChangelogView, CliChangelogProvider};
+use unity_core::errors::{redact_proxy, remediation_for, RemediationKind};
 use unity_core::models::{
     AuthStatus, CliStatus, CliUpdateInfo, Editor, InstallPreview, LicenseStatus, Module, Project,
     Release, RunningEditor, RunningEditors,
@@ -14,10 +15,11 @@ use unity_core::{AdvisoryOrigin, CliAdvisory, CommandSpec, UnityCli, UnityError}
 use unity_hub_model::{
     AccountCardVm, AdvisoryVm, AuthVm, BadgeVm, BreakingChangeVm, ChangelogDataVm,
     ChangelogSectionVm, ChangelogVm, CliCardVm, CliConnectionVm, CliDetailsVm, EditorModulesVm,
-    EditorRowVm, EditorsVm, InstallCliVm, InstallEditorVm, InstallPreviewVm, JobLogVm, JobPhase,
-    JobVm, LicenseRowVm, LicenseVm, LoadState, ModalVm, ModuleOptionVm, NoticeVm, OverviewVm, Page,
-    PageVm, ProjectRowVm, ProjectsVm, ReleaseRowVm, RunningEditorVm, SectionKind, SettingsVm,
-    ShellVm, TextScaleOptionVm, Tone, UiAction, UiError, UpdateVm, UpgradeProjectVm, ViewModel,
+    EditorRowVm, EditorsVm, ErrorActionKind, ErrorActionVm, InstallCliVm, InstallEditorVm,
+    InstallPreviewVm, JobLogVm, JobPhase, JobVm, LicenseRowVm, LicenseVm, LoadState, ModalVm,
+    ModuleOptionVm, NoticeVm, OverviewVm, Page, PageVm, ProjectRowVm, ProjectsVm, ReleaseRowVm,
+    RunningEditorVm, SectionKind, SettingsVm, ShellVm, TextScaleOptionVm, Tone, UiAction, UiError,
+    UpdateVm, UpgradeProjectVm, ViewModel,
 };
 
 use crate::jobs::{JobManager, JobStarted, JobState, StreamKind};
@@ -71,6 +73,72 @@ impl<T> Loadable<T> {
     pub fn is_loading(&self) -> bool {
         self.loading
     }
+}
+
+/// Which read a failed `Loadable` belongs to. The id is stable across view
+/// model rebuilds, so a Retry action never targets a row index or a closure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ReadKind {
+    Status,
+    Update,
+    Auth,
+    License,
+    Running,
+    Editors,
+    Releases,
+    Projects,
+    Modules,
+    DialogModules,
+    PreviewInstall,
+    Changelog,
+    RawChangelog,
+}
+
+impl ReadKind {
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Status => "read:status",
+            Self::Update => "read:update",
+            Self::Auth => "read:auth",
+            Self::License => "read:license",
+            Self::Running => "read:running",
+            Self::Editors => "read:editors",
+            Self::Releases => "read:releases",
+            Self::Projects => "read:projects",
+            Self::Modules => "read:modules",
+            Self::DialogModules => "read:dialog-modules",
+            Self::PreviewInstall => "read:preview-install",
+            Self::Changelog => "read:changelog",
+            Self::RawChangelog => "read:raw-changelog",
+        }
+    }
+}
+
+/// A read the controller can repeat after a retryable failure. Parameterised
+/// reads keep the request they were started with, so Retry re-runs the exact
+/// query the user saw fail instead of whatever the form contains now.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RetryRequest {
+    Read(ReadKind),
+    Modules(String),
+    DialogModules {
+        version: String,
+        architecture: String,
+    },
+    PreviewInstall {
+        version: String,
+        modules: Vec<String>,
+        headless: bool,
+    },
+}
+
+/// Context for turning a `UnityError` into a `UiError`. Retry is only offered
+/// when the controller has a matching target; job errors never get one for a
+/// mutation.
+#[derive(Debug, Clone)]
+enum ErrorContext {
+    Read(ReadKind),
+    Job { kind: String },
 }
 
 /// Lower-cased project fields, computed once per projects load so filtering
@@ -240,6 +308,7 @@ pub struct App {
     pub accept_eula: bool,
     pub preview: Option<InstallPreview>,
     pub preview_raw: Option<Value>,
+    pub preview_error: Option<UiError>,
     pub preview_loading: bool,
     pub dialog_selected: BTreeSet<String>,
     pub dialog_eula: bool,
@@ -253,6 +322,9 @@ pub struct App {
     pub active_job: Option<ActiveJob>,
     pub notice: Option<Notice>,
     pub advisories: Vec<AdvisoryEntry>,
+    /// Retry targets for failed reads, keyed by the stable id the view model
+    /// carries in `ErrorActionKind::Retry`.
+    pub retry_targets: std::collections::HashMap<String, RetryRequest>,
     pub boot_background_started: bool,
 }
 
@@ -265,6 +337,7 @@ pub enum Message {
     DismissJob,
     CancelJob,
     DismissNotice,
+    RunErrorAction(ErrorActionVm),
     DismissAdvisory(String),
     CopyAdvisoryCommand(String),
     RunAdvisoryRemediation(String),
@@ -326,6 +399,7 @@ impl From<UiAction> for Message {
             UiAction::Navigate(page) => Self::Navigate(page),
             UiAction::Refresh => Self::Refresh,
             UiAction::DismissNotice => Self::DismissNotice,
+            UiAction::RunErrorAction(action) => Self::RunErrorAction(action),
             UiAction::DismissAdvisory(id) => Self::DismissAdvisory(id),
             UiAction::CopyAdvisoryCommand(id) => Self::CopyAdvisoryCommand(id),
             UiAction::RunAdvisoryRemediation(id) => Self::RunAdvisoryRemediation(id),
@@ -383,7 +457,7 @@ impl App {
             }
         }
 
-        let app = Self {
+        let mut app = Self {
             cli: cli.clone(),
             jobs: JobManager::with_sink(cli.advisory_sink()),
             page: Page::Overview,
@@ -411,6 +485,7 @@ impl App {
             accept_eula: false,
             preview: None,
             preview_raw: None,
+            preview_error: None,
             preview_loading: false,
             dialog_selected: BTreeSet::new(),
             dialog_eula: false,
@@ -424,8 +499,14 @@ impl App {
             active_job: None,
             notice: None,
             advisories: Vec::new(),
+            retry_targets: std::collections::HashMap::new(),
             boot_background_started: false,
         };
+        // The boot status read is the first failing read the user can retry.
+        app.retry_targets.insert(
+            ReadKind::Status.id().to_string(),
+            RetryRequest::Read(ReadKind::Status),
+        );
 
         // The status read is the only critical boot work. The rest of the
         // Overview is loaded after it succeeds, one CLI process at a time.
@@ -501,11 +582,20 @@ impl App {
                             }
                         }
                         let installed = status.installed;
+                        let status_has_error = status.error.is_some();
                         self.cli_status.succeeded(status);
+                        if status_has_error {
+                            // `status` is Ok even when only the version probe
+                            // failed, so keep its retry target.
+                            self.note_read_failed(ReadKind::Status);
+                        } else {
+                            self.clear_retry(ReadKind::Status);
+                        }
                         installed
                     }
                     Err(error) => {
                         self.cli_status.failed(error);
+                        self.note_read_failed(ReadKind::Status);
                         false
                     }
                 };
@@ -525,29 +615,53 @@ impl App {
             }
             Message::UpdateLoaded(result) => {
                 match result {
-                    Ok(info) => self.update.succeeded(info),
-                    Err(error) => self.update.failed(error),
+                    Ok(info) => {
+                        self.update.succeeded(info);
+                        self.clear_retry(ReadKind::Update);
+                    }
+                    Err(error) => {
+                        self.update.failed(error);
+                        self.note_read_failed(ReadKind::Update);
+                    }
                 }
                 Task::none()
             }
             Message::AuthLoaded(result) => {
                 match result {
-                    Ok(status) => self.auth.succeeded(status),
-                    Err(error) => self.auth.failed(error),
+                    Ok(status) => {
+                        self.auth.succeeded(status);
+                        self.clear_retry(ReadKind::Auth);
+                    }
+                    Err(error) => {
+                        self.auth.failed(error);
+                        self.note_read_failed(ReadKind::Auth);
+                    }
                 }
                 Task::none()
             }
             Message::LicenseLoaded(result) => {
                 match result {
-                    Ok(status) => self.license.succeeded(status),
-                    Err(error) => self.license.failed(error),
+                    Ok(status) => {
+                        self.license.succeeded(status);
+                        self.clear_retry(ReadKind::License);
+                    }
+                    Err(error) => {
+                        self.license.failed(error);
+                        self.note_read_failed(ReadKind::License);
+                    }
                 }
                 Task::none()
             }
             Message::RunningLoaded(result) => {
                 match result {
-                    Ok(status) => self.running.succeeded(status),
-                    Err(error) => self.running.failed(error),
+                    Ok(status) => {
+                        self.running.succeeded(status);
+                        self.clear_retry(ReadKind::Running);
+                    }
+                    Err(error) => {
+                        self.running.failed(error);
+                        self.note_read_failed(ReadKind::Running);
+                    }
                 }
                 Task::none()
             }
@@ -555,16 +669,26 @@ impl App {
                 match result {
                     Ok(editors) => {
                         self.editors.succeeded(editors);
+                        self.clear_retry(ReadKind::Editors);
                         self.ensure_upgrade_target();
                     }
-                    Err(error) => self.editors.failed(error),
+                    Err(error) => {
+                        self.editors.failed(error);
+                        self.note_read_failed(ReadKind::Editors);
+                    }
                 }
                 Task::none()
             }
             Message::ReleasesLoaded(result) => {
                 match result {
-                    Ok(releases) => self.releases.succeeded(releases),
-                    Err(error) => self.releases.failed(error),
+                    Ok(releases) => {
+                        self.releases.succeeded(releases);
+                        self.clear_retry(ReadKind::Releases);
+                    }
+                    Err(error) => {
+                        self.releases.failed(error);
+                        self.note_read_failed(ReadKind::Releases);
+                    }
                 }
                 Task::none()
             }
@@ -573,57 +697,92 @@ impl App {
                     Ok(projects) => {
                         self.project_search_index = project_search_keys(&projects);
                         self.projects.succeeded(projects);
+                        self.clear_retry(ReadKind::Projects);
                     }
-                    Err(error) => self.projects.failed(error),
+                    Err(error) => {
+                        self.projects.failed(error);
+                        self.note_read_failed(ReadKind::Projects);
+                    }
                 }
                 Task::none()
             }
             Message::ModulesLoaded(result) => {
                 match result {
-                    Ok(modules) => self.modules.succeeded(modules),
-                    Err(error) => self.modules.failed(error),
+                    Ok(modules) => {
+                        self.modules.succeeded(modules);
+                        self.clear_retry(ReadKind::Modules);
+                    }
+                    Err(error) => {
+                        self.modules.failed(error);
+                        self.note_read_failed(ReadKind::Modules);
+                    }
                 }
                 Task::none()
             }
             Message::DialogModulesLoaded(result) => {
                 match result {
-                    Ok(modules) => self.dialog_modules.succeeded(modules),
-                    Err(error) => self.dialog_modules.failed(error),
+                    Ok(modules) => {
+                        self.dialog_modules.succeeded(modules);
+                        self.clear_retry(ReadKind::DialogModules);
+                    }
+                    Err(error) => {
+                        self.dialog_modules.failed(error);
+                        self.note_read_failed(ReadKind::DialogModules);
+                    }
                 }
                 Task::none()
             }
             Message::PreviewLoaded(result) => {
                 self.preview_loading = false;
                 match result {
-                    Ok(value) => match serde_json::from_value::<InstallPreview>(value.clone()) {
-                        Ok(preview) => {
-                            self.preview = Some(preview);
-                            self.preview_raw = None;
+                    Ok(value) => {
+                        self.preview_error = None;
+                        self.clear_retry(ReadKind::PreviewInstall);
+                        match serde_json::from_value::<InstallPreview>(value.clone()) {
+                            Ok(preview) => {
+                                self.preview = Some(preview);
+                                self.preview_raw = None;
+                            }
+                            Err(_) => {
+                                self.preview = None;
+                                self.preview_raw = Some(value);
+                            }
                         }
-                        Err(_) => {
-                            self.preview = None;
-                            self.preview_raw = Some(value);
-                        }
-                    },
+                    }
                     Err(error) => {
                         self.preview = None;
                         self.preview_raw = None;
-                        self.notice = Some(Notice::error(error_text(&error)));
+                        self.note_read_failed(ReadKind::PreviewInstall);
+                        self.preview_error = Some(
+                            self.ui_error(&error, ErrorContext::Read(ReadKind::PreviewInstall)),
+                        );
                     }
                 }
                 Task::none()
             }
             Message::ChangelogLoaded(result) => {
                 match result {
-                    Ok(view) => self.changelog.succeeded(view),
-                    Err(error) => self.changelog.failed(error),
+                    Ok(view) => {
+                        self.changelog.succeeded(view);
+                        self.clear_retry(ReadKind::Changelog);
+                    }
+                    Err(error) => {
+                        self.changelog.failed(error);
+                        self.note_read_failed(ReadKind::Changelog);
+                    }
                 }
                 Task::none()
             }
             Message::RawChangelogLoaded(result) => {
                 match result {
-                    Ok(markdown) => self.raw_changelog.succeeded(markdown),
-                    Err(error) => self.raw_changelog.failed(error),
+                    Ok(markdown) => {
+                        self.raw_changelog.succeeded(markdown);
+                        self.clear_retry(ReadKind::RawChangelog);
+                    }
+                    Err(error) => {
+                        self.raw_changelog.failed(error);
+                        self.note_read_failed(ReadKind::RawChangelog);
+                    }
                 }
                 Task::none()
             }
@@ -644,6 +803,7 @@ impl App {
                 self.notice = None;
                 Task::none()
             }
+            Message::RunErrorAction(action) => self.run_error_action(action),
             Message::DismissAdvisory(id) => {
                 let version = self.cli_version_key();
                 self.app_settings.dismiss_advisory(&version, &id);
@@ -749,7 +909,12 @@ impl App {
                 self.selected_modules.clear();
                 self.preview = None;
                 self.preview_raw = None;
+                self.preview_error = None;
                 let version = self.install_version.trim().to_string();
+                self.retry_targets.insert(
+                    ReadKind::Modules.id().to_string(),
+                    RetryRequest::Modules(version.clone()),
+                );
                 Task::perform(
                     run_blocking({
                         let cli = self.cli.clone();
@@ -790,12 +955,21 @@ impl App {
             }
             Message::PreviewInstall => {
                 self.preview_loading = true;
+                self.preview_error = None;
                 let version = self.install_version.trim().to_string();
                 let modules: Vec<String> = self.selected_modules.iter().cloned().collect();
+                let headless = self.install_headless;
+                self.retry_targets.insert(
+                    ReadKind::PreviewInstall.id().to_string(),
+                    RetryRequest::PreviewInstall {
+                        version: version.clone(),
+                        modules: modules.clone(),
+                        headless,
+                    },
+                );
                 Task::perform(
                     run_blocking({
                         let cli = self.cli.clone();
-                        let headless = self.install_headless;
                         move || cli.dry_run_install(&version, &modules, headless)
                     }),
                     Message::PreviewLoaded,
@@ -827,6 +1001,11 @@ impl App {
                 self.install_version = version.clone();
                 self.modules.begin();
                 self.selected_modules.clear();
+                self.preview_error = None;
+                self.retry_targets.insert(
+                    ReadKind::Modules.id().to_string(),
+                    RetryRequest::Modules(version.clone()),
+                );
                 Task::perform(
                     run_blocking({
                         let cli = self.cli.clone();
@@ -857,6 +1036,13 @@ impl App {
                 self.dialog_eula = false;
                 let version = editor.version.clone();
                 let architecture = editor.architecture.clone();
+                self.retry_targets.insert(
+                    ReadKind::DialogModules.id().to_string(),
+                    RetryRequest::DialogModules {
+                        version: version.clone(),
+                        architecture: architecture.clone(),
+                    },
+                );
                 self.modal = Modal::EditorModules(editor);
                 Task::perform(
                     run_blocking({
@@ -1090,6 +1276,271 @@ impl App {
                         Task::none()
                     }
                 }
+            }
+        }
+    }
+
+    /// Records that a simple read has a retry target. Parameterised reads
+    /// insert their request when they start.
+    fn note_read_failed(&mut self, kind: ReadKind) {
+        self.retry_targets
+            .entry(kind.id().to_string())
+            .or_insert(RetryRequest::Read(kind));
+    }
+
+    fn clear_retry(&mut self, kind: ReadKind) {
+        self.retry_targets.remove(kind.id());
+    }
+
+    fn load_state<T, U>(
+        &self,
+        kind: ReadKind,
+        loadable: &Loadable<T>,
+        map: impl Fn(&T) -> U,
+    ) -> LoadState<U> {
+        if loadable.loading {
+            return LoadState::Loading {
+                previous: loadable.data.as_ref().map(&map),
+            };
+        }
+        if let Some(error) = &loadable.error {
+            return LoadState::Failed {
+                error: self.ui_error(error, ErrorContext::Read(kind)),
+                previous: loadable.data.as_ref().map(&map),
+            };
+        }
+        match &loadable.data {
+            Some(data) => LoadState::Ready(map(data)),
+            None => LoadState::Idle,
+        }
+    }
+
+    /// Turns an adapter error into the display shape, including the
+    /// code-specific primary action and its guidance.
+    fn ui_error(&self, error: &UnityError, context: ErrorContext) -> UiError {
+        let proxy = configured_proxy();
+        let mut detail = error
+            .detail
+            .clone()
+            .filter(|detail| !detail.trim().is_empty());
+        let mut action = None;
+
+        if let Some(remediation) = remediation_for(error, proxy.as_deref()) {
+            if let Some(hint) = remediation.hint.as_ref() {
+                detail = Some(match detail {
+                    Some(existing) => format!("{}\n\n{hint}", existing.trim_end()),
+                    None => hint.clone(),
+                });
+            }
+            action = self.error_action(&remediation, &context);
+        }
+
+        UiError {
+            code: error.code.clone(),
+            message: error.message.clone(),
+            detail,
+            action,
+        }
+    }
+
+    fn error_action(
+        &self,
+        remediation: &unity_core::errors::ErrorRemediation,
+        context: &ErrorContext,
+    ) -> Option<ErrorActionVm> {
+        let kind = if remediation.kind.is_retry() {
+            match context {
+                ErrorContext::Read(kind) => {
+                    // No controller target means no Retry button: a button that
+                    // cannot name its read would be a lie.
+                    if !self.retry_targets.contains_key(kind.id()) {
+                        return None;
+                    }
+                    ErrorActionKind::Retry(kind.id().to_string())
+                }
+                ErrorContext::Job { kind } => {
+                    if !job_allows_retry(kind) {
+                        return None;
+                    }
+                    ErrorActionKind::Retry(format!("job:{kind}"))
+                }
+            }
+        } else {
+            match remediation.kind {
+                RemediationKind::SignIn => ErrorActionKind::SignIn,
+                RemediationKind::OpenSettings => ErrorActionKind::OpenSettings,
+                RemediationKind::PickVersion => ErrorActionKind::PickVersion,
+                RemediationKind::OpenEditor => ErrorActionKind::OpenEditor,
+                RemediationKind::EnterToken => ErrorActionKind::EnterToken,
+                RemediationKind::InstallGit => ErrorActionKind::InstallGit,
+                RemediationKind::ShowCommand => ErrorActionKind::ShowCommand,
+                RemediationKind::Confirm => ErrorActionKind::Confirm,
+                RemediationKind::ShowBusy => ErrorActionKind::ShowBusy,
+                RemediationKind::AnswerDialog => ErrorActionKind::AnswerDialog,
+                RemediationKind::FixPermissions => ErrorActionKind::FixPermissions,
+                RemediationKind::Retry => return None,
+            }
+        };
+
+        Some(ErrorActionVm {
+            label: remediation.label.to_string(),
+            command: remediation.command.clone(),
+            kind,
+        })
+    }
+
+    fn run_error_action(&mut self, action: ErrorActionVm) -> Task<Message> {
+        match action.kind {
+            ErrorActionKind::Retry(target) => self.retry(&target),
+            ErrorActionKind::SignIn => self.handle(Message::SignIn),
+            ErrorActionKind::OpenSettings => self.handle(Message::Navigate(Page::Settings)),
+            ErrorActionKind::PickVersion => self.handle(Message::Navigate(Page::Editors)),
+            ErrorActionKind::OpenEditor => self.handle(Message::Navigate(Page::Projects)),
+            ErrorActionKind::EnterToken => {
+                self.notice = Some(Notice::info(
+                    "This build has no token field. Set UNITY_GITHUB_TOKEN or UNITY_GITLAB_TOKEN, or pass --git-token-from-stdin where the command supports it.",
+                ));
+                self.handle(Message::Navigate(Page::Settings))
+            }
+            ErrorActionKind::InstallGit => {
+                self.notice = Some(Notice::info(
+                    "Install Git for your platform and make sure `git` is on PATH, then retry. The app never installs system packages on its own.",
+                ));
+                Task::none()
+            }
+            ErrorActionKind::ShowCommand => match action.command {
+                Some(command) => {
+                    self.notice = Some(Notice::success("Command copied to the clipboard."));
+                    iced::clipboard::write(command)
+                }
+                None => {
+                    self.notice = Some(Notice::error(
+                        "The CLI rejected the arguments. Check the CLI path in Settings and the command's help before retrying.",
+                    ));
+                    Task::none()
+                }
+            },
+            ErrorActionKind::Confirm => {
+                self.notice = Some(Notice::info(
+                    "This remote deletion needs an explicit confirmation. Review the command and confirm it yourself; the app never adds `--yes` for you here.",
+                ));
+                Task::none()
+            }
+            ErrorActionKind::ShowBusy => self.handle(Message::Navigate(Page::Overview)),
+            ErrorActionKind::AnswerDialog => self.handle(Message::Navigate(Page::Overview)),
+            ErrorActionKind::FixPermissions => {
+                let dir = self
+                    .config_dir
+                    .clone()
+                    .unwrap_or_else(|| "the CLI's configuration directory".to_string());
+                self.notice = Some(Notice::info(format!(
+                    "Fix write permissions on {dir}, then retry."
+                )));
+                Task::none()
+            }
+        }
+    }
+
+    /// Re-runs the exact read a failed error came from. A missing target means
+    /// the action is stale (the read already succeeded), so it does nothing.
+    fn retry(&mut self, target: &str) -> Task<Message> {
+        let Some(request) = self.retry_targets.get(target).cloned() else {
+            self.notice = Some(Notice::info(
+                "That read already succeeded; refresh to try again.",
+            ));
+            return Task::none();
+        };
+
+        match request {
+            RetryRequest::Read(ReadKind::Status) => self.refresh_status(),
+            RetryRequest::Read(ReadKind::Update) => {
+                self.update.begin();
+                load_update(self.cli.clone())
+            }
+            RetryRequest::Read(ReadKind::Auth) => {
+                self.auth.begin();
+                load_auth(self.cli.clone())
+            }
+            RetryRequest::Read(ReadKind::License) => {
+                self.license.begin();
+                load_license(self.cli.clone())
+            }
+            RetryRequest::Read(ReadKind::Running) => {
+                self.running.begin();
+                load_running(self.cli.clone())
+            }
+            RetryRequest::Read(ReadKind::Editors) => {
+                self.editors.begin();
+                load_editors(self.cli.clone())
+            }
+            RetryRequest::Read(ReadKind::Releases) => {
+                self.releases.begin();
+                load_releases(self.cli.clone())
+            }
+            RetryRequest::Read(ReadKind::Projects) => {
+                self.projects.begin();
+                load_projects(self.cli.clone())
+            }
+            RetryRequest::Read(ReadKind::Changelog) => {
+                self.changelog.begin();
+                Task::perform(
+                    load_changelog_future(self.cli.clone(), self.changelog_target.clone()),
+                    Message::ChangelogLoaded,
+                )
+            }
+            RetryRequest::Read(ReadKind::RawChangelog) => {
+                self.raw_changelog.begin();
+                let cli = self.cli.clone();
+                let target = self.changelog_target.clone();
+                Task::perform(
+                    run_blocking(move || cli.changelog(target.as_deref()).map(|raw| raw.changelog)),
+                    Message::RawChangelogLoaded,
+                )
+            }
+            RetryRequest::Read(ReadKind::Modules)
+            | RetryRequest::Read(ReadKind::DialogModules)
+            | RetryRequest::Read(ReadKind::PreviewInstall) => {
+                // Parameterised reads always use the variants below, which
+                // carry the request they were started with.
+                Task::none()
+            }
+            RetryRequest::Modules(version) => {
+                self.modules.begin();
+                Task::perform(
+                    run_blocking({
+                        let cli = self.cli.clone();
+                        move || cli.modules(&version, None)
+                    }),
+                    Message::ModulesLoaded,
+                )
+            }
+            RetryRequest::DialogModules {
+                version,
+                architecture,
+            } => {
+                self.dialog_modules.begin();
+                Task::perform(
+                    run_blocking({
+                        let cli = self.cli.clone();
+                        move || cli.modules(&version, Some(&architecture))
+                    }),
+                    Message::DialogModulesLoaded,
+                )
+            }
+            RetryRequest::PreviewInstall {
+                version,
+                modules,
+                headless,
+            } => {
+                self.preview_loading = true;
+                self.preview_error = None;
+                Task::perform(
+                    run_blocking({
+                        let cli = self.cli.clone();
+                        move || cli.dry_run_install(&version, &modules, headless)
+                    }),
+                    Message::PreviewLoaded,
+                )
             }
         }
     }
@@ -1371,7 +1822,7 @@ impl App {
                 tone: notice_tone(notice.kind),
                 text: notice.text.clone(),
             }),
-            job: self.active_job.as_ref().map(job_vm),
+            job: self.active_job.as_ref().map(|job| self.job_vm(job)),
         }
     }
 
@@ -1468,7 +1919,7 @@ impl App {
     fn overview_vm(&self) -> OverviewVm {
         OverviewVm {
             cli: self.cli_card_vm(),
-            update: load_state(&self.update, |update| UpdateVm {
+            update: self.load_state(ReadKind::Update, &self.update, |update| UpdateVm {
                 available: update.update_available,
                 current_version: update.current_version.clone(),
                 latest_version: update.latest_version.clone(),
@@ -1477,7 +1928,7 @@ impl App {
                 auth: self.auth_vm(),
                 license: self.license_vm(),
             },
-            running: load_state(&self.running, |running| {
+            running: self.load_state(ReadKind::Running, &self.running, |running| {
                 running
                     .instances
                     .iter()
@@ -1549,12 +2000,18 @@ impl App {
                         version.and_then(|version| version.build_date.as_deref()),
                     ),
                 },
-                error: self.cli_status.error.as_ref().map(ui_error),
+                error: self
+                    .cli_status
+                    .error
+                    .as_ref()
+                    .map(|error| self.ui_error(error, ErrorContext::Read(ReadKind::Status))),
             };
         }
 
         match &self.cli_status.error {
-            Some(error) => CliCardVm::Failed(ui_error(error)),
+            Some(error) => {
+                CliCardVm::Failed(self.ui_error(error, ErrorContext::Read(ReadKind::Status)))
+            }
             None => CliCardVm::Idle,
         }
     }
@@ -1585,7 +2042,7 @@ impl App {
         }
 
         match &self.auth.error {
-            Some(error) => AuthVm::Failed(ui_error(error)),
+            Some(error) => AuthVm::Failed(self.ui_error(error, ErrorContext::Read(ReadKind::Auth))),
             None => AuthVm::Idle,
         }
     }
@@ -1607,7 +2064,9 @@ impl App {
         }
 
         match &self.license.error {
-            Some(error) => LicenseVm::Failed(ui_error(error)),
+            Some(error) => {
+                LicenseVm::Failed(self.ui_error(error, ErrorContext::Read(ReadKind::License)))
+            }
             None => LicenseVm::Idle,
         }
     }
@@ -1616,11 +2075,11 @@ impl App {
         let installed = self.installed_versions();
 
         EditorsVm {
-            installed: load_state(&self.editors, |editors| {
+            installed: self.load_state(ReadKind::Editors, &self.editors, |editors| {
                 editors.iter().map(editor_row_vm).collect()
             }),
             install: self.install_editor_vm(),
-            releases: load_state(&self.releases, |releases| {
+            releases: self.load_state(ReadKind::Releases, &self.releases, |releases| {
                 releases
                     .iter()
                     .map(|release| ReleaseRowVm {
@@ -1636,7 +2095,7 @@ impl App {
     }
 
     fn install_editor_vm(&self) -> InstallEditorVm {
-        let modules = load_state(&self.modules, |modules| {
+        let modules = self.load_state(ReadKind::Modules, &self.modules, |modules| {
             modules
                 .iter()
                 .filter(|module| !module.is_installed)
@@ -1690,6 +2149,7 @@ impl App {
                 .preview_raw
                 .as_ref()
                 .map(|raw| format!("Dry-run returned: {raw}")),
+            preview_error: self.preview_error.clone(),
             preview_loading: self.preview_loading,
         }
     }
@@ -1712,7 +2172,7 @@ impl App {
             }
         } else if let Some(error) = &self.projects.error {
             LoadState::Failed {
-                error: ui_error(error),
+                error: self.ui_error(error, ErrorContext::Read(ReadKind::Projects)),
                 previous: self.projects.data.as_ref().map(|_| rows()),
             }
         } else if self.projects.data.is_some() {
@@ -1735,31 +2195,35 @@ impl App {
             versions: self.changelog_versions(),
             selected_target: self.changelog_target.clone(),
             show_raw: self.show_raw_changelog,
-            state: load_state(&self.changelog, |view| ChangelogDataVm {
-                version: view.version.clone(),
-                source: view.source.clone(),
-                source_detail: view.source_detail.clone(),
-                entry_count: view.entry_count,
-                breaking_changes: view
-                    .breaking_changes
-                    .iter()
-                    .map(|change| BreakingChangeVm {
-                        text: change.text.clone(),
-                        section: change.section.clone(),
-                        reason: change.reason.clone(),
-                    })
-                    .collect(),
-                sections: view
-                    .sections
-                    .iter()
-                    .map(|section| ChangelogSectionVm {
-                        title: section.title.clone(),
-                        kind: section_kind(&section.title),
-                        entries: section.entries.clone(),
-                    })
-                    .collect(),
+            state: self.load_state(ReadKind::Changelog, &self.changelog, |view| {
+                ChangelogDataVm {
+                    version: view.version.clone(),
+                    source: view.source.clone(),
+                    source_detail: view.source_detail.clone(),
+                    entry_count: view.entry_count,
+                    breaking_changes: view
+                        .breaking_changes
+                        .iter()
+                        .map(|change| BreakingChangeVm {
+                            text: change.text.clone(),
+                            section: change.section.clone(),
+                            reason: change.reason.clone(),
+                        })
+                        .collect(),
+                    sections: view
+                        .sections
+                        .iter()
+                        .map(|section| ChangelogSectionVm {
+                            title: section.title.clone(),
+                            kind: section_kind(&section.title),
+                            entries: section.entries.clone(),
+                        })
+                        .collect(),
+                }
             }),
-            raw: load_state(&self.raw_changelog, |markdown| markdown.clone()),
+            raw: self.load_state(ReadKind::RawChangelog, &self.raw_changelog, |markdown| {
+                markdown.clone()
+            }),
         }
     }
 
@@ -1821,21 +2285,22 @@ impl App {
                 can_install: self.cli_consent,
             })),
             Modal::EditorModules(editor) => {
-                let modules = load_state(&self.dialog_modules, |modules| {
-                    modules
-                        .iter()
-                        .filter(|module| !module.is_installed)
-                        .map(|module| ModuleOptionVm {
-                            id: module.id.clone(),
-                            label: format!(
-                                "{}  ·  {}",
-                                module.name,
-                                format_bytes(module.download_bytes)
-                            ),
-                            selected: self.dialog_selected.contains(&module.id),
-                        })
-                        .collect()
-                });
+                let modules =
+                    self.load_state(ReadKind::DialogModules, &self.dialog_modules, |modules| {
+                        modules
+                            .iter()
+                            .filter(|module| !module.is_installed)
+                            .map(|module| ModuleOptionVm {
+                                id: module.id.clone(),
+                                label: format!(
+                                    "{}  ·  {}",
+                                    module.name,
+                                    format_bytes(module.download_bytes)
+                                ),
+                                selected: self.dialog_selected.contains(&module.id),
+                            })
+                            .collect()
+                    });
 
                 Some(ModalVm::EditorModules(EditorModulesVm {
                     editor_version: editor.version.clone(),
@@ -1965,16 +2430,68 @@ impl App {
             None => "Unity CLI not detected".to_string(),
         }
     }
+
+    fn job_vm(&self, job: &ActiveJob) -> JobVm {
+        JobVm {
+            kind: job.kind.clone(),
+            command: job.command.clone(),
+            phase: match job.state {
+                JobState::Running => JobPhase::Running,
+                JobState::Succeeded => JobPhase::Succeeded,
+                JobState::Failed => JobPhase::Failed,
+                JobState::Cancelled => JobPhase::Cancelled,
+            },
+            progress: job.progress,
+            message: job.message.clone(),
+            error: job.error.as_ref().map(|error| {
+                self.ui_error(
+                    error,
+                    ErrorContext::Job {
+                        kind: job.kind.clone(),
+                    },
+                )
+            }),
+            logs: job
+                .logs
+                .iter()
+                .map(|line| JobLogVm {
+                    is_stderr: line.stream == StreamKind::Stderr,
+                    text: line.text.clone(),
+                })
+                .collect(),
+        }
+    }
 }
 
-fn ui_error(error: &UnityError) -> UiError {
-    UiError {
-        message: error.message.clone(),
-        detail: error
-            .detail
-            .clone()
-            .filter(|detail| !detail.trim().is_empty()),
-    }
+/// No job kind in this app is retryable today: every job installs, upgrades,
+/// signs in, or updates the CLI itself. Replaying any of those after a partial
+/// run is exactly what the ticket forbids. A future read-only job opts in here
+/// with an explicit kind; it must never default to retryable.
+fn job_allows_retry(_kind: &str) -> bool {
+    false
+}
+
+/// The proxy the CLI would use, as a display string for the network error
+/// hint. The app has no proxy setting, so this only reports the environment;
+/// the credentials are stripped before the hint reaches a view model.
+fn configured_proxy() -> Option<String> {
+    const KEYS: [&str; 7] = [
+        "UNITY_PROXY",
+        "HTTPS_PROXY",
+        "https_proxy",
+        "HTTP_PROXY",
+        "http_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+    ];
+
+    KEYS.iter().find_map(|key| {
+        std::env::var(key)
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .map(|value| format!("{key}={}", redact_proxy(&value)))
+    })
 }
 
 /// Best-effort path comparison for the running-Editor guard. The CLI remains
@@ -1992,24 +2509,6 @@ fn same_project_path(left: &str, right: &str) -> bool {
     match (std::fs::canonicalize(left), std::fs::canonicalize(right)) {
         (Ok(left), Ok(right)) => left == right,
         _ => cfg!(windows) && left.eq_ignore_ascii_case(right),
-    }
-}
-
-fn load_state<T, U>(loadable: &Loadable<T>, map: impl Fn(&T) -> U) -> LoadState<U> {
-    if loadable.loading {
-        return LoadState::Loading {
-            previous: loadable.data.as_ref().map(&map),
-        };
-    }
-    if let Some(error) = &loadable.error {
-        return LoadState::Failed {
-            error: ui_error(error),
-            previous: loadable.data.as_ref().map(&map),
-        };
-    }
-    match &loadable.data {
-        Some(data) => LoadState::Ready(map(data)),
-        None => LoadState::Idle,
     }
 }
 
@@ -2086,30 +2585,6 @@ fn advisory_detail(advisory: &CliAdvisory) -> Option<String> {
             })
         }
         _ => None,
-    }
-}
-
-fn job_vm(job: &ActiveJob) -> JobVm {
-    JobVm {
-        kind: job.kind.clone(),
-        command: job.command.clone(),
-        phase: match job.state {
-            JobState::Running => JobPhase::Running,
-            JobState::Succeeded => JobPhase::Succeeded,
-            JobState::Failed => JobPhase::Failed,
-            JobState::Cancelled => JobPhase::Cancelled,
-        },
-        progress: job.progress,
-        message: job.message.clone(),
-        error: job.error.as_ref().map(ui_error),
-        logs: job
-            .logs
-            .iter()
-            .map(|line| JobLogVm {
-                is_stderr: line.stream == StreamKind::Stderr,
-                text: line.text.clone(),
-            })
-            .collect(),
     }
 }
 
@@ -2679,6 +3154,225 @@ mod tests {
             "This plugin is a beta release. Beta plugins can break projects."
         );
         assert!(advisories[0].command.is_none());
+    }
+
+    #[test]
+    fn failed_read_gets_a_retry_action_with_a_controller_target() {
+        let mut app = connected_app("1.0.0-beta.17");
+        app.page = Page::Projects;
+        app.projects.error = Some(
+            UnityError::new(
+                "NETWORK_UNREACHABLE",
+                "A Unity service could not be reached.",
+            )
+            .with_exit_code(Some(7)),
+        );
+        app.note_read_failed(ReadKind::Projects);
+
+        let vm = app.view_model();
+        let PageVm::Projects(projects) = &vm.page else {
+            panic!("expected the Projects page");
+        };
+        let error = projects.projects.error().expect("read error");
+        assert_eq!(error.code, "NETWORK_UNREACHABLE");
+        let action = error.action.as_ref().expect("retry action");
+        assert_eq!(
+            action.kind,
+            ErrorActionKind::Retry("read:projects".to_string())
+        );
+
+        let action = action.clone();
+        let _task = app.update(Message::RunErrorAction(action));
+        assert!(app.projects.loading, "Retry must re-run the failed read");
+    }
+
+    #[test]
+    fn retry_is_absent_when_the_controller_has_no_target() {
+        let mut app = connected_app("1.0.0-beta.17");
+        app.page = Page::Projects;
+        app.projects.error = Some(
+            UnityError::new(
+                "NETWORK_UNREACHABLE",
+                "A Unity service could not be reached.",
+            )
+            .with_exit_code(Some(7)),
+        );
+        // No `note_read_failed(ReadKind::Projects)` and no request: the view
+        // model must not draw a button that cannot name its read.
+
+        let vm = app.view_model();
+        let PageVm::Projects(projects) = &vm.page else {
+            panic!("expected the Projects page");
+        };
+        assert!(projects
+            .projects
+            .error()
+            .expect("read error")
+            .action
+            .is_none());
+    }
+
+    #[test]
+    fn unknown_codes_keep_generic_rendering_without_an_action() {
+        let mut app = connected_app("1.0.0-beta.17");
+        app.page = Page::Projects;
+        app.projects.error = Some(UnityError::new(
+            "FUTURE_CLI_CODE",
+            "The CLI returned an error this app does not know yet.",
+        ));
+        app.note_read_failed(ReadKind::Projects);
+
+        let vm = app.view_model();
+        let PageVm::Projects(projects) = &vm.page else {
+            panic!("expected the Projects page");
+        };
+        let error = projects.projects.error().expect("read error");
+        assert_eq!(error.code, "FUTURE_CLI_CODE");
+        assert!(error.action.is_none());
+    }
+
+    fn failed_job(kind: &str, error: UnityError) -> ActiveJob {
+        ActiveJob {
+            id: "job-test".to_string(),
+            kind: kind.to_string(),
+            command: format!("unity {kind}"),
+            state: JobState::Failed,
+            progress: 0.0,
+            message: Some("Working…".to_string()),
+            logs: VecDeque::new(),
+            error: Some(error),
+        }
+    }
+
+    #[test]
+    fn a_job_that_started_a_mutation_never_offers_retry() {
+        let mut app = connected_app("1.0.0-beta.17");
+        app.active_job = Some(failed_job(
+            "editor-install",
+            UnityError::new(
+                "NETWORK_UNREACHABLE",
+                "A Unity service could not be reached.",
+            )
+            .with_exit_code(Some(7)),
+        ));
+
+        let vm = app.view_model();
+        let error = vm.shell.job.expect("job").error.expect("job error");
+        assert_eq!(error.code, "NETWORK_UNREACHABLE");
+        assert!(
+            error.action.is_none(),
+            "an install that already started must not be replayed"
+        );
+    }
+
+    #[test]
+    fn every_existing_job_kind_is_treated_as_non_idempotent() {
+        for kind in [
+            "cli-install",
+            "cli-update",
+            "editor-install",
+            "module-install",
+            "auth-login",
+            "project-upgrade",
+        ] {
+            assert!(!job_allows_retry(kind), "{kind} must not be retryable");
+        }
+    }
+
+    #[test]
+    fn a_job_error_keeps_its_non_retry_action_and_code() {
+        let mut app = connected_app("1.0.0-beta.17");
+        app.active_job = Some(failed_job(
+            "module-install",
+            UnityError::new("VCS_TOKEN_REQUIRED", "A token is required.").with_exit_code(Some(4)),
+        ));
+
+        let vm = app.view_model();
+        let error = vm.shell.job.expect("job").error.expect("job error");
+        assert_eq!(error.code, "VCS_TOKEN_REQUIRED");
+        let action = error.action.expect("token action");
+        assert_eq!(action.kind, ErrorActionKind::EnterToken);
+        assert!(error.detail.expect("detail").contains("UNITY_GITHUB_TOKEN"));
+    }
+
+    #[test]
+    fn retry_uses_the_request_captured_when_the_read_started() {
+        let mut app = connected_app("1.0.0-beta.17");
+        app.page = Page::Editors;
+        app.modules.error = Some(
+            UnityError::new(
+                "NETWORK_UNREACHABLE",
+                "A Unity service could not be reached.",
+            )
+            .with_exit_code(Some(7)),
+        );
+        app.retry_targets.insert(
+            ReadKind::Modules.id().to_string(),
+            RetryRequest::Modules("6000.1.1f1".to_string()),
+        );
+        // A later edit to the form must not change the read Retry repeats.
+        app.install_version = "6000.9.9f1".to_string();
+
+        let vm = app.view_model();
+        let PageVm::Editors(editors) = &vm.page else {
+            panic!("expected the Editors page");
+        };
+        let action = editors
+            .install
+            .modules
+            .error()
+            .expect("module error")
+            .action
+            .as_ref()
+            .expect("retry")
+            .clone();
+        assert_eq!(
+            action.kind,
+            ErrorActionKind::Retry("read:modules".to_string())
+        );
+        assert_eq!(
+            app.retry_targets.get(ReadKind::Modules.id()),
+            Some(&RetryRequest::Modules("6000.1.1f1".to_string()))
+        );
+    }
+
+    #[test]
+    fn preview_failure_has_its_own_retry_action() {
+        let mut app = connected_app("1.0.0-beta.17");
+        app.page = Page::Editors;
+        app.retry_targets.insert(
+            ReadKind::PreviewInstall.id().to_string(),
+            RetryRequest::PreviewInstall {
+                version: "lts".to_string(),
+                modules: vec!["webgl".to_string()],
+                headless: false,
+            },
+        );
+        app.preview_error = Some(app.ui_error(
+            &UnityError::new("TIMEOUT", "The operation timed out.").with_exit_code(Some(14)),
+            ErrorContext::Read(ReadKind::PreviewInstall),
+        ));
+
+        let vm = app.view_model();
+        let PageVm::Editors(editors) = &vm.page else {
+            panic!("expected the Editors page");
+        };
+        let action = editors
+            .install
+            .preview_error
+            .as_ref()
+            .expect("preview error")
+            .action
+            .as_ref()
+            .expect("retry")
+            .clone();
+        assert_eq!(
+            action.kind,
+            ErrorActionKind::Retry("read:preview-install".to_string())
+        );
+
+        let _task = app.update(Message::RunErrorAction(action));
+        assert!(app.preview_loading);
     }
 
     #[test]

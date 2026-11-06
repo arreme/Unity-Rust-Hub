@@ -6,10 +6,11 @@
 use unity_hub_model::{
     AccountCardVm, AdvisoryVm, AuthVm, BadgeVm, BreakingChangeVm, ChangelogDataVm,
     ChangelogSectionVm, ChangelogVm, CliCardVm, CliConnectionVm, CliDetailsVm, EditorModulesVm,
-    EditorRowVm, EditorsVm, InstallCliVm, InstallEditorVm, JobLogVm, JobPhase, JobVm, LicenseRowVm,
-    LicenseVm, LoadState, ModalVm, ModuleOptionVm, NoticeVm, OverviewVm, Page, PageVm,
-    ProjectRowVm, ProjectsVm, ReleaseRowVm, RunningEditorVm, SectionKind, SettingsVm, ShellVm,
-    TextScaleOptionVm, Tone, UiError, UpdateVm, UpgradeProjectVm, ViewModel,
+    EditorRowVm, EditorsVm, ErrorActionKind, ErrorActionVm, InstallCliVm, InstallEditorVm,
+    JobLogVm, JobPhase, JobVm, LicenseRowVm, LicenseVm, LoadState, ModalVm, ModuleOptionVm,
+    NoticeVm, OverviewVm, Page, PageVm, ProjectRowVm, ProjectsVm, ReleaseRowVm, RunningEditorVm,
+    SectionKind, SettingsVm, ShellVm, TextScaleOptionVm, Tone, UiError, UpdateVm, UpgradeProjectVm,
+    ViewModel,
 };
 
 pub struct Fixture {
@@ -30,6 +31,14 @@ pub fn all() -> Vec<Fixture> {
         Fixture {
             name: "Overview · load error",
             view_model: overview_error(),
+        },
+        Fixture {
+            name: "Error · actionable (retry)",
+            view_model: error_actionable(),
+        },
+        Fixture {
+            name: "Error · unknown code",
+            view_model: error_unknown_code(),
         },
         Fixture {
             name: "Advisory · CLI update",
@@ -194,24 +203,32 @@ fn overview_error() -> ViewModel {
         Page::Overview,
         PageVm::Overview(OverviewVm {
             cli: CliCardVm::Failed(UiError {
+                code: "CLI_NOT_FOUND".to_string(),
                 message: "Could not resolve the Unity CLI.".to_string(),
                 detail: Some("Checked PATH and the Hub install receipt.".to_string()),
+                action: None,
             }),
             update: LoadState::Failed {
                 error: UiError {
+                    code: "UNEXPECTED_OUTPUT".to_string(),
                     message: "Update check failed.".to_string(),
                     detail: None,
+                    action: None,
                 },
                 previous: None,
             },
             account: AccountCardVm {
                 auth: AuthVm::Failed(UiError {
+                    code: "AUTH_ERROR".to_string(),
                     message: "Not signed in.".to_string(),
                     detail: None,
+                    action: None,
                 }),
                 license: LicenseVm::Failed(UiError {
+                    code: "LICENSE_UNAVAILABLE".to_string(),
                     message: "License service unavailable.".to_string(),
                     detail: None,
+                    action: None,
                 }),
             },
             running: LoadState::Loading { previous: None },
@@ -219,6 +236,45 @@ fn overview_error() -> ViewModel {
             project_count: None,
         }),
     )
+}
+
+fn error_actionable() -> ViewModel {
+    let mut vm = overview();
+    if let PageVm::Overview(overview) = &mut vm.page {
+        overview.cli = CliCardVm::Failed(UiError {
+            code: "NETWORK_UNREACHABLE".to_string(),
+            message: "A Unity service could not be reached.".to_string(),
+            detail: Some(
+                "Retry when the connection is back. The CLI is using the configured proxy `UNITY_PROXY=http://proxy.example:8080`; if that proxy is down, fix it or unset it first."
+                    .to_string(),
+            ),
+            action: Some(ErrorActionVm {
+                label: "Retry".to_string(),
+                command: None,
+                kind: ErrorActionKind::Retry("read:status".to_string()),
+            }),
+        });
+    }
+    vm
+}
+
+fn error_unknown_code() -> ViewModel {
+    let mut vm = projects();
+    if let PageVm::Projects(projects) = &mut vm.page {
+        projects.projects = LoadState::Failed {
+            error: UiError {
+                code: "FUTURE_CLI_CODE".to_string(),
+                message: "The Unity CLI returned an error this app does not know yet.".to_string(),
+                detail: Some(
+                    "The CLI message and code are shown verbatim; no action is guessed."
+                        .to_string(),
+                ),
+                action: None,
+            },
+            previous: None,
+        };
+    }
+    vm
 }
 
 fn editors() -> ViewModel {
@@ -260,6 +316,7 @@ fn editors() -> ViewModel {
                 can_install: true,
                 preview: None,
                 preview_note: None,
+                preview_error: None,
                 preview_loading: false,
             },
             releases: LoadState::Ready(vec![
@@ -544,8 +601,10 @@ fn job_failed() -> ViewModel {
         progress: 0.0,
         message: Some("Upgrading project…".to_string()),
         error: Some(UiError {
+            code: "NETWORK_UNREACHABLE".to_string(),
             message: "Project upgrade failed.".to_string(),
-            detail: Some("The target Editor is not installed.".to_string()),
+            detail: Some("The job already started a mutation, so no Retry is offered.".to_string()),
+            action: None,
         }),
         logs: vec![JobLogVm {
             is_stderr: true,

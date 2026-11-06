@@ -20,12 +20,48 @@ impl Page {
     ];
 }
 
+/// The kind of primary next step an error offers.
+///
+/// `Retry` carries the controller's stable identifier for the failed read, so
+/// two visible errors of the same kind never retry each other's operation. The
+/// controller decides which kinds it can honour; the UI only draws the action.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ErrorActionKind {
+    Retry(String),
+    SignIn,
+    OpenSettings,
+    PickVersion,
+    OpenEditor,
+    EnterToken,
+    InstallGit,
+    ShowCommand,
+    Confirm,
+    ShowBusy,
+    AnswerDialog,
+    FixPermissions,
+}
+
+/// One primary action attached to a failed read or job.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ErrorActionVm {
+    pub label: String,
+    /// The exact command the CLI named, when it named one. It is shown and
+    /// copied, never executed by this action.
+    pub command: Option<String>,
+    pub kind: ErrorActionKind,
+}
+
 /// A display-ready error. The controller resolves `UnityError` into this shape
 /// so the UI never depends on the CLI adapter's error type.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct UiError {
+    /// Stable machine code (`NETWORK_UNREACHABLE`, `CLI_NOT_FOUND`, ...).
+    pub code: String,
     pub message: String,
     pub detail: Option<String>,
+    /// The code-specific next step, when the adapter's table has one and the
+    /// controller can honour it.
+    pub action: Option<ErrorActionVm>,
 }
 
 impl UiError {
@@ -321,6 +357,7 @@ pub struct InstallEditorVm {
     pub can_install: bool,
     pub preview: Option<InstallPreviewVm>,
     pub preview_note: Option<String>,
+    pub preview_error: Option<UiError>,
     pub preview_loading: bool,
 }
 

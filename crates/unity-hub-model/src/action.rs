@@ -1,4 +1,4 @@
-use crate::Page;
+use crate::{ErrorActionVm, Page};
 
 /// Everything a screen is allowed to ask the application to do.
 ///
@@ -19,6 +19,9 @@ pub enum UiAction {
     /// Runs the remediation command the user just clicked. The controller only
     /// honours this for advisories the adapter has an explicit builder for.
     RunAdvisoryRemediation(String),
+    /// Runs the primary action shown on a failed read or job. The controller
+    /// resolves the target itself; the UI never retries by holding a closure.
+    RunErrorAction(ErrorActionVm),
     DismissJob,
     CancelJob,
     SignIn,

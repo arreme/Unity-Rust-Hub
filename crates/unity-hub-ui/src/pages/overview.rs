@@ -112,11 +112,7 @@ fn cli_card(vm: &OverviewVm) -> Element<'_, UiAction> {
                 body = body.push(error_text(error));
             }
             if let Some(error) = vm.update.error() {
-                body = body.push(
-                    text(format!("Update check failed: {}", error.text()))
-                        .size(font::SMALL)
-                        .style(theme::danger_text),
-                );
+                body = body.push(error_text(error));
             }
 
             body = body.push(divider());
@@ -430,7 +426,7 @@ fn running_card(running: &LoadState<Vec<RunningEditorVm>>) -> Element<'_, UiActi
             .into()
         }
     } else if let Some(error) = running.error() {
-        hint(error.message.as_str())
+        error_text(error)
     } else {
         space().height(0).into()
     };

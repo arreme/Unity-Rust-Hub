@@ -429,14 +429,55 @@ pub fn notice<'a>(
     .into()
 }
 
-/// Inline error message for a failed read.
+/// Inline error message for a failed read: stable code, the CLI's message,
+/// optional detail, and the one primary next step when the controller has one.
 pub fn error_text(error: &UiError) -> Element<'_, UiAction> {
-    row![
-        icon(icons::CIRCLE_ALERT, font::ICON_SMALL).style(theme::danger_text),
-        text(error.text())
+    let mut body = column![].spacing(6).width(Fill);
+
+    if !error.code.trim().is_empty() {
+        body = body.push(row![badge(error.code.clone(), Tone::Danger)].spacing(8));
+    }
+
+    body = body.push(
+        text(error.message.as_str())
             .size(font::BODY)
             .style(theme::danger_text)
             .width(Fill),
+    );
+
+    if let Some(detail) = &error.detail {
+        if !detail.trim().is_empty() {
+            body = body.push(
+                text(detail.trim())
+                    .size(font::SMALL)
+                    .style(theme::muted_text)
+                    .width(Fill),
+            );
+        }
+    }
+
+    if let Some(action) = &error.action {
+        let mut row = row![button(action.label.as_str(), ButtonKind::Secondary)
+            .on_press(UiAction::RunErrorAction(action.clone()))
+            .padding(COMPACT),]
+        .spacing(10)
+        .align_y(iced::Alignment::Center);
+
+        if let Some(command) = &action.command {
+            row = row.push(
+                text(command.as_str())
+                    .size(font::MONO)
+                    .font(fonts::MONO)
+                    .width(Fill),
+            );
+        }
+
+        body = body.push(row);
+    }
+
+    row![
+        icon(icons::CIRCLE_ALERT, font::ICON_SMALL).style(theme::danger_text),
+        body,
     ]
     .spacing(8)
     .align_y(iced::Alignment::Start)

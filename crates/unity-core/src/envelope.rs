@@ -284,6 +284,42 @@ mod tests {
     }
 
     #[test]
+    fn cli_error_remediation_reaches_the_structured_error_and_wins() {
+        // The exact path a failed read takes: envelope → CliError →
+        // UnityError.extra → remediation table. The CLI remediation must win
+        // over the NETWORK_UNREACHABLE code mapping.
+        let envelope: ValueEnvelope = serde_json::from_value(serde_json::json!({
+            "success": false,
+            "errors": [{
+                "code": "NETWORK_UNREACHABLE",
+                "message": "A Unity service could not be reached.",
+                "detail": "connect ECONNREFUSED",
+                "remediation": {
+                    "command": "unity diagnose proxy",
+                    "requiresUserApproval": true
+                }
+            }]
+        }))
+        .unwrap();
+
+        let error = envelope.errors[0].to_unity_error(Some(7), "");
+        assert_eq!(
+            error
+                .extra
+                .get("remediation")
+                .and_then(|value| value.get("command")),
+            Some(&Value::String("unity diagnose proxy".to_string()))
+        );
+
+        let remediation = crate::errors::remediation_for(&error, None).expect("remediation");
+        assert_eq!(
+            remediation.kind,
+            crate::errors::RemediationKind::ShowCommand
+        );
+        assert_eq!(remediation.command.as_deref(), Some("unity diagnose proxy"));
+    }
+
+    #[test]
     fn parses_typed_warnings_and_notifications() {
         let envelope = parse_envelope(
             r#"{

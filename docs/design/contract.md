@@ -75,8 +75,13 @@ fixture when a new state needs review.
   - Dismissed: hidden for the current CLI version (an info notice confirms).
   - Every banner is dismissible and never blocks the screen.
 - Notice banner: info, success, error.
-- Job card: running with progress, succeeded, failed with error detail,
-  cancelled, with collapsible-looking log area.
+- Job card: running with progress, succeeded, failed with the shared error
+  rendering (stable code, CLI message, detail, and a non-retry action when the
+  mapping has one), cancelled, with collapsible-looking log area.
+- Error rendering (`components::error_text`): the stable CLI code as a danger
+  badge, the CLI's message verbatim, the CLI detail plus mapping guidance, and
+  one primary action. Unknown codes render code/message/detail with no action.
+  Used by failed reads on every page and by failed jobs.
 - Minimum window 1040×680; default 1280×840.
 
 ### Overview
@@ -158,6 +163,65 @@ drawing their own banners.
   only), and `UiAction::RunAdvisoryRemediation(id)`. Run exists only when the
   adapter has an explicit command builder; otherwise the command is
   visible/copyable and no button is drawn.
+
+## Error contract
+
+Every failed read and failed job reaches the UI as `UiError`:
+
+- `code: String` — the CLI's stable machine code, passed through unchanged.
+  Adapter failures use `CLI_NOT_FOUND`, `SPAWN_FAILED`, `UNEXPECTED_OUTPUT`,
+  `INVALID_INPUT`, or `INTERNAL`.
+- `message: String` — the CLI's own (localized) text, never rewritten.
+- `detail: Option<String>` — the CLI's `detail` plus a code-specific guidance
+  paragraph appended by the controller.
+- `action: Option<ErrorActionVm>` where
+  `ErrorActionVm { label, command, kind }`:
+  - `label` is the button text.
+  - `command` is the exact command the CLI named as `remediation`, when it
+    named one. It is displayed and copied only; the app never executes a
+    command from an error.
+  - `kind` is one of `Retry(id)`, `SignIn`, `OpenSettings`, `PickVersion`,
+    `OpenEditor`, `EnterToken`, `InstallGit`, `ShowCommand`, `Confirm`,
+    `ShowBusy`, `AnswerDialog`, `FixPermissions`.
+
+Resolution order in `unity-core::errors::remediation_for`:
+
+1. The CLI's own `remediation` field (`UnityError.extra["remediation"]`), as a
+   copy-only command (`ShowCommand`).
+2. The stable `code` table: auth codes → Sign in; `NETWORK_UNREACHABLE` and
+   `VCS_PROVIDER_UNREACHABLE` → Retry; `INSTALL_LOCKED`, `TIMEOUT`,
+   `EDITOR_TIMEOUT` → Retry; `RELEASE_NOT_FOUND` → Pick another version;
+   `EDITOR_UNREACHABLE` → Open a project; `UNAVAILABLE` / `STATUS_SAFE_MODE` →
+   Show status; `AWAITING_INPUT` → Answer the Editor dialog;
+   `VCS_TOKEN_REQUIRED` → Enter a token (env var or `--git-token-from-stdin`,
+   explicitly not a Unity sign-in); `GIT_START_FAILED` → Install git;
+   `LOCAL_STORE_UNWRITABLE` → Fix permissions;
+   `LINK_VCS_DELETE_REMOTE_REQUIRES_YES` → Confirm explicitly;
+   `INSTALL_HEADLESS_UNAVAILABLE` → Pick another version or clear headless;
+   `BAD_ARGS` → Show the command.
+3. Exit-code semantics for unknown codes (`2`, `3`, `7`, `9`, `11`, `12`, `14`,
+   `17`, `18`). Exit codes outside that table stay generic.
+
+Retry is a controller-side target, not a closure in the view model:
+
+- The controller keeps `retry_targets` keyed by the stable read id carried in
+  `ErrorActionKind::Retry("read:…")`. Parameterised reads (`modules`,
+  `dialog-modules`, `preview-install`) keep the request they started with, so
+  Retry repeats exactly what the user saw fail.
+- No target means no Retry button; a successful retry clears the target.
+- A job that already started a mutation is never offered Retry. Every job in
+  this app (CLI install/update, Editor/module install, sign-in, project upgrade)
+  is in that category. Jobs can still show non-retry actions (for example Enter
+  a token) and always show their code.
+
+Network errors name the proxy the CLI will use. The app has no proxy setting of
+its own; the controller reports `UNITY_PROXY` (or `HTTPS_PROXY`, `HTTP_PROXY`,
+`ALL_PROXY`) from the environment with credentials redacted. With no configured
+proxy, the hint says the app has none and names the CLI's env vars and persisted
+`unity config proxy` setting instead.
+
+Gallery fixtures: `Error · actionable (retry)` and `Error · unknown code`, plus
+the failed job fixture that has no Retry.
 
 ## Platform constraints to design around
 
