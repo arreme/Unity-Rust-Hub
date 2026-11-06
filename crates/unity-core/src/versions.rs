@@ -99,6 +99,92 @@ pub fn validate_release_stream(input: &str) -> Result<(), UnityError> {
     }
 }
 
+/// The CLI update channels the app offers.
+///
+/// `self-update --check`, `--changelog` and an apply all accept only these.
+pub fn validate_update_channel(input: &str) -> Result<Option<String>, UnityError> {
+    let value = input.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    match value {
+        "stable" | "beta" => Ok(Some(value.to_string())),
+        other => Err(UnityError::invalid_input(format!(
+            "`{other}` is not a CLI update channel. Use stable or beta."
+        ))),
+    }
+}
+
+/// Validates `--timeout <seconds>`: a whole number greater than zero.
+///
+/// The CLI rejects `5m` and `1.5`, so the app refuses them before they reach
+/// the command line. An empty field means "no timeout".
+pub fn validate_timeout_seconds(input: &str) -> Result<Option<u32>, UnityError> {
+    let value = input.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    if !value.chars().all(|character| character.is_ascii_digit()) {
+        return Err(UnityError::invalid_input(
+            "The install timeout must be a whole number of seconds, such as 600.",
+        ));
+    }
+    let seconds = value.parse::<u32>().map_err(|_| {
+        UnityError::invalid_input("The install timeout is too large for a whole number of seconds.")
+    })?;
+    if seconds == 0 {
+        return Err(UnityError::invalid_input(
+            "The install timeout must be greater than zero seconds.",
+        ));
+    }
+    Ok(Some(seconds))
+}
+
+/// Validates `--retries <n>` and the `UNITY_INSTALL_RETRIES` value.
+///
+/// `0` disables retries. Any whole number is accepted; the CLI owns its own
+/// upper bound and reports `BAD_ARGS` if it has one lower than the value.
+pub fn validate_retry_count(input: &str) -> Result<Option<u32>, UnityError> {
+    let value = input.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    if !value.chars().all(|character| character.is_ascii_digit()) {
+        return Err(UnityError::invalid_input(
+            "Download retries must be a whole number; 0 disables retries.",
+        ));
+    }
+    let retries = value.parse::<u32>().map_err(|_| {
+        UnityError::invalid_input("Download retries must be a whole number; 0 disables retries.")
+    })?;
+    Ok(Some(retries))
+}
+
+/// Validates `-d` / `--download-directory`.
+///
+/// The CLI creates the folder, so it does not need to exist. It must not look
+/// like a flag and must be a single path argument; an empty field means "use
+/// the normal install location".
+pub fn validate_download_directory(input: &str) -> Result<Option<String>, UnityError> {
+    let value = input.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    if value.starts_with('-') {
+        return Err(UnityError::invalid_input(
+            "The download directory cannot start with `-`.",
+        ));
+    }
+    if value.chars().any(|character| {
+        character == '\0' || character == '\n' || character == '\r' || character.is_control()
+    }) {
+        return Err(UnityError::invalid_input(
+            "The download directory contains an invalid character.",
+        ));
+    }
+    Ok(Some(value.to_string()))
+}
+
 /// Validates a project path that must exist and be a directory.
 pub fn validate_project_path(path: &str) -> Result<std::path::PathBuf, UnityError> {
     let value = path.trim();
@@ -176,6 +262,46 @@ mod tests {
         for value in ["--headless", "x86_64; rm -rf /", "$(id)"] {
             assert!(validate_architecture(value).is_err(), "{value} should fail");
         }
+    }
+
+    #[test]
+    fn validates_update_channels_timeouts_retries_and_download_directories() {
+        assert_eq!(
+            validate_update_channel("beta").unwrap().as_deref(),
+            Some("beta")
+        );
+        assert_eq!(validate_update_channel("  ").unwrap(), None);
+        assert!(validate_update_channel("nightly").is_err());
+
+        assert_eq!(validate_timeout_seconds("600").unwrap(), Some(600));
+        assert_eq!(validate_timeout_seconds("").unwrap(), None);
+        for value in ["0", "5m", "1.5", "-1", "abc"] {
+            assert!(
+                validate_timeout_seconds(value).is_err(),
+                "{value} must be refused"
+            );
+        }
+
+        assert_eq!(validate_retry_count("0").unwrap(), Some(0));
+        assert_eq!(validate_retry_count("10").unwrap(), Some(10));
+        assert_eq!(validate_retry_count("25").unwrap(), Some(25));
+        assert_eq!(validate_retry_count(" ").unwrap(), None);
+        for value in ["-1", "2.5", "many"] {
+            assert!(
+                validate_retry_count(value).is_err(),
+                "{value} must be refused"
+            );
+        }
+
+        assert_eq!(
+            validate_download_directory(" ./.unity ")
+                .unwrap()
+                .as_deref(),
+            Some("./.unity")
+        );
+        assert_eq!(validate_download_directory("").unwrap(), None);
+        assert!(validate_download_directory("--force").is_err());
+        assert!(validate_download_directory("bad\npath").is_err());
     }
 
     #[test]

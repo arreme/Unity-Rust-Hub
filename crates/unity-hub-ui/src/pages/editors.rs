@@ -2,8 +2,8 @@ use iced::widget::{column, container, row, space};
 use iced::{Center, Element, Fill, FillPortion};
 
 use unity_hub_model::{
-    EditorRowVm, EditorsVm, InstallEditorVm, LoadState, ModuleOptionVm, PruneReportVm,
-    ReleaseRowVm, Tone, UiAction,
+    EditorRowVm, EditorsVm, InstallAdvancedVm, InstallEditorVm, LoadState, ModuleOptionVm,
+    PruneReportVm, ReleaseRowVm, Tone, UiAction,
 };
 
 use crate::components::{
@@ -321,6 +321,46 @@ fn install_card(install: &InstallEditorVm) -> Element<'_, UiAction> {
         UiAction::AcceptEulaToggled,
     ));
 
+    body = body.push(install_advanced(&install.advanced));
+
+    if let Some(resume) = &install.resume_offer {
+        body = body.push(notice(
+            Tone::Warning,
+            icons::REFRESH,
+            row![
+                column![
+                    text(format!("Resume Unity {}?", resume.version))
+                        .size(font::BODY_LARGE)
+                        .font(fonts::MEDIUM),
+                    text(resume.reason.as_str())
+                        .size(font::BODY)
+                        .style(theme::muted_text),
+                    hint(format!(
+                        "Reuses the cache for the {} build instead of downloading again.",
+                        resume.architecture
+                    )),
+                ]
+                .spacing(4)
+                .width(Fill),
+                button("Resume install", ButtonKind::Primary)
+                    .on_press_maybe(resume.can_resume.then_some(UiAction::ResumeInstallEditor)),
+            ]
+            .spacing(12)
+            .align_y(Center),
+        ));
+    }
+
+    if let Some(report) = &install.download_report {
+        body = body.push(notice(
+            Tone::Success,
+            icons::DOWNLOAD,
+            text(report.as_str())
+                .size(font::BODY)
+                .line_height(1.5)
+                .style(theme::muted_text),
+        ));
+    }
+
     if let Some(error) = &install.preview_error {
         body = body.push(error_text(error));
     }
@@ -354,6 +394,8 @@ fn install_card(install: &InstallEditorVm) -> Element<'_, UiAction> {
     };
 
     body = body.push(components::divider());
+    body = body.push(hint("Exact command"));
+    body = body.push(mono(install.command_preview.as_str()));
     body = body.push(
         row![
             button("Preview download", ButtonKind::Secondary).on_press(UiAction::PreviewInstall),
@@ -367,6 +409,121 @@ fn install_card(install: &InstallEditorVm) -> Element<'_, UiAction> {
     );
 
     card("Install a new Editor", body.into())
+}
+
+fn install_advanced(advanced: &InstallAdvancedVm) -> Element<'_, UiAction> {
+    let toggle = if advanced.expanded {
+        "Hide advanced options"
+    } else {
+        "Advanced options"
+    };
+    let summary = if advanced.expanded {
+        "Optional install flags. The default command stays unchanged while these are untouched."
+            .to_string()
+    } else {
+        "Resume, download-only, lock wait, timeout, set-default, download retries.".to_string()
+    };
+
+    let mut body = column![row![
+        button(toggle, ButtonKind::Ghost)
+            .on_press(UiAction::InstallAdvancedToggled(!advanced.expanded))
+            .padding(components::COMPACT),
+        hint(summary),
+    ]
+    .spacing(10)
+    .align_y(Center),]
+    .spacing(10);
+
+    if advanced.expanded {
+        let mut first_row = row![
+            checkbox(
+                "Resume an interrupted download (--resume)",
+                advanced.resume,
+                UiAction::InstallResumeToggled,
+            )
+            .width(Fill),
+            checkbox(
+                "Download and verify only (--download-only)",
+                advanced.download_only,
+                UiAction::InstallDownloadOnlyToggled,
+            )
+            .width(Fill),
+        ]
+        .spacing(16);
+
+        if advanced.download_only {
+            first_row = first_row.push(hint("No Editor is installed or registered."));
+        }
+
+        body = body.push(first_row);
+        body = body.push(
+            row![
+                checkbox(
+                    "Fail at once when another install holds the lock (--no-wait)",
+                    advanced.no_wait,
+                    UiAction::InstallNoWaitToggled,
+                )
+                .width(Fill),
+                checkbox(
+                    "Make this Editor the default after success (--set-default)",
+                    advanced.set_default,
+                    UiAction::InstallSetDefaultToggled,
+                )
+                .width(Fill),
+            ]
+            .spacing(16),
+        );
+
+        let mut timeout_column = column![
+            field_label("Lock wait timeout (seconds)"),
+            text_input("600", &advanced.timeout_input).on_input(UiAction::InstallTimeoutChanged),
+        ]
+        .spacing(6);
+        if let Some(error) = &advanced.timeout_error {
+            timeout_column = timeout_column.push(hint(error.as_str()));
+        } else {
+            timeout_column = timeout_column.push(hint(
+                "Whole seconds. No-wait and timeout are mutually exclusive, so setting one clears the other.",
+            ));
+        }
+
+        let mut retries_column = column![
+            field_label("Download retries (0 disables)"),
+            text_input("2", &advanced.retries_input).on_input(UiAction::InstallRetriesChanged),
+        ]
+        .spacing(6);
+        if let Some(error) = &advanced.retries_error {
+            retries_column = retries_column.push(hint(error.as_str()));
+        } else {
+            retries_column = retries_column.push(hint(
+                "Set through UNITY_INSTALL_RETRIES; `unity install` has no --retries flag.",
+            ));
+        }
+
+        body = body.push(
+            row![
+                container(timeout_column).width(Fill),
+                container(retries_column).width(Fill)
+            ]
+            .spacing(16),
+        );
+
+        if let Some(note) = &advanced.conflict_note {
+            body = body.push(notice(
+                Tone::Info,
+                icons::INFO,
+                text(note.as_str())
+                    .size(font::BODY)
+                    .style(theme::muted_text),
+            ));
+        }
+    }
+
+    container(body)
+        .padding([14.0, 16.0])
+        .width(Fill)
+        .style(theme::outline)
+        .into()
 }
 
 fn module_checkbox(module: &ModuleOptionVm) -> Element<'static, UiAction> {

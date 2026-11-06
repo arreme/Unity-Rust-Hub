@@ -15,8 +15,9 @@ use crate::models::{
     RawChangelog, Release, RunningEditor, RunningEditors, VerifyReport,
 };
 use crate::versions::{
-    validate_architecture, validate_cli_version, validate_editor_version, validate_module_id,
-    validate_project_path, validate_release_stream,
+    validate_architecture, validate_cli_version, validate_download_directory,
+    validate_editor_version, validate_module_id, validate_project_path, validate_release_stream,
+    validate_update_channel,
 };
 
 /// The standard opt-out signal. The CLI's analytics/update callback adds a
@@ -84,6 +85,35 @@ impl CommandSpec {
         pieces.extend(self.args.iter().map(|arg| shell_quote(arg)));
         pieces.join(" ")
     }
+}
+
+/// Advanced `unity install` options from the collapsed Advanced area.
+///
+/// Every field is off/empty by default, which keeps the host-default command
+/// byte-for-byte the same as earlier releases.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct InstallOptions {
+    /// `--resume`: continue an interrupted download from the cache.
+    pub resume: bool,
+    /// `--download-only`: fetch and verify, install nothing.
+    pub download_only: bool,
+    /// `--no-wait`: fail immediately when another install holds the lock.
+    pub no_wait: bool,
+    /// `--timeout <seconds>`: bound how long to wait for the lock.
+    pub timeout_secs: Option<u32>,
+    /// `--set-default`: store the installed Editor as default.
+    pub set_default: bool,
+    /// `UNITY_INSTALL_RETRIES`: install has no `--retries` flag.
+    pub retries: Option<u32>,
+}
+
+/// The two Advanced `install-modules` options.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ModuleInstallOptions {
+    /// `--retries <n>`: 0 disables module download retries.
+    pub retries: Option<u32>,
+    /// `-d` / `--download-directory`: add modules to a portable install.
+    pub download_directory: Option<String>,
 }
 
 impl UnityCli {
@@ -451,9 +481,23 @@ impl UnityCli {
         modules: &[String],
         headless: bool,
         accept_eula: bool,
+        options: &InstallOptions,
     ) -> Result<CommandSpec, UnityError> {
-        let parts = install_parts(version, architecture, modules, headless, accept_eula)?;
-        self.spec(&parts, "ndjson")
+        let parts = install_parts_with(
+            version,
+            architecture,
+            modules,
+            headless,
+            accept_eula,
+            options,
+        )?;
+        let mut spec = self.spec(&parts, "ndjson")?;
+        if let Some(retries) = options.retries {
+            // `unity install` has no `--retries` flag; the CLI reads this env
+            // var for both install and install-modules.
+            spec = spec.with_env("UNITY_INSTALL_RETRIES", retries.to_string());
+        }
+        Ok(spec)
     }
 
     pub fn install_modules_spec(
@@ -462,8 +506,10 @@ impl UnityCli {
         architecture: Option<&str>,
         modules: &[String],
         accept_eula: bool,
+        options: &ModuleInstallOptions,
     ) -> Result<CommandSpec, UnityError> {
-        let parts = install_modules_parts(version, architecture, modules, accept_eula)?;
+        let parts =
+            install_modules_parts_with(version, architecture, modules, accept_eula, options)?;
         self.spec(&parts, "ndjson")
     }
 
@@ -593,14 +639,95 @@ impl UnityCli {
     }
 
     pub fn self_update_check(&self) -> Result<CliUpdateInfo, UnityError> {
-        let executed = self.run_args(&svec(&["self-update", "--check"]), "json")?;
+        self.self_update_check_on(None)
+    }
+
+    /// Reads `unity self-update --check [--channel stable|beta]`.
+    pub fn self_update_check_on(&self, channel: Option<&str>) -> Result<CliUpdateInfo, UnityError> {
+        let parts = self_update_check_parts(channel)?;
+        let executed = self.run_args(&parts, "json")?;
         let mut info: CliUpdateInfo = parse_data(executed.envelope)?;
         info.update_available = info.current_version != info.latest_version;
         Ok(info)
     }
 
+    /// Builds the `--check` read. No other self-update flag is ever added.
+    pub fn self_update_check_spec(&self, channel: Option<&str>) -> Result<CommandSpec, UnityError> {
+        let parts = self_update_check_parts(channel)?;
+        self.spec(&parts, "json")
+    }
+
+    /// Reads the release notes for the version an update would install.
+    ///
+    /// `--changelog` is its own mode; `--target` and `--channel` narrow which
+    /// release it describes. It is never combined with `--rollback`.
+    pub fn self_update_changelog(
+        &self,
+        target: Option<&str>,
+        channel: Option<&str>,
+    ) -> Result<RawChangelog, UnityError> {
+        let parts = self_update_changelog_parts(target, channel)?;
+        let executed = self.run_args(&parts, "json")?;
+        parse_data(executed.envelope)
+    }
+
+    pub fn self_update_changelog_spec(
+        &self,
+        target: Option<&str>,
+        channel: Option<&str>,
+    ) -> Result<CommandSpec, UnityError> {
+        let parts = self_update_changelog_parts(target, channel)?;
+        self.spec(&parts, "json")
+    }
+
+    /// Reads `unity self-update --dry-run [--target] [--channel]`.
+    ///
+    /// The preview is a read: it downloads nothing and changes no binary.
+    pub fn self_update_dry_run(
+        &self,
+        target: Option<&str>,
+        channel: Option<&str>,
+    ) -> Result<Value, UnityError> {
+        let parts = self_update_preview_parts(target, channel)?;
+        let executed = self.run_args(&parts, "json")?;
+        Ok(executed.envelope.data.unwrap_or(Value::Null))
+    }
+
+    pub fn self_update_dry_run_spec(
+        &self,
+        target: Option<&str>,
+        channel: Option<&str>,
+    ) -> Result<CommandSpec, UnityError> {
+        let parts = self_update_preview_parts(target, channel)?;
+        self.spec(&parts, "json")
+    }
+
+    /// The original no-argument apply command, unchanged.
     pub fn self_update_spec(&self) -> Result<CommandSpec, UnityError> {
-        self.spec(&svec(&["self-update", "--yes"]), "ndjson")
+        self.self_update_apply_spec(None, None)
+    }
+
+    /// Builds `unity self-update --yes [--target] [--channel]` as a job.
+    pub fn self_update_apply_spec(
+        &self,
+        target: Option<&str>,
+        channel: Option<&str>,
+    ) -> Result<CommandSpec, UnityError> {
+        let parts = self_update_apply_parts(target, channel)?;
+        self.spec(&parts, "ndjson")
+    }
+
+    /// Builds `unity self-update --rollback [version] --yes` as a job.
+    ///
+    /// A rollback is deliberately its own argv: no `--dry-run`, `--check`,
+    /// `--changelog`, `--target` or `--channel` can ever be added, because
+    /// beta.17 refuses that combination with `BAD_ARGS` and changes nothing.
+    pub fn self_update_rollback_spec(
+        &self,
+        version: Option<&str>,
+    ) -> Result<CommandSpec, UnityError> {
+        let parts = self_update_rollback_parts(version)?;
+        self.spec(&parts, "ndjson")
     }
 }
 
@@ -1118,12 +1245,52 @@ pub fn install_parts(
     headless: bool,
     accept_eula: bool,
 ) -> Result<Vec<String>, UnityError> {
+    install_parts_with(
+        version,
+        architecture,
+        modules,
+        headless,
+        accept_eula,
+        &InstallOptions::default(),
+    )
+}
+
+/// Builds the complete `unity install` argv.
+///
+/// The Advanced flags are appended only when their field is set, so the
+/// no-Advanced command keeps exactly the old byte sequence.
+pub fn install_parts_with(
+    version: &str,
+    architecture: Option<&str>,
+    modules: &[String],
+    headless: bool,
+    accept_eula: bool,
+    options: &InstallOptions,
+) -> Result<Vec<String>, UnityError> {
     validate_editor_version(version)?;
     if headless && !headless_editor_supported() {
         return Err(UnityError::invalid_input(
             "The headless Editor is only available on Linux.",
         ));
     }
+    // These combinations are usage errors in beta.17; refuse them before the
+    // user sees a consent dialog for a command the CLI will reject.
+    if options.download_only && (options.resume || options.set_default) {
+        return Err(UnityError::invalid_input(
+            "Download-only cannot be combined with resume or set-default.",
+        ));
+    }
+    if options.resume && options.set_default {
+        return Err(UnityError::invalid_input(
+            "Resume cannot be combined with set-default.",
+        ));
+    }
+    if options.timeout_secs == Some(0) {
+        return Err(UnityError::invalid_input(
+            "The install timeout must be greater than zero seconds.",
+        ));
+    }
+
     let mut parts = svec(&["install", version, "--yes"]);
     // The CLI resolves the host build when `--architecture` is absent. Only
     // name a build when the user actually chose one, so the single-build
@@ -1136,6 +1303,21 @@ pub fn install_parts(
     }
     if accept_eula {
         parts.push("--accept-eula".to_string());
+    }
+    if options.resume {
+        parts.push("--resume".to_string());
+    }
+    if options.download_only {
+        parts.push("--download-only".to_string());
+    }
+    if options.no_wait {
+        parts.push("--no-wait".to_string());
+    }
+    if let Some(timeout) = options.timeout_secs {
+        parts.extend(["--timeout".to_string(), timeout.to_string()]);
+    }
+    if options.set_default {
+        parts.push("--set-default".to_string());
     }
     Ok(parts)
 }
@@ -1201,11 +1383,28 @@ fn open_project_parts(path: &str) -> Result<Vec<String>, UnityError> {
     Ok(svec(&["open", &project]))
 }
 
+#[cfg(test)]
 fn install_modules_parts(
     version: &str,
     architecture: Option<&str>,
     modules: &[String],
     accept_eula: bool,
+) -> Result<Vec<String>, UnityError> {
+    install_modules_parts_with(
+        version,
+        architecture,
+        modules,
+        accept_eula,
+        &ModuleInstallOptions::default(),
+    )
+}
+
+fn install_modules_parts_with(
+    version: &str,
+    architecture: Option<&str>,
+    modules: &[String],
+    accept_eula: bool,
+    options: &ModuleInstallOptions,
 ) -> Result<Vec<String>, UnityError> {
     validate_editor_version(version)?;
     if modules.is_empty() {
@@ -1223,7 +1422,81 @@ fn install_modules_parts(
     if accept_eula {
         parts.push("--accept-eula".to_string());
     }
+    if let Some(retries) = options.retries {
+        parts.extend(["--retries".to_string(), retries.to_string()]);
+    }
+    if let Some(directory) = &options.download_directory {
+        let directory = validate_download_directory(directory)?.unwrap_or_default();
+        if !directory.is_empty() {
+            parts.extend(["--download-directory".to_string(), directory]);
+        }
+    }
     Ok(parts)
+}
+
+fn self_update_check_parts(channel: Option<&str>) -> Result<Vec<String>, UnityError> {
+    let mut parts = svec(&["self-update", "--check"]);
+    append_update_channel(&mut parts, channel)?;
+    Ok(parts)
+}
+
+fn self_update_changelog_parts(
+    target: Option<&str>,
+    channel: Option<&str>,
+) -> Result<Vec<String>, UnityError> {
+    let mut parts = svec(&["self-update", "--changelog"]);
+    append_update_target(&mut parts, target)?;
+    append_update_channel(&mut parts, channel)?;
+    Ok(parts)
+}
+
+fn self_update_preview_parts(
+    target: Option<&str>,
+    channel: Option<&str>,
+) -> Result<Vec<String>, UnityError> {
+    let mut parts = svec(&["self-update", "--dry-run"]);
+    append_update_target(&mut parts, target)?;
+    append_update_channel(&mut parts, channel)?;
+    Ok(parts)
+}
+
+fn self_update_apply_parts(
+    target: Option<&str>,
+    channel: Option<&str>,
+) -> Result<Vec<String>, UnityError> {
+    let mut parts = svec(&["self-update", "--yes"]);
+    append_update_target(&mut parts, target)?;
+    append_update_channel(&mut parts, channel)?;
+    Ok(parts)
+}
+
+fn self_update_rollback_parts(version: Option<&str>) -> Result<Vec<String>, UnityError> {
+    let mut parts = svec(&["self-update", "--rollback"]);
+    if let Some(version) = version.map(str::trim).filter(|value| !value.is_empty()) {
+        validate_cli_version(version)?;
+        parts.push(version.to_string());
+    }
+    // The GUI owns the confirmation; the child must never prompt. The only
+    // self-update flags in this argv are `--rollback` and the optional version.
+    parts.push("--yes".to_string());
+    Ok(parts)
+}
+
+fn append_update_target(parts: &mut Vec<String>, target: Option<&str>) -> Result<(), UnityError> {
+    let Some(target) = target.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(());
+    };
+    validate_cli_version(target)?;
+    parts.extend(["--target".to_string(), target.to_string()]);
+    Ok(())
+}
+
+fn append_update_channel(parts: &mut Vec<String>, channel: Option<&str>) -> Result<(), UnityError> {
+    let Some(channel) = validate_update_channel(channel.unwrap_or_default())? else {
+        return Ok(());
+    };
+    parts.extend(["--channel".to_string(), channel]);
+    Ok(())
 }
 
 fn auth_status_from_error(error: &UnityError) -> Option<AuthStatus> {
@@ -1774,6 +2047,273 @@ mod tests {
         assert_eq!(parts[1], project);
         assert!(!parts.contains(&"--wait".to_string()));
         assert!(!parts.contains(&"--accept-upgrades".to_string()));
+    }
+
+    #[test]
+    fn install_advanced_options_add_only_the_requested_flags() {
+        let modules = vec!["linux-il2cpp".to_string()];
+        let options = InstallOptions {
+            resume: true,
+            download_only: false,
+            no_wait: true,
+            timeout_secs: None,
+            set_default: false,
+            retries: None,
+        };
+        assert_eq!(
+            install_parts_with("6000.6.6f1", Some("arm64"), &modules, false, true, &options)
+                .unwrap(),
+            svec(&[
+                "install",
+                "6000.6.6f1",
+                "--yes",
+                "--architecture",
+                "arm64",
+                "-m",
+                "linux-il2cpp",
+                "--accept-eula",
+                "--resume",
+                "--no-wait",
+            ])
+        );
+
+        let download_only = InstallOptions {
+            download_only: true,
+            ..InstallOptions::default()
+        };
+        let parts = install_parts_with("lts", None, &[], false, false, &download_only).unwrap();
+        assert_eq!(parts, svec(&["install", "lts", "--yes", "--download-only"]));
+
+        let timeout = InstallOptions {
+            timeout_secs: Some(600),
+            ..InstallOptions::default()
+        };
+        assert_eq!(
+            install_parts_with("lts", None, &[], false, false, &timeout).unwrap(),
+            svec(&["install", "lts", "--yes", "--timeout", "600"])
+        );
+
+        let set_default = InstallOptions {
+            set_default: true,
+            ..InstallOptions::default()
+        };
+        assert_eq!(
+            install_parts_with("lts", None, &[], false, false, &set_default).unwrap(),
+            svec(&["install", "lts", "--yes", "--set-default"])
+        );
+    }
+
+    #[test]
+    fn install_refuses_combinations_the_cli_calls_bad_args() {
+        let download_only_resume = InstallOptions {
+            download_only: true,
+            resume: true,
+            ..InstallOptions::default()
+        };
+        assert_eq!(
+            install_parts_with("lts", None, &[], false, false, &download_only_resume)
+                .unwrap_err()
+                .code,
+            "INVALID_INPUT"
+        );
+
+        let download_only_default = InstallOptions {
+            download_only: true,
+            set_default: true,
+            ..InstallOptions::default()
+        };
+        assert!(
+            install_parts_with("lts", None, &[], false, false, &download_only_default).is_err()
+        );
+
+        let resume_default = InstallOptions {
+            resume: true,
+            set_default: true,
+            ..InstallOptions::default()
+        };
+        assert!(install_parts_with("lts", None, &[], false, false, &resume_default).is_err());
+    }
+
+    #[test]
+    fn install_retries_go_through_the_environment_not_argv() {
+        let path = std::env::temp_dir().join(format!(
+            "unity-rust-hub-cli-test-{}-retries",
+            std::process::id()
+        ));
+        std::fs::write(&path, b"test").unwrap();
+
+        let cli = UnityCli::new();
+        cli.set_override_path(Some(path.clone()));
+        let spec = cli
+            .install_editor_spec(
+                "lts",
+                None,
+                &[],
+                false,
+                false,
+                &InstallOptions {
+                    retries: Some(0),
+                    ..InstallOptions::default()
+                },
+            )
+            .expect("install spec");
+        std::fs::remove_file(path).ok();
+
+        assert!(!spec.args.iter().any(|arg| arg == "--retries"));
+        assert!(spec
+            .env
+            .iter()
+            .any(|(key, value)| key == "UNITY_INSTALL_RETRIES" && value == "0"));
+    }
+
+    #[test]
+    fn install_modules_advanced_options_name_retries_and_the_download_directory() {
+        let options = ModuleInstallOptions {
+            retries: Some(3),
+            download_directory: Some("./.unity".to_string()),
+        };
+        assert_eq!(
+            install_modules_parts_with(
+                "6000.6.6f1",
+                Some("x86_64"),
+                &["android".to_string()],
+                true,
+                &options
+            )
+            .unwrap(),
+            svec(&[
+                "install-modules",
+                "--editor-version",
+                "6000.6.6f1",
+                "--yes",
+                "--architecture",
+                "x86_64",
+                "-m",
+                "android",
+                "--accept-eula",
+                "--retries",
+                "3",
+                "--download-directory",
+                "./.unity",
+            ])
+        );
+
+        let no_retries = ModuleInstallOptions {
+            retries: Some(0),
+            ..ModuleInstallOptions::default()
+        };
+        let parts = install_modules_parts_with(
+            "6000.6.6f1",
+            None,
+            &["android".to_string()],
+            false,
+            &no_retries,
+        )
+        .unwrap();
+        assert!(parts.windows(2).any(|pair| pair == ["--retries", "0"]));
+    }
+
+    #[test]
+    fn self_update_reads_and_applies_name_only_the_requested_flags() {
+        let path = std::env::temp_dir().join(format!(
+            "unity-rust-hub-cli-test-{}-self-update",
+            std::process::id()
+        ));
+        std::fs::write(&path, b"test").unwrap();
+
+        let cli = UnityCli::new();
+        cli.set_override_path(Some(path.clone()));
+
+        let check = cli
+            .self_update_check_spec(Some("beta"))
+            .expect("check spec");
+        assert_eq!(
+            &check.args[..4],
+            &["self-update", "--check", "--channel", "beta"]
+        );
+
+        let changelog = cli
+            .self_update_changelog_spec(Some("1.0.0-beta.18"), Some("beta"))
+            .expect("changelog spec");
+        assert_eq!(
+            &changelog.args[..6],
+            &[
+                "self-update",
+                "--changelog",
+                "--target",
+                "1.0.0-beta.18",
+                "--channel",
+                "beta"
+            ]
+        );
+
+        let preview = cli
+            .self_update_dry_run_spec(None, Some("stable"))
+            .expect("dry-run spec");
+        assert_eq!(
+            &preview.args[..4],
+            &["self-update", "--dry-run", "--channel", "stable"]
+        );
+        assert!(!preview.args.iter().any(|arg| arg == "--yes"));
+
+        let apply = cli
+            .self_update_apply_spec(Some("1.0.0-beta.18"), Some("beta"))
+            .expect("apply spec");
+        assert_eq!(
+            &apply.args[..6],
+            &[
+                "self-update",
+                "--yes",
+                "--target",
+                "1.0.0-beta.18",
+                "--channel",
+                "beta"
+            ]
+        );
+        assert_eq!(
+            cli.self_update_spec().expect("default apply").args[..2],
+            ["self-update".to_string(), "--yes".to_string()]
+        );
+
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn rollback_is_its_own_argv_and_never_joins_a_refused_flag() {
+        let path = std::env::temp_dir().join(format!(
+            "unity-rust-hub-cli-test-{}-rollback",
+            std::process::id()
+        ));
+        std::fs::write(&path, b"test").unwrap();
+
+        let cli = UnityCli::new();
+        cli.set_override_path(Some(path.clone()));
+
+        let latest = cli
+            .self_update_rollback_spec(None)
+            .expect("latest rollback spec");
+        assert_eq!(&latest.args[..3], &["self-update", "--rollback", "--yes"]);
+
+        let named = cli
+            .self_update_rollback_spec(Some("1.0.0-beta.16"))
+            .expect("named rollback spec");
+        assert_eq!(
+            &named.args[..4],
+            &["self-update", "--rollback", "1.0.0-beta.16", "--yes"]
+        );
+        for refused in [
+            "--dry-run",
+            "--check",
+            "--changelog",
+            "--target",
+            "--channel",
+        ] {
+            assert!(
+                !named.args.iter().any(|arg| arg == refused),
+                "{refused} must never join --rollback"
+            );
+        }
+        std::fs::remove_file(path).ok();
     }
 
     #[test]

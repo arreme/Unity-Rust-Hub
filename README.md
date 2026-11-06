@@ -63,8 +63,12 @@ update target.
 ## Features
 
 - **CLI lifecycle** — detect the executable, show version/channel/platform, check for
-  updates, install the CLI with Unity's official per-platform script, self-update, and
-  sign in to Unity with `unity auth login`.
+  updates, install the CLI with Unity's official per-platform script, self-update with a
+  target and channel, and sign in to Unity with `unity auth login`. The update card loads
+  the target release notes before enabling Apply. A confirmed rollback restores the most
+  recent kept version (or one you name); it never combines `--rollback` with `--check`,
+  `--changelog`, `--target`, `--channel`, or `--dry-run`, and the CLI's `BAD_ARGS` response
+  is rendered with its code if a refused combination ever reaches it.
 - **Editors** — installed builds with modules, Linux/macOS/Windows architecture,
   default-Editor state, and the install location. A row is one `(version, architecture)`
   build, so an `arm64` and an `x86_64` Editor of the same version appear separately; each
@@ -82,9 +86,19 @@ update target.
   exact command they had. On Linux the same card can install the headless Editor
   (`--headless`), which runs without a display. Installing a second build of a version is
   allowed, with a warning that both stay on disk and projects pinned to one keep using it.
+- **Install resilience** — a collapsed **Advanced** area adds `--resume`,
+  `--download-only`, `--no-wait`, `--timeout <seconds>`, `--set-default`, and
+  `UNITY_INSTALL_RETRIES`; the exact command is shown under the card. The default command
+  stays byte-identical while Advanced is untouched. No-wait and timeout clear each other
+  and explain the lock conflict, and the CLI-refused resume/download-only/set-default
+  combinations are cleared in the UI too. A failed or interrupted download offers
+  **Resume** when the CLI reports a cache/interrupted state (or you choose `--resume`),
+  reusing exactly the same build, modules, and cache. Download-only reports the folder the
+  files landed in and registers no Editor.
 - **Modules** — add modules to an installed Editor with `install-modules`, pinned to the
   architecture of the row you opened (`--architecture`) so an `arm64` and an `x86_64`
-  build of the same version never get mixed up.
+  build of the same version never get mixed up. Advanced module options set
+  `--retries <n>` (0 disables) and `--download-directory` for a portable install.
 - **Editor maintenance** — `unity editors prune` runs report-only first and lists
   every candidate with version, architecture, size (when the CLI reports it), reason,
   and path, plus the CLI's reclaimable total. `--remove` is a streamed job behind a

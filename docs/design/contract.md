@@ -91,6 +91,11 @@ fixture when a new state needs review.
 - CLI card: resolving, missing CLI with install callout, installed details,
   update available, update-check failure, CLI read error, re-check/settings
   actions.
+- CLI update flow (inside the CLI card): channel picker (stable/beta), target
+  version input (empty = newest on the channel), **Load release notes**,
+  **Preview (--dry-run)**, **Apply update**, and **Roll back…**. The target
+  release notes are shown before Apply is enabled. The dry-run preview is a
+  read. A failed preview or changelog read keeps its own Retry.
 - Account card: checking sign-in, signed in, signed out, expired session,
   sign-in error; license active/inactive, no licenses, license read error.
 - Running Editors: loading, none, one/many, read error.
@@ -108,6 +113,21 @@ fixture when a new state needs review.
   headless option on Linux with the CLI's availability note, EULA, preview
   loading/ready/raw fallback with the resolved architecture, second-build
   warning, install enabled and disabled.
+- Advanced install area (collapsed by default): `--resume`, `--download-only`,
+  `--no-wait`, `--timeout <seconds>`, `--set-default`, plus the
+  `UNITY_INSTALL_RETRIES` count. The exact `unity install` command is shown
+  below. No-wait and timeout clear each other with an explanation of the lock
+  conflict; resume, download-only, and set-default clear the combinations the
+  CLI refuses with `BAD_ARGS`. Invalid timeout/retry text disables install and
+  shows why.
+- Resume offer: after a failed/interrupted install whose CLI result reports a
+  cache or an interruption class, a warning card names the version and build,
+  explains that the cache is reused, and offers **Resume install**. It is
+  consumed when clicked; the resumed command keeps the original build, modules,
+  and EULA but never grows download-only, set-default, no-wait, or timeout.
+- Download-only report: a success card names the folder the CLI reported under
+  `data.path`, says nothing was installed or registered, and does not add an
+  installed row.
 - Available releases: loading, error, empty, installed badge (matched on
   version and architecture), use action that selects the build, stream tones.
 - Maintenance card: last prune report summary (unused count and reclaimable
@@ -184,7 +204,14 @@ fixture when a new state needs review.
   disabled/enabled run action.
 - Editor modules: installed module list for one build (version + architecture),
   available module loading/error/empty/loaded, selection count, EULA,
-  disabled/enabled install.
+  `--retries <n>` (0 disables), optional portable `--download-directory`, the
+  exact command, disabled/enabled install.
+- CLI rollback: names the kept version being restored (or "the most recent kept
+  CLI version" when the field is empty), the exact rollback command, and a
+  confirmation checkbox. The command contains only `--rollback [version]`
+  plus `--yes`; no check/changelog/target/channel/dry-run flag is ever added.
+  A `BAD_ARGS` job failure keeps the dialog open and renders the code plus its
+  copy-the-command action.
 - Project upgrade: current version/path with its architecture, target version
   picker (one entry per installed version, because the CLI upgrades by version),
   a note naming any target version with two installed builds, no target
@@ -253,11 +280,60 @@ Gallery fixtures: `Editors · default cleared`, `Modal · prune candidates`,
 `Modal · verify loading`, `Modal · verify all passed`,
 `Modal · verify failed read`.
 
+## Install resilience and CLI rollback contract
+
+`InstallEditorVm` carries `advanced: InstallAdvancedVm`, the exact
+`command_preview`, `resume_offer: Option<ResumeInstallVm>`, and
+`download_report: Option<String>`.
+
+- `InstallAdvancedVm { expanded, resume, download_only, no_wait,
+  timeout_input, set_default, retries_input, conflict_note, timeout_error,
+  retries_error, can_install }`. All flags default off so the untouched command
+  stays `unity install <version> --yes` plus the standard machine flags.
+- `ResumeInstallVm { version, architecture, reason, can_resume }`. The
+  controller only creates it after a failed/cancelled `editor-install` whose
+  error code is an interruption/timeout/network class or whose terminal result
+  reports `resumable`, `resumeAvailable`, `interrupted`, or a cache path.
+  Download-only failures never offer it, because resuming as a normal install
+  would break the "installs nothing" promise.
+- `EditorModulesVm` adds `retries_input`, `download_directory`,
+  `retries_error`, and `command_preview`; the adapter appends `--retries <n>`
+  and `--download-directory <dir>` only when set.
+- `OverviewVm::update_flow: CliUpdateFlowVm` carries the channel, target input,
+  `LoadState<CliChangelogVm>`, `LoadState<String>` dry-run preview, the three
+  exact command previews, `can_apply`, and `apply_blocked_reason`. `can_apply`
+  is false until the target changelog is `Ready`; changing target or channel
+  clears both reads.
+- `ModalVm::RollbackCli(RollbackCliVm)` carries `version_input`,
+  `restore_label`, `confirmed`, `can_rollback`, `command`, the failed-run
+  `error`, and `job_running`.
+
+Actions: `InstallAdvancedToggled`, `InstallResumeToggled`,
+`InstallDownloadOnlyToggled`, `InstallNoWaitToggled`, `InstallTimeoutChanged`,
+`InstallSetDefaultToggled`, `InstallRetriesChanged`, `ResumeInstallEditor`,
+`DialogRetriesChanged`, `DialogDownloadDirectoryChanged`,
+`CliUpdateChannelChanged`, `CliUpdateTargetChanged`, `LoadCliUpdateChangelog`,
+`PreviewCliUpdate`, `StartCliUpdate`, `OpenCliRollback`,
+`CliRollbackVersionChanged`, `CliRollbackConfirmed`, `StartCliRollback`.
+
+The CLI builders live in `unity-core::runner`:
+`install_editor_spec(..., &InstallOptions)`,
+`install_modules_spec(..., &ModuleInstallOptions)`,
+`self_update_check_on`, `self_update_changelog(_spec)`,
+`self_update_dry_run(_spec)`, `self_update_apply_spec`, and
+`self_update_rollback_spec`. `unity install` has no `--retries`, so the retry
+count is passed only as the `UNITY_INSTALL_RETRIES` child environment;
+`install-modules` uses the flag. Secrets never enter argv.
+
+Gallery fixtures: `Editors · advanced install options`,
+`Editors · resume offered`, `Editors · download-only finished`,
+`Overview · CLI update flow`, `Modal · CLI rollback`, and
+`Modal · CLI rollback BAD_ARGS`.
+
 ## Advisory contract
 
 `ShellVm::advisories: Vec<AdvisoryVm>` is the single surface every CLI advisory
-uses; later pages (#7 install resilience, #9 plugins) reuse it instead of
-drawing their own banners.
+uses; later pages (#9 plugins) reuse it instead of drawing their own banners.
 
 - `AdvisoryVm { id, tone, title, message, detail, command, run_label,
   requires_approval, dismissible }`.

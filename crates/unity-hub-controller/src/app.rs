@@ -15,19 +15,19 @@ use unity_core::models::{
 };
 use unity_core::{
     AdvisoryOrigin, CliAdvisory, CommandSpec, DiagnoseTopic as CliDiagnose, DoctorRead,
-    EditorVerifyRead, UnityCli, UnityError,
+    EditorVerifyRead, InstallOptions, ModuleInstallOptions, UnityCli, UnityError,
 };
 use unity_hub_model::{
     AccountCardVm, AdvisoryVm, ArchitectureOptionVm, AuthVm, BadgeVm, BreakingChangeVm,
-    ChangelogDataVm, ChangelogSectionVm, ChangelogVm, CheckStatus, CliCardVm, CliConnectionVm,
-    CliDetailsVm, DiagnoseReportVm, DiagnoseTopic, DiagnosticsVm, DoctorCheckVm, DoctorVm,
-    EditorModulesVm, EditorRowVm, EditorsVm, EnvironmentVm, ErrorActionKind, ErrorActionVm,
-    InstallCliVm, InstallEditorVm, InstallPreviewVm, JobLogVm, JobPhase, JobVm, LicenseRowVm,
-    LicenseVm, LoadState, ModalVm, ModuleOptionVm, NoticeVm, OverviewVm, Page, PageVm,
-    ProjectRowVm, ProjectsVm, ProxyVm, PruneCandidateVm, PruneEditorsVm, PruneReportVm,
-    ReleaseRowVm, RunningEditorVm, SectionKind, SettingsVm, ShellVm, TextScaleOptionVm, Tone,
-    UiAction, UiError, UpdateVm, UpgradeProjectVm, VerifyCheckVm, VerifyEditorVm, VerifyResultVm,
-    ViewModel,
+    ChangelogDataVm, ChangelogSectionVm, ChangelogVm, CheckStatus, CliCardVm, CliChangelogVm,
+    CliConnectionVm, CliDetailsVm, CliUpdateFlowVm, DiagnoseReportVm, DiagnoseTopic, DiagnosticsVm,
+    DoctorCheckVm, DoctorVm, EditorModulesVm, EditorRowVm, EditorsVm, EnvironmentVm,
+    ErrorActionKind, ErrorActionVm, InstallAdvancedVm, InstallCliVm, InstallEditorVm,
+    InstallPreviewVm, JobLogVm, JobPhase, JobVm, LicenseRowVm, LicenseVm, LoadState, ModalVm,
+    ModuleOptionVm, NoticeVm, OverviewVm, Page, PageVm, ProjectRowVm, ProjectsVm, ProxyVm,
+    PruneCandidateVm, PruneEditorsVm, PruneReportVm, ReleaseRowVm, ResumeInstallVm, RollbackCliVm,
+    RunningEditorVm, SectionKind, SettingsVm, ShellVm, TextScaleOptionVm, Tone, UiAction, UiError,
+    UpdateVm, UpgradeProjectVm, VerifyCheckVm, VerifyEditorVm, VerifyResultVm, ViewModel,
 };
 
 use crate::jobs::{JobManager, JobStarted, JobState, StreamKind};
@@ -47,6 +47,7 @@ pub enum Modal {
         version: String,
         architecture: String,
     },
+    RollbackCli,
 }
 
 #[derive(Debug, Clone)]
@@ -121,6 +122,8 @@ pub enum ReadKind {
     DiagnoseUpdate,
     Prune,
     EditorVerify,
+    CliChangelog,
+    CliDryRun,
 }
 
 impl ReadKind {
@@ -146,6 +149,8 @@ impl ReadKind {
             Self::DiagnoseUpdate => "read:diagnose-update",
             Self::Prune => "read:prune",
             Self::EditorVerify => "read:editor-verify",
+            Self::CliChangelog => "read:cli-changelog",
+            Self::CliDryRun => "read:cli-dry-run",
         }
     }
 }
@@ -173,6 +178,14 @@ pub enum RetryRequest {
     EditorVerify {
         version: String,
         architecture: String,
+    },
+    CliChangelog {
+        target: Option<String>,
+        channel: Option<String>,
+    },
+    CliDryRun {
+        target: Option<String>,
+        channel: Option<String>,
     },
 }
 
@@ -342,6 +355,9 @@ pub struct ActiveJob {
     pub message: Option<String>,
     pub logs: VecDeque<LogLine>,
     pub error: Option<UnityError>,
+    /// The terminal NDJSON `result` frame, kept so a download can report where
+    /// its files landed and a failed install can prove a cache is resumable.
+    pub result: Option<Value>,
 }
 
 impl ActiveJob {
@@ -355,12 +371,30 @@ impl ActiveJob {
             message: None,
             logs: VecDeque::new(),
             error: None,
+            result: None,
         }
     }
 
     fn is_running(&self) -> bool {
         self.state == JobState::Running
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstallRequest {
+    pub version: String,
+    pub architecture: Option<String>,
+    pub modules: Vec<String>,
+    pub headless: bool,
+    pub accept_eula: bool,
+    pub options: InstallOptions,
+}
+
+/// A resume action remembered from the last interrupted install.
+#[derive(Debug, Clone)]
+pub struct ResumeOffer {
+    pub request: InstallRequest,
+    pub reason: String,
 }
 
 pub struct App {
@@ -370,6 +404,13 @@ pub struct App {
     pub page: Page,
     pub cli_status: Loadable<CliStatus>,
     pub update: Loadable<CliUpdateInfo>,
+    pub update_channel: String,
+    pub update_target: String,
+    pub update_changelog: Loadable<unity_core::models::RawChangelog>,
+    pub update_dry_run: Loadable<String>,
+    pub rollback_target: String,
+    pub rollback_confirmed: bool,
+    pub rollback_error: Option<UnityError>,
     pub auth: Loadable<AuthStatus>,
     pub license: Loadable<LicenseStatus>,
     pub running: Loadable<RunningEditors>,
@@ -411,6 +452,21 @@ pub struct App {
     pub selected_modules: BTreeSet<String>,
     pub install_headless: bool,
     pub accept_eula: bool,
+    pub install_advanced_expanded: bool,
+    pub install_resume: bool,
+    pub install_download_only: bool,
+    pub install_no_wait: bool,
+    pub install_timeout: String,
+    pub install_set_default: bool,
+    pub install_retries: String,
+    pub install_advanced_note: Option<String>,
+    /// The request the last editor-install job started with, so Resume reuses
+    /// exactly the same build, modules and cache.
+    pub last_install: Option<InstallRequest>,
+    pub resume_offer: Option<ResumeOffer>,
+    pub download_report: Option<String>,
+    pub dialog_retries: String,
+    pub dialog_download_directory: String,
     pub preview: Option<InstallPreview>,
     pub preview_raw: Option<Value>,
     pub preview_error: Option<UiError>,
@@ -456,6 +512,15 @@ pub enum Message {
     CliConsentToggled(bool),
     InstallCli,
     UpdateCli,
+    CliUpdateChannelChanged(String),
+    CliUpdateTargetChanged(String),
+    LoadCliUpdateChangelog,
+    PreviewCliUpdate,
+    StartCliUpdate,
+    OpenCliRollback,
+    CliRollbackVersionChanged(String),
+    CliRollbackConfirmed(bool),
+    StartCliRollback,
     InstallVersionChanged(String),
     InstallArchitectureChanged(Option<String>),
     LoadModules,
@@ -465,6 +530,16 @@ pub enum Message {
     AcceptEulaToggled(bool),
     PreviewInstall,
     StartInstallEditor,
+    InstallAdvancedToggled(bool),
+    InstallResumeToggled(bool),
+    InstallDownloadOnlyToggled(bool),
+    InstallNoWaitToggled(bool),
+    InstallTimeoutChanged(String),
+    InstallSetDefaultToggled(bool),
+    InstallRetriesChanged(String),
+    ResumeInstallEditor,
+    DialogRetriesChanged(String),
+    DialogDownloadDirectoryChanged(String),
     UseRelease(String, String),
     OpenModules(String, String),
     SetDefaultEditor(String, String),
@@ -509,6 +584,8 @@ pub enum Message {
     PreviewLoaded(Result<Value, UnityError>),
     ChangelogLoaded(Result<ChangelogView, UnityError>),
     RawChangelogLoaded(Result<String, UnityError>),
+    CliChangelogLoaded(Result<unity_core::models::RawChangelog, UnityError>),
+    CliDryRunLoaded(Result<Value, UnityError>),
     DoctorLoaded(Result<DoctorRead, UnityError>),
     EnvironmentLoaded(Result<EnvironmentInfo, UnityError>),
     DiagnoseProxyLoaded(Result<String, UnityError>),
@@ -544,6 +621,17 @@ impl From<UiAction> for Message {
             UiAction::CliConsentToggled(value) => Self::CliConsentToggled(value),
             UiAction::InstallCli => Self::InstallCli,
             UiAction::UpdateCli => Self::UpdateCli,
+            UiAction::CliUpdateChannelChanged(channel) => Self::CliUpdateChannelChanged(channel),
+            UiAction::CliUpdateTargetChanged(target) => Self::CliUpdateTargetChanged(target),
+            UiAction::LoadCliUpdateChangelog => Self::LoadCliUpdateChangelog,
+            UiAction::PreviewCliUpdate => Self::PreviewCliUpdate,
+            UiAction::StartCliUpdate => Self::StartCliUpdate,
+            UiAction::OpenCliRollback => Self::OpenCliRollback,
+            UiAction::CliRollbackVersionChanged(version) => {
+                Self::CliRollbackVersionChanged(version)
+            }
+            UiAction::CliRollbackConfirmed(value) => Self::CliRollbackConfirmed(value),
+            UiAction::StartCliRollback => Self::StartCliRollback,
             UiAction::InstallVersionChanged(version) => Self::InstallVersionChanged(version),
             UiAction::InstallArchitectureChanged(architecture) => {
                 Self::InstallArchitectureChanged(architecture)
@@ -555,6 +643,18 @@ impl From<UiAction> for Message {
             UiAction::AcceptEulaToggled(value) => Self::AcceptEulaToggled(value),
             UiAction::PreviewInstall => Self::PreviewInstall,
             UiAction::StartInstallEditor => Self::StartInstallEditor,
+            UiAction::InstallAdvancedToggled(value) => Self::InstallAdvancedToggled(value),
+            UiAction::InstallResumeToggled(value) => Self::InstallResumeToggled(value),
+            UiAction::InstallDownloadOnlyToggled(value) => Self::InstallDownloadOnlyToggled(value),
+            UiAction::InstallNoWaitToggled(value) => Self::InstallNoWaitToggled(value),
+            UiAction::InstallTimeoutChanged(value) => Self::InstallTimeoutChanged(value),
+            UiAction::InstallSetDefaultToggled(value) => Self::InstallSetDefaultToggled(value),
+            UiAction::InstallRetriesChanged(value) => Self::InstallRetriesChanged(value),
+            UiAction::ResumeInstallEditor => Self::ResumeInstallEditor,
+            UiAction::DialogRetriesChanged(value) => Self::DialogRetriesChanged(value),
+            UiAction::DialogDownloadDirectoryChanged(value) => {
+                Self::DialogDownloadDirectoryChanged(value)
+            }
             UiAction::UseRelease(version, architecture) => Self::UseRelease(version, architecture),
             UiAction::OpenEditorModules(version, architecture) => {
                 Self::OpenModules(version, architecture)
@@ -610,6 +710,13 @@ impl App {
             page: Page::Overview,
             cli_status: Loadable::default(),
             update: Loadable::default(),
+            update_channel: "stable".to_string(),
+            update_target: String::new(),
+            update_changelog: Loadable::default(),
+            update_dry_run: Loadable::default(),
+            rollback_target: String::new(),
+            rollback_confirmed: false,
+            rollback_error: None,
             auth: Loadable::default(),
             license: Loadable::default(),
             running: Loadable::default(),
@@ -646,6 +753,19 @@ impl App {
             selected_modules: BTreeSet::new(),
             install_headless: false,
             accept_eula: false,
+            install_advanced_expanded: false,
+            install_resume: false,
+            install_download_only: false,
+            install_no_wait: false,
+            install_timeout: String::new(),
+            install_set_default: false,
+            install_retries: String::new(),
+            install_advanced_note: None,
+            last_install: None,
+            resume_offer: None,
+            download_report: None,
+            dialog_retries: String::new(),
+            dialog_download_directory: String::new(),
             preview: None,
             preview_raw: None,
             preview_error: None,
@@ -743,6 +863,9 @@ impl App {
                         if let Some(version) = &status.version {
                             if version.channel == "beta" || version.channel == "alpha" {
                                 self.cli_channel = version.channel.clone();
+                            }
+                            if version.channel == "beta" || version.channel == "stable" {
+                                self.update_channel = version.channel.clone();
                             }
                         }
                         let installed = status.installed;
@@ -950,6 +1073,32 @@ impl App {
                 }
                 Task::none()
             }
+            Message::CliChangelogLoaded(result) => {
+                match result {
+                    Ok(raw) => {
+                        self.update_changelog.succeeded(raw);
+                        self.clear_retry(ReadKind::CliChangelog);
+                    }
+                    Err(error) => {
+                        self.update_changelog.failed(error);
+                        self.note_read_failed(ReadKind::CliChangelog);
+                    }
+                }
+                Task::none()
+            }
+            Message::CliDryRunLoaded(result) => {
+                match result {
+                    Ok(value) => {
+                        self.update_dry_run.succeeded(pretty_json(&value));
+                        self.clear_retry(ReadKind::CliDryRun);
+                    }
+                    Err(error) => {
+                        self.update_dry_run.failed(error);
+                        self.note_read_failed(ReadKind::CliDryRun);
+                    }
+                }
+                Task::none()
+            }
             Message::DoctorLoaded(result) => {
                 match result {
                     Ok(read) => {
@@ -1133,9 +1282,82 @@ impl App {
                 Task::none()
             }
             Message::UpdateCli => {
-                match self.cli.self_update_spec() {
+                // The Overview shortcut never applies blindly: it selects the
+                // available target and loads its release notes. Apply stays
+                // disabled until those notes have loaded.
+                if let Some(update) = &self.update.data {
+                    if !update.latest_version.trim().is_empty() {
+                        self.update_target = update.latest_version.clone();
+                    }
+                }
+                self.update_changelog = Loadable::default();
+                self.update_dry_run = Loadable::default();
+                self.load_update_changelog()
+            }
+            Message::CliUpdateChannelChanged(channel) => {
+                self.update_channel = channel.clone();
+                self.update_changelog = Loadable::default();
+                self.update_dry_run = Loadable::default();
+                // The badge must describe the selected channel, not whichever
+                // channel the CLI happens to track by default.
+                self.update.begin();
+                load_update_on(self.cli.clone(), Some(channel))
+            }
+            Message::CliUpdateTargetChanged(target) => {
+                self.update_target = target;
+                self.update_changelog = Loadable::default();
+                self.update_dry_run = Loadable::default();
+                Task::none()
+            }
+            Message::LoadCliUpdateChangelog => self.load_update_changelog(),
+            Message::PreviewCliUpdate => self.preview_cli_update(),
+            Message::StartCliUpdate => {
+                if !self.cli_update_can_apply() {
+                    self.notice = Some(Notice::info(
+                        "Load the target release notes before updating the CLI.",
+                    ));
+                    return Task::none();
+                }
+                let target = trimmed_option(&self.update_target);
+                let channel = trimmed_option(&self.update_channel);
+                match self
+                    .cli
+                    .self_update_apply_spec(target.as_deref(), channel.as_deref())
+                {
                     Ok(spec) => {
                         self.start_job("cli-update", spec);
+                    }
+                    Err(error) => {
+                        self.notice = Some(Notice::error(error_text(&error)));
+                    }
+                }
+                Task::none()
+            }
+            Message::OpenCliRollback => {
+                self.rollback_target.clear();
+                self.rollback_confirmed = false;
+                self.rollback_error = None;
+                self.modal = Modal::RollbackCli;
+                Task::none()
+            }
+            Message::CliRollbackVersionChanged(version) => {
+                self.rollback_target = version;
+                self.rollback_confirmed = false;
+                Task::none()
+            }
+            Message::CliRollbackConfirmed(value) => {
+                self.rollback_confirmed = value;
+                Task::none()
+            }
+            Message::StartCliRollback => {
+                if !matches!(self.modal, Modal::RollbackCli) || !self.rollback_confirmed {
+                    return Task::none();
+                }
+                let target = trimmed_option(&self.rollback_target);
+                match self.cli.self_update_rollback_spec(target.as_deref()) {
+                    Ok(spec) => {
+                        self.rollback_error = None;
+                        self.start_job("cli-rollback", spec);
                     }
                     Err(error) => {
                         self.notice = Some(Notice::error(error_text(&error)));
@@ -1218,6 +1440,104 @@ impl App {
                 self.accept_eula = value;
                 Task::none()
             }
+            Message::InstallAdvancedToggled(value) => {
+                self.install_advanced_expanded = value;
+                Task::none()
+            }
+            Message::InstallResumeToggled(value) => {
+                self.install_resume = value;
+                if value {
+                    self.install_download_only = false;
+                    self.install_set_default = false;
+                    self.install_advanced_note = Some(
+                        "Resume reuses the download cache, so download-only and set-default were cleared. Those combinations are usage errors."
+                            .to_string(),
+                    );
+                }
+                Task::none()
+            }
+            Message::InstallDownloadOnlyToggled(value) => {
+                self.install_download_only = value;
+                if value {
+                    self.install_resume = false;
+                    self.install_set_default = false;
+                    self.install_advanced_note = Some(
+                        "Download-only installs nothing and registers nothing, so resume and set-default were cleared."
+                            .to_string(),
+                    );
+                }
+                Task::none()
+            }
+            Message::InstallNoWaitToggled(value) => {
+                self.install_no_wait = value;
+                if value {
+                    self.install_timeout.clear();
+                    self.install_advanced_note = Some(
+                        "No-wait fails immediately when another install holds the lock, so it cleared the timeout. The CLI refuses both at once."
+                            .to_string(),
+                    );
+                }
+                Task::none()
+            }
+            Message::InstallTimeoutChanged(value) => {
+                self.install_no_wait = false;
+                let had_value = !value.trim().is_empty();
+                self.install_timeout = value;
+                if had_value {
+                    self.install_advanced_note = Some(
+                        "A timeout bounds the wait for another install's lock, so it cleared no-wait. The CLI refuses both at once."
+                            .to_string(),
+                    );
+                }
+                Task::none()
+            }
+            Message::InstallSetDefaultToggled(value) => {
+                self.install_set_default = value;
+                if value {
+                    self.install_resume = false;
+                    self.install_download_only = false;
+                    self.install_advanced_note = Some(
+                        "Set-default stores the installed Editor after success; resume and download-only cannot store it, so they were cleared."
+                            .to_string(),
+                    );
+                }
+                Task::none()
+            }
+            Message::InstallRetriesChanged(value) => {
+                self.install_retries = value;
+                Task::none()
+            }
+            Message::ResumeInstallEditor => {
+                let Some(offer) = self.resume_offer.clone() else {
+                    return Task::none();
+                };
+                let mut request = offer.request;
+                request.options = InstallOptions {
+                    resume: true,
+                    // Resume must not grow a fresh lock wait or a default write.
+                    ..InstallOptions::default()
+                };
+                match self.cli.install_editor_spec(
+                    &request.version,
+                    request.architecture.as_deref(),
+                    &request.modules,
+                    request.headless,
+                    request.accept_eula,
+                    &request.options,
+                ) {
+                    Ok(spec) => {
+                        self.last_install = Some(request);
+                        if self.start_job("editor-install", spec) {
+                            self.resume_offer = None;
+                            self.download_report = None;
+                        }
+                    }
+                    Err(error) => {
+                        self.notice = Some(Notice::error(error_text(&error)));
+                    }
+                }
+                Task::none()
+            }
             Message::PreviewInstall => {
                 self.preview_loading = true;
                 self.preview_error = None;
@@ -1250,9 +1570,13 @@ impl App {
                 )
             }
             Message::StartInstallEditor => {
+                let request = self.current_install_request();
                 match self.install_editor_spec() {
                     Ok(spec) => {
                         if self.start_job("editor-install", spec) {
+                            self.last_install = Some(request);
+                            self.download_report = None;
+                            self.resume_offer = None;
                             self.modules.data = None;
                             self.selected_modules.clear();
                             self.install_headless = false;
@@ -1331,6 +1655,7 @@ impl App {
                 self.prune_force = false;
                 self.prune_error = None;
                 self.verify_show_raw = false;
+                self.rollback_confirmed = false;
                 Task::none()
             }
             Message::ToggleDialogModule(id, value) => {
@@ -1345,6 +1670,14 @@ impl App {
                 self.dialog_eula = value;
                 Task::none()
             }
+            Message::DialogRetriesChanged(value) => {
+                self.dialog_retries = value;
+                Task::none()
+            }
+            Message::DialogDownloadDirectoryChanged(value) => {
+                self.dialog_download_directory = value;
+                Task::none()
+            }
             Message::StartInstallModules => {
                 let Modal::EditorModules(editor) = &self.modal else {
                     return Task::none();
@@ -1354,11 +1687,20 @@ impl App {
                 }
                 let modules: Vec<String> = self.dialog_selected.iter().cloned().collect();
                 let architecture = editor.architecture.clone();
+                let version = editor.version.clone();
+                let options = match self.dialog_module_options() {
+                    Ok(options) => options,
+                    Err(error) => {
+                        self.notice = Some(Notice::error(error_text(&error)));
+                        return Task::none();
+                    }
+                };
                 match self.cli.install_modules_spec(
-                    &editor.version,
+                    &version,
                     Some(&architecture),
                     &modules,
                     self.dialog_eula,
+                    &options,
                 ) {
                     Ok(spec) => {
                         if self.start_job("module-install", spec) {
@@ -1935,8 +2277,16 @@ impl App {
                 version,
                 architecture,
             } => self.load_verify(version, architecture),
+            RetryRequest::CliChangelog { target, channel } => {
+                self.load_cli_changelog_with(target, channel)
+            }
+            RetryRequest::CliDryRun { target, channel } => {
+                self.preview_cli_update_with(target, channel)
+            }
             RetryRequest::Read(ReadKind::Modules)
             | RetryRequest::Read(ReadKind::DialogModules)
+            | RetryRequest::Read(ReadKind::CliChangelog)
+            | RetryRequest::Read(ReadKind::CliDryRun)
             | RetryRequest::Read(ReadKind::PreviewInstall) => {
                 // Parameterised reads always use the variants below, which
                 // carry the request they were started with.
@@ -2023,7 +2373,7 @@ impl App {
         const MAX_LOG_CHARS: usize = 1000;
 
         let events = self.jobs.poll();
-        let mut finished: Option<(String, JobState, Option<UnityError>)> = None;
+        let mut finished: Option<(String, JobState, Option<UnityError>, Option<Value>)> = None;
 
         for event in events {
             let Some(job) = self.active_job.as_mut() else {
@@ -2064,17 +2414,32 @@ impl App {
             if event.state != JobState::Running {
                 job.state = event.state;
                 job.error = event.error.clone();
+                job.result = event.result.clone();
                 if event.state == JobState::Succeeded {
                     job.progress = 100.0;
                 }
-                finished = Some((job.kind.clone(), event.state, event.error));
+                finished = Some((job.kind.clone(), event.state, event.error, event.result));
             }
         }
 
-        let Some((kind, state, error)) = finished else {
+        let Some((kind, state, error, result)) = finished else {
             return Task::none();
         };
 
+        self.handle_finished_job(kind, state, error, result)
+    }
+
+    /// Applies the outcome of one finished streamed job.
+    ///
+    /// Kept separate from polling so tests can drive the same state changes
+    /// without spawning a child process.
+    fn handle_finished_job(
+        &mut self,
+        kind: String,
+        state: JobState,
+        error: Option<UnityError>,
+        result: Option<Value>,
+    ) -> Task<Message> {
         match state {
             JobState::Succeeded => {
                 self.notice = Some(Notice::success("Job finished successfully."));
@@ -2092,8 +2457,25 @@ impl App {
             JobState::Running => {}
         }
 
+        if kind == "cli-rollback" {
+            if state == JobState::Succeeded {
+                self.modal = Modal::None;
+                self.rollback_confirmed = false;
+                self.rollback_error = None;
+            } else if let Some(error) = &error {
+                // `BAD_ARGS` is a normal, actionable failure here: the dialog
+                // stays open and the shared error rendering names the code.
+                self.rollback_error = Some(error.clone());
+                self.rollback_confirmed = false;
+            }
+        }
+
+        if kind == "editor-install" {
+            self.note_editor_install_outcome(&kind, state, error.as_ref(), result.as_ref());
+        }
+
         match kind.as_str() {
-            "cli-install" | "cli-update" => {
+            "cli-install" | "cli-update" | "cli-rollback" => {
                 Task::batch(vec![self.refresh_status(), self.load_overview_data(true)])
             }
             "editor-install" | "module-install" | "editor-default" => self.load_editors_page(true),
@@ -2421,6 +2803,174 @@ impl App {
             .collect()
     }
 
+    fn cli_update_flow_vm(&self) -> CliUpdateFlowVm {
+        let target = trimmed_option(&self.update_target);
+        let channel = trimmed_option(&self.update_channel);
+        let changelog = self.load_state(ReadKind::CliChangelog, &self.update_changelog, |raw| {
+            CliChangelogVm {
+                version: raw.version.clone(),
+                text: raw.changelog.trim().to_string(),
+            }
+        });
+        let dry_run = self.load_state(ReadKind::CliDryRun, &self.update_dry_run, |text| {
+            text.clone()
+        });
+        let can_apply = self.cli_update_can_apply();
+        let apply_blocked_reason = if can_apply {
+            None
+        } else if self
+            .active_job
+            .as_ref()
+            .map(ActiveJob::is_running)
+            .unwrap_or(false)
+        {
+            Some("A job is already running.".to_string())
+        } else if target.is_some()
+            && unity_core::versions::validate_cli_version(target.as_deref().unwrap_or_default())
+                .is_err()
+        {
+            Some("Enter `latest` or a version such as 1.0.0-beta.18.".to_string())
+        } else {
+            Some("Load the target release notes before applying the update.".to_string())
+        };
+
+        CliUpdateFlowVm {
+            channel: self.update_channel.clone(),
+            channel_options: vec!["stable".to_string(), "beta".to_string()],
+            target_input: self.update_target.clone(),
+            changelog,
+            dry_run,
+            changelog_command: self.command_preview(
+                self.cli
+                    .self_update_changelog_spec(target.as_deref(), channel.as_deref()),
+                "unity self-update --changelog",
+            ),
+            apply_command: self.command_preview(
+                self.cli
+                    .self_update_apply_spec(target.as_deref(), channel.as_deref()),
+                "unity self-update --yes",
+            ),
+            rollback_command: self.command_preview(
+                self.cli
+                    .self_update_rollback_spec(trimmed_option(&self.rollback_target).as_deref()),
+                "unity self-update --rollback",
+            ),
+            can_apply,
+            apply_blocked_reason,
+        }
+    }
+
+    /// Applying an update is gated on the target release notes: the app never
+    /// replaces the CLI before the user has seen what that target changes.
+    fn cli_update_can_apply(&self) -> bool {
+        if self
+            .active_job
+            .as_ref()
+            .map(ActiveJob::is_running)
+            .unwrap_or(false)
+        {
+            return false;
+        }
+        if let Some(target) = trimmed_option(&self.update_target) {
+            if unity_core::versions::validate_cli_version(&target).is_err() {
+                return false;
+            }
+        }
+        !self.update_changelog.loading
+            && self.update_changelog.error.is_none()
+            && self.update_changelog.data.is_some()
+    }
+
+    fn load_update_changelog(&mut self) -> Task<Message> {
+        let target = trimmed_option(&self.update_target);
+        let channel = trimmed_option(&self.update_channel);
+        self.load_cli_changelog_with(target, channel)
+    }
+
+    fn load_cli_changelog_with(
+        &mut self,
+        target: Option<String>,
+        channel: Option<String>,
+    ) -> Task<Message> {
+        self.update_changelog.begin();
+        self.retry_targets.insert(
+            ReadKind::CliChangelog.id().to_string(),
+            RetryRequest::CliChangelog {
+                target: target.clone(),
+                channel: channel.clone(),
+            },
+        );
+        Task::perform(
+            run_blocking({
+                let cli = self.cli.clone();
+                move || cli.self_update_changelog(target.as_deref(), channel.as_deref())
+            }),
+            Message::CliChangelogLoaded,
+        )
+    }
+
+    fn preview_cli_update(&mut self) -> Task<Message> {
+        let target = trimmed_option(&self.update_target);
+        let channel = trimmed_option(&self.update_channel);
+        self.preview_cli_update_with(target, channel)
+    }
+
+    fn preview_cli_update_with(
+        &mut self,
+        target: Option<String>,
+        channel: Option<String>,
+    ) -> Task<Message> {
+        self.update_dry_run.begin();
+        self.retry_targets.insert(
+            ReadKind::CliDryRun.id().to_string(),
+            RetryRequest::CliDryRun {
+                target: target.clone(),
+                channel: channel.clone(),
+            },
+        );
+        Task::perform(
+            run_blocking({
+                let cli = self.cli.clone();
+                move || cli.self_update_dry_run(target.as_deref(), channel.as_deref())
+            }),
+            Message::CliDryRunLoaded,
+        )
+    }
+
+    fn rollback_cli_vm(&self) -> RollbackCliVm {
+        let version = trimmed_option(&self.rollback_target);
+        let restore_label = match &version {
+            Some(version) => format!("Unity CLI {version}"),
+            None => "the most recent kept CLI version".to_string(),
+        };
+        let any_job_running = self
+            .active_job
+            .as_ref()
+            .map(ActiveJob::is_running)
+            .unwrap_or(false);
+        let command = self.command_preview(
+            self.cli.self_update_rollback_spec(version.as_deref()),
+            "unity self-update --rollback",
+        );
+
+        RollbackCliVm {
+            version_input: self.rollback_target.clone(),
+            restore_label,
+            confirmed: self.rollback_confirmed,
+            can_rollback: self.rollback_confirmed && !any_job_running,
+            command,
+            error: self.rollback_error.as_ref().map(|error| {
+                self.ui_error(
+                    error,
+                    ErrorContext::Job {
+                        kind: "cli-rollback".to_string(),
+                    },
+                )
+            }),
+            job_running: any_job_running,
+        }
+    }
+
     fn overview_vm(&self) -> OverviewVm {
         OverviewVm {
             cli: self.cli_card_vm(),
@@ -2429,6 +2979,7 @@ impl App {
                 current_version: update.current_version.clone(),
                 latest_version: update.latest_version.clone(),
             }),
+            update_flow: self.cli_update_flow_vm(),
             account: AccountCardVm {
                 auth: self.auth_vm(),
                 license: self.license_vm(),
@@ -2656,6 +3207,15 @@ impl App {
             module_count: preview.modules.len().max(self.selected_modules.len()),
         });
 
+        let timeout_error = unity_core::versions::validate_timeout_seconds(&self.install_timeout)
+            .err()
+            .map(|error| error.message);
+        let retries_error = unity_core::versions::validate_retry_count(&self.install_retries)
+            .err()
+            .map(|error| error.message);
+        let advanced_valid = timeout_error.is_none() && retries_error.is_none();
+        let base_can_install = self.selected_modules.is_empty() || self.accept_eula;
+
         InstallEditorVm {
             version_input: self.install_version.clone(),
             architecture: self.install_architecture.clone(),
@@ -2665,7 +3225,7 @@ impl App {
             headless: self.install_headless && unity_core::runner::headless_editor_supported(),
             headless_available: unity_core::runner::headless_editor_supported(),
             accept_eula: self.accept_eula,
-            can_install: self.selected_modules.is_empty() || self.accept_eula,
+            can_install: base_can_install && advanced_valid,
             second_build_warning: self.second_build_warning(),
             preview,
             preview_note: self
@@ -2674,6 +3234,39 @@ impl App {
                 .map(|raw| format!("Dry-run returned: {raw}")),
             preview_error: self.preview_error.clone(),
             preview_loading: self.preview_loading,
+            advanced: InstallAdvancedVm {
+                expanded: self.install_advanced_expanded,
+                resume: self.install_resume,
+                download_only: self.install_download_only,
+                no_wait: self.install_no_wait,
+                timeout_input: self.install_timeout.clone(),
+                set_default: self.install_set_default,
+                retries_input: self.install_retries.clone(),
+                conflict_note: self.install_advanced_note.clone(),
+                timeout_error,
+                retries_error,
+                can_install: advanced_valid,
+            },
+            command_preview: self.command_preview(
+                self.install_editor_spec(),
+                &format!("unity install {}", self.install_version.trim()),
+            ),
+            resume_offer: self.resume_offer.as_ref().map(|offer| ResumeInstallVm {
+                version: offer.request.version.clone(),
+                architecture: offer
+                    .request
+                    .architecture
+                    .clone()
+                    .unwrap_or_else(|| "host default".to_string()),
+                reason: offer.reason.clone(),
+                can_resume: self
+                    .active_job
+                    .as_ref()
+                    .map(ActiveJob::is_running)
+                    .map(|running| !running)
+                    .unwrap_or(true),
+            }),
+            download_report: self.download_report.clone(),
         }
     }
 
@@ -2725,13 +3318,103 @@ impl App {
     /// method so the handler and its tests always agree on the flags.
     fn install_editor_spec(&self) -> Result<CommandSpec, UnityError> {
         let modules: Vec<String> = self.selected_modules.iter().cloned().collect();
+        let options = self.install_options()?;
         self.cli.install_editor_spec(
             &self.install_version,
             self.install_architecture.as_deref(),
             &modules,
             self.install_headless,
             self.accept_eula,
+            &options,
         )
+    }
+
+    /// Validates the Advanced fields and maps them to the adapter options.
+    fn install_options(&self) -> Result<InstallOptions, UnityError> {
+        Ok(InstallOptions {
+            resume: self.install_resume,
+            download_only: self.install_download_only,
+            no_wait: self.install_no_wait,
+            timeout_secs: unity_core::versions::validate_timeout_seconds(&self.install_timeout)?,
+            set_default: self.install_set_default,
+            retries: unity_core::versions::validate_retry_count(&self.install_retries)?,
+        })
+    }
+
+    fn current_install_request(&self) -> InstallRequest {
+        InstallRequest {
+            version: self.install_version.trim().to_string(),
+            architecture: self.install_architecture.clone(),
+            modules: self.selected_modules.iter().cloned().collect(),
+            headless: self.install_headless,
+            accept_eula: self.accept_eula,
+            options: self.install_options().unwrap_or_default(),
+        }
+    }
+
+    fn dialog_module_options(&self) -> Result<ModuleInstallOptions, UnityError> {
+        Ok(ModuleInstallOptions {
+            retries: unity_core::versions::validate_retry_count(&self.dialog_retries)?,
+            download_directory: unity_core::versions::validate_download_directory(
+                &self.dialog_download_directory,
+            )?,
+        })
+    }
+
+    /// Remembers what a finished Editor install means for the card: a
+    /// download-only success names its folder, and an interrupted/failed
+    /// download offers Resume with the exact request that started it.
+    fn note_editor_install_outcome(
+        &mut self,
+        kind: &str,
+        state: JobState,
+        error: Option<&UnityError>,
+        result: Option<&Value>,
+    ) {
+        if kind != "editor-install" {
+            return;
+        }
+
+        match state {
+            JobState::Succeeded => {
+                self.resume_offer = None;
+                if self
+                    .last_install
+                    .as_ref()
+                    .is_some_and(|request| request.options.download_only)
+                {
+                    match download_path(result) {
+                        Some(path) => {
+                            self.download_report = Some(format!(
+                                "Files downloaded to {path}. Nothing was installed or registered, so no Editor was added."
+                            ));
+                            self.notice = Some(Notice::success(format!(
+                                "Download-only finished. Files are in {path}; no Editor was installed."
+                            )));
+                        }
+                        None => {
+                            self.download_report = Some(
+                                "Download-only finished, but the CLI reported no download folder."
+                                    .to_string(),
+                            );
+                        }
+                    }
+                }
+            }
+            JobState::Failed | JobState::Cancelled => {
+                if let Some(request) = self.last_install.clone() {
+                    // A download-only run promised to install nothing; resuming
+                    // it as a normal install would break that promise.
+                    if request.options.download_only {
+                        return;
+                    }
+                    if let Some(reason) = resume_reason(error, result) {
+                        self.resume_offer = Some(ResumeOffer { request, reason });
+                    }
+                }
+            }
+            JobState::Running => {}
+        }
     }
 
     /// Builds the command that stores a default Editor.
@@ -3096,6 +3779,53 @@ impl App {
                             .collect()
                     });
 
+                let retries_error =
+                    unity_core::versions::validate_retry_count(&self.dialog_retries)
+                        .err()
+                        .map(|error| error.message);
+                let directory_error = unity_core::versions::validate_download_directory(
+                    &self.dialog_download_directory,
+                )
+                .err()
+                .map(|error| error.message);
+                let command_preview = {
+                    let modules: Vec<String> = self.dialog_selected.iter().cloned().collect();
+                    let fallback_modules = if modules.is_empty() {
+                        String::new()
+                    } else {
+                        modules
+                            .iter()
+                            .map(|module| format!(" -m {module}"))
+                            .collect::<String>()
+                    };
+                    let fallback = format!(
+                        "unity install-modules --editor-version {} --yes{fallback_modules}",
+                        editor.version
+                    );
+                    let spec = if modules.is_empty() {
+                        Err(UnityError::invalid_input("Select at least one module."))
+                    } else {
+                        self.cli.install_modules_spec(
+                            &editor.version,
+                            Some(&editor.architecture),
+                            &modules,
+                            self.dialog_eula,
+                            &ModuleInstallOptions {
+                                retries: unity_core::versions::validate_retry_count(
+                                    &self.dialog_retries,
+                                )
+                                .unwrap_or_default(),
+                                download_directory:
+                                    unity_core::versions::validate_download_directory(
+                                        &self.dialog_download_directory,
+                                    )
+                                    .unwrap_or_default(),
+                            },
+                        )
+                    };
+                    self.command_preview(spec, &fallback)
+                };
+
                 Some(ModalVm::EditorModules(EditorModulesVm {
                     editor_version: editor.version.clone(),
                     architecture: editor.architecture.clone(),
@@ -3103,7 +3833,14 @@ impl App {
                     modules,
                     selected_count: self.dialog_selected.len(),
                     accept_eula: self.dialog_eula,
-                    can_install: !self.dialog_selected.is_empty() && self.dialog_eula,
+                    can_install: !self.dialog_selected.is_empty()
+                        && self.dialog_eula
+                        && retries_error.is_none()
+                        && directory_error.is_none(),
+                    retries_input: self.dialog_retries.clone(),
+                    download_directory: self.dialog_download_directory.clone(),
+                    retries_error: retries_error.or(directory_error),
+                    command_preview,
                 }))
             }
             Modal::UpgradeProject(project) => {
@@ -3133,6 +3870,7 @@ impl App {
                 }))
             }
             Modal::PruneEditors => Some(ModalVm::PruneEditors(self.prune_editors_vm())),
+            Modal::RollbackCli => Some(ModalVm::RollbackCli(self.rollback_cli_vm())),
             Modal::VerifyEditor {
                 version,
                 architecture,
@@ -3431,6 +4169,69 @@ impl App {
 /// with an explicit kind; it must never default to retryable.
 fn job_allows_retry(_kind: &str) -> bool {
     false
+}
+
+fn trimmed_option(value: &str) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_string())
+}
+
+fn pretty_json(value: &Value) -> String {
+    serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
+}
+
+/// The folder a download-only result names.
+fn download_path(result: Option<&Value>) -> Option<String> {
+    let data = result?.get("data")?;
+    ["path", "downloadPath", "downloadFolder", "directory"]
+        .iter()
+        .find_map(|key| data.get(*key).and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(str::to_string)
+}
+
+/// Whether a finished Editor install can reuse its cache.
+///
+/// The user can always ask for `--resume` from Advanced. Automatically, Resume
+/// is offered only when the CLI's own result says a partial download is
+/// resumable, or the failure is one of the interruption/timeout classes where a
+/// cache is the only thing left to reuse. A generic permission or disk error
+/// does not offer Resume.
+fn resume_reason(error: Option<&UnityError>, result: Option<&Value>) -> Option<String> {
+    if let Some(data) = result.and_then(|result| result.get("data")) {
+        for key in ["resumable", "resumeAvailable", "interrupted"] {
+            if data.get(key).and_then(Value::as_bool) == Some(true) {
+                return Some(
+                    "The CLI reported an interrupted download with a resumable cache.".to_string(),
+                );
+            }
+        }
+        for key in ["cachePath", "downloadCachePath", "partialPath"] {
+            if let Some(path) = data.get(key).and_then(Value::as_str) {
+                if !path.trim().is_empty() {
+                    return Some(format!(
+                        "The CLI kept the partial download at {}.",
+                        path.trim()
+                    ));
+                }
+            }
+        }
+    }
+
+    let code = error?.code.as_str();
+    let reason = match code {
+        "CANCELLED" | "INTERRUPTED" => {
+            "The install was interrupted; its downloaded files are in the cache."
+        }
+        "TIMEOUT" => "The install stopped waiting and left its downloaded files in the cache.",
+        "NETWORK_UNREACHABLE" => "The download was cut off; its completed files are cached.",
+        "DOWNLOAD_FAILED" | "CHECKSUM_MISMATCH" => {
+            "A download failed mid-transfer; the CLI kept the partial payload in its cache."
+        }
+        _ => return None,
+    };
+    Some(reason.to_string())
 }
 
 /// `--force` exists only for the prune running-Editor check. Any other failure
@@ -4268,6 +5069,13 @@ fn load_update(cli: UnityCli) -> Task<Message> {
     )
 }
 
+fn load_update_on(cli: UnityCli, channel: Option<String>) -> Task<Message> {
+    Task::perform(
+        run_blocking(move || cli.self_update_check_on(channel.as_deref())),
+        Message::UpdateLoaded,
+    )
+}
+
 fn load_auth(cli: UnityCli) -> Task<Message> {
     Task::perform(run_blocking(move || cli.auth_status()), Message::AuthLoaded)
 }
@@ -4908,6 +5716,7 @@ mod tests {
             message: Some("Removing 6000.3.27f2…".to_string()),
             logs: VecDeque::new(),
             error: None,
+            result: None,
         });
 
         let vm = app.view_model();
@@ -5494,6 +6303,7 @@ mod tests {
             message: Some("Working…".to_string()),
             logs: VecDeque::new(),
             error: Some(error),
+            result: None,
         }
     }
 
@@ -5636,7 +6446,467 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Diagnostics
+    // Install resilience and CLI rollback
+
+    fn install_request(version: &str, architecture: Option<&str>) -> InstallRequest {
+        InstallRequest {
+            version: version.to_string(),
+            architecture: architecture.map(str::to_string),
+            modules: Vec::new(),
+            headless: false,
+            accept_eula: false,
+            options: InstallOptions::default(),
+        }
+    }
+
+    #[test]
+    fn the_default_install_command_is_unchanged_when_advanced_is_untouched() {
+        let mut app = connected_app("1.0.0-beta.17");
+        app.cli.set_override_path(Some(temporary_cli()));
+        app.install_version = "6000.6.6f1".to_string();
+
+        let spec = app.install_editor_spec().expect("default install spec");
+
+        assert_eq!(
+            &spec.args[..3],
+            &[
+                "install".to_string(),
+                "6000.6.6f1".to_string(),
+                "--yes".to_string()
+            ]
+        );
+        for advanced in [
+            "--resume",
+            "--download-only",
+            "--no-wait",
+            "--timeout",
+            "--set-default",
+            "--retries",
+        ] {
+            assert!(
+                !spec.args.iter().any(|arg| arg == advanced),
+                "{advanced} must stay out of the default command"
+            );
+        }
+        assert!(spec
+            .env
+            .iter()
+            .all(|(key, _)| key != "UNITY_INSTALL_RETRIES"));
+    }
+
+    #[test]
+    fn no_wait_and_timeout_clear_each_other_and_explain_the_lock() {
+        let mut app = connected_app("1.0.0-beta.17");
+        app.cli.set_override_path(Some(temporary_cli()));
+        app.install_version = "6000.6.6f1".to_string();
+
+        let _ = app.update(Message::InstallNoWaitToggled(true));
+        assert!(app.install_no_wait);
+        let spec = app.install_editor_spec().expect("no-wait spec");
+        assert!(spec.args.iter().any(|arg| arg == "--no-wait"));
+
+        let _ = app.update(Message::InstallTimeoutChanged("600".to_string()));
+        assert!(!app.install_no_wait, "the timeout must clear no-wait");
+        let note = app
+            .install_advanced_note
+            .clone()
+            .expect("the conflict is explained");
+        assert!(note.contains("cleared no-wait"), "{note}");
+
+        let spec = app.install_editor_spec().expect("timeout spec");
+        assert!(spec.args.iter().any(|arg| arg == "--timeout"));
+        assert!(spec.args.contains(&"600".to_string()));
+        assert!(!spec.args.iter().any(|arg| arg == "--no-wait"));
+
+        let _ = app.update(Message::InstallNoWaitToggled(true));
+        assert!(app.install_timeout.is_empty(), "no-wait clears the timeout");
+        let note = app.install_advanced_note.clone().expect("note");
+        assert!(note.contains("cleared the timeout"), "{note}");
+    }
+
+    #[test]
+    fn conflicting_install_flags_are_cleared_before_the_command_is_built() {
+        let mut app = connected_app("1.0.0-beta.17");
+        app.cli.set_override_path(Some(temporary_cli()));
+        app.install_version = "6000.6.6f1".to_string();
+
+        let _ = app.update(Message::InstallDownloadOnlyToggled(true));
+        let _ = app.update(Message::InstallResumeToggled(true));
+        assert!(app.install_resume);
+        assert!(!app.install_download_only);
+        assert!(!app.install_set_default);
+
+        let _ = app.update(Message::InstallSetDefaultToggled(true));
+        assert!(app.install_set_default);
+        assert!(!app.install_resume);
+        assert!(!app.install_download_only);
+
+        let spec = app.install_editor_spec().expect("set-default spec");
+        assert!(spec.args.iter().any(|arg| arg == "--set-default"));
+        assert!(!spec.args.iter().any(|arg| arg == "--download-only"));
+        assert!(!spec.args.iter().any(|arg| arg == "--resume"));
+    }
+
+    #[test]
+    fn advanced_install_options_reach_the_exact_command() {
+        let mut app = connected_app("1.0.0-beta.17");
+        app.page = Page::Editors;
+        app.cli.set_override_path(Some(temporary_cli()));
+        app.install_version = "6000.6.6f1".to_string();
+        app.install_architecture = Some("arm64".to_string());
+        app.accept_eula = true;
+
+        let _ = app.update(Message::InstallResumeToggled(true));
+        let _ = app.update(Message::InstallTimeoutChanged("600".to_string()));
+        let _ = app.update(Message::InstallRetriesChanged("3".to_string()));
+
+        let spec = app.install_editor_spec().expect("advanced install spec");
+        assert_eq!(
+            &spec.args[..9],
+            &[
+                "install".to_string(),
+                "6000.6.6f1".to_string(),
+                "--yes".to_string(),
+                "--architecture".to_string(),
+                "arm64".to_string(),
+                "--accept-eula".to_string(),
+                "--resume".to_string(),
+                "--timeout".to_string(),
+                "600".to_string(),
+            ]
+        );
+        assert!(spec
+            .env
+            .iter()
+            .any(|(key, value)| key == "UNITY_INSTALL_RETRIES" && value == "3"));
+        let vm = app.view_model();
+        let PageVm::Editors(editors) = &vm.page else {
+            panic!("expected the Editors page");
+        };
+        assert!(editors.install.command_preview.contains("--resume"));
+    }
+
+    #[test]
+    fn module_install_advanced_options_name_retries_and_the_directory() {
+        let mut app = connected_app("1.0.0-beta.17");
+        app.cli.set_override_path(Some(startable_cli()));
+        app.modal = Modal::EditorModules(Editor {
+            version: "6000.6.6f1".to_string(),
+            architecture: "x86_64".to_string(),
+            ..Editor::default()
+        });
+        app.dialog_selected.insert("webgl".to_string());
+        app.dialog_eula = true;
+        app.dialog_retries = "0".to_string();
+        app.dialog_download_directory = "./.unity".to_string();
+
+        let vm = app.view_model();
+        let Some(ModalVm::EditorModules(modules)) = &vm.modal else {
+            panic!("expected the modules dialog");
+        };
+        assert!(modules.can_install);
+        assert_eq!(modules.retries_input, "0");
+        assert!(modules.command_preview.contains("--retries 0"));
+
+        let _ = app.update(Message::StartInstallModules);
+        let job = app.active_job.as_ref().expect("module install job");
+        for expected in [
+            "--retries 0",
+            "--download-directory ./.unity",
+            "--accept-eula",
+        ] {
+            assert!(job.command.contains(expected), "{}", job.command);
+        }
+    }
+
+    #[test]
+    fn an_interrupted_install_offers_resume_and_reuses_its_cache_request() {
+        let mut app = connected_app("1.0.0-beta.17");
+        app.page = Page::Editors;
+        app.cli.set_override_path(Some(startable_cli()));
+        app.last_install = Some(InstallRequest {
+            version: "6000.6.6f1".to_string(),
+            architecture: Some("arm64".to_string()),
+            modules: vec!["android".to_string()],
+            headless: false,
+            accept_eula: true,
+            options: InstallOptions::default(),
+        });
+
+        let _ = app.handle_finished_job(
+            "editor-install".to_string(),
+            JobState::Failed,
+            Some(UnityError::new(
+                "INTERRUPTED",
+                "The install was interrupted.",
+            )),
+            None,
+        );
+
+        let vm = app.view_model();
+        let PageVm::Editors(editors) = &vm.page else {
+            panic!("expected the Editors page");
+        };
+        let offer = editors.install.resume_offer.as_ref().expect("resume offer");
+        assert_eq!(offer.version, "6000.6.6f1");
+        assert_eq!(offer.architecture, "arm64");
+        assert!(offer.can_resume);
+
+        let _ = app.update(Message::ResumeInstallEditor);
+        let job = app.active_job.as_ref().expect("resume job");
+        assert!(job.command.contains("--resume"));
+        assert!(job.command.contains("6000.6.6f1"));
+        assert!(job.command.contains("--architecture arm64"));
+        assert!(job.command.contains("-m android"));
+        assert!(!job.command.contains("--download-only"));
+        assert!(!job.command.contains("--set-default"));
+        assert!(app.resume_offer.is_none(), "the offer is consumed");
+    }
+
+    #[test]
+    fn a_generic_install_failure_does_not_offer_resume() {
+        let mut app = connected_app("1.0.0-beta.17");
+        app.last_install = Some(install_request("6000.6.6f1", None));
+
+        let _ = app.handle_finished_job(
+            "editor-install".to_string(),
+            JobState::Failed,
+            Some(UnityError::new("LOCAL_STORE_UNWRITABLE", "No permission.")),
+            None,
+        );
+
+        assert!(app.resume_offer.is_none());
+    }
+
+    #[test]
+    fn a_cli_reported_cache_offers_resume_even_for_a_generic_failure() {
+        let mut app = connected_app("1.0.0-beta.17");
+        app.last_install = Some(install_request("6000.6.6f1", None));
+
+        let result = serde_json::json!({
+            "type": "result",
+            "success": false,
+            "data": { "cachePath": "/home/ada/Unity/Cache/6000.6.6f1" }
+        });
+        let _ = app.handle_finished_job(
+            "editor-install".to_string(),
+            JobState::Failed,
+            Some(UnityError::new("COMMAND_FAILED", "The install failed.")),
+            Some(result),
+        );
+
+        let offer = app.resume_offer.as_ref().expect("resume offer");
+        assert!(
+            offer.reason.contains("Cache/6000.6.6f1"),
+            "{}",
+            offer.reason
+        );
+    }
+
+    #[test]
+    fn download_only_reports_its_folder_and_registers_no_editor() {
+        let mut app = connected_app("1.0.0-beta.17");
+        app.page = Page::Editors;
+        app.editors.data = Some(vec![editor("6000.1.1f1", "x86_64", false)]);
+        app.last_install = Some(InstallRequest {
+            options: InstallOptions {
+                download_only: true,
+                ..InstallOptions::default()
+            },
+            ..install_request("6000.6.6f1", None)
+        });
+
+        let result = serde_json::json!({
+            "type": "result",
+            "success": true,
+            "data": { "path": "/home/ada/Unity/downloads", "completedUids": ["editor"] }
+        });
+        let _ = app.handle_finished_job(
+            "editor-install".to_string(),
+            JobState::Succeeded,
+            None,
+            Some(result),
+        );
+
+        let vm = app.view_model();
+        let PageVm::Editors(editors) = &vm.page else {
+            panic!("expected the Editors page");
+        };
+        let report = editors
+            .install
+            .download_report
+            .as_ref()
+            .expect("download report");
+        assert!(report.contains("/home/ada/Unity/downloads"), "{report}");
+        assert!(report.contains("Nothing was installed or registered"));
+        // The installed list still names only the pre-existing build.
+        let rows = editors.installed.data().expect("installed rows");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].version, "6000.1.1f1");
+    }
+
+    #[test]
+    fn a_failed_download_only_run_does_not_offer_resume_as_an_install() {
+        let mut app = connected_app("1.0.0-beta.17");
+        app.last_install = Some(InstallRequest {
+            options: InstallOptions {
+                download_only: true,
+                ..InstallOptions::default()
+            },
+            ..install_request("6000.6.6f1", None)
+        });
+
+        let _ = app.handle_finished_job(
+            "editor-install".to_string(),
+            JobState::Failed,
+            Some(UnityError::new("INTERRUPTED", "The download stopped.")),
+            None,
+        );
+
+        assert!(
+            app.resume_offer.is_none(),
+            "resuming a download-only run would install an Editor the user declined"
+        );
+    }
+
+    #[test]
+    fn applying_a_cli_update_requires_the_target_changelog() {
+        let mut app = connected_app("1.0.0-beta.17");
+        app.page = Page::Overview;
+
+        let vm = app.view_model();
+        let PageVm::Overview(overview) = &vm.page else {
+            panic!("expected the Overview page");
+        };
+        assert!(!overview.update_flow.can_apply);
+        assert!(overview
+            .update_flow
+            .apply_blocked_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("release notes")));
+
+        app.update_target = "1.0.0-beta.18".to_string();
+        app.update_changelog.data = Some(unity_core::models::RawChangelog {
+            version: "1.0.0-beta.18".to_string(),
+            changelog: "## Added\n\n- Rollback.".to_string(),
+        });
+        let vm = app.view_model();
+        let PageVm::Overview(overview) = &vm.page else {
+            panic!("expected the Overview page");
+        };
+        assert!(overview.update_flow.can_apply);
+        let notes = overview
+            .update_flow
+            .changelog
+            .data()
+            .expect("release notes");
+        assert_eq!(notes.version, "1.0.0-beta.18");
+        assert!(notes.text.contains("Rollback"));
+
+        // Changing the target invalidates the notes the apply was gated on.
+        let _ = app.update(Message::CliUpdateTargetChanged("1.0.0-beta.19".to_string()));
+        let vm = app.view_model();
+        let PageVm::Overview(overview) = &vm.page else {
+            panic!("expected the Overview page");
+        };
+        assert!(!overview.update_flow.can_apply);
+        assert!(overview.update_flow.changelog.data().is_none());
+    }
+
+    #[test]
+    fn update_apply_names_only_the_chosen_target_and_channel() {
+        let mut app = connected_app("1.0.0-beta.17");
+        app.cli.set_override_path(Some(startable_cli()));
+        app.update_target = "1.0.0-beta.18".to_string();
+        app.update_channel = "beta".to_string();
+        app.update_changelog.data = Some(unity_core::models::RawChangelog {
+            version: "1.0.0-beta.18".to_string(),
+            changelog: "notes".to_string(),
+        });
+
+        let _ = app.update(Message::StartCliUpdate);
+
+        let job = app.active_job.as_ref().expect("update job");
+        assert_eq!(job.kind, "cli-update");
+        assert!(job.command.contains("--target 1.0.0-beta.18"));
+        assert!(job.command.contains("--channel beta"));
+        assert!(!job.command.contains("--rollback"));
+        assert!(!job.command.contains("--dry-run"));
+    }
+
+    #[test]
+    fn rollback_requires_confirmation_and_names_the_restored_version() {
+        let mut app = connected_app("1.0.0-beta.17");
+        app.cli.set_override_path(Some(startable_cli()));
+
+        let _ = app.update(Message::OpenCliRollback);
+        let _ = app.update(Message::CliRollbackVersionChanged(
+            "1.0.0-beta.16".to_string(),
+        ));
+
+        let vm = app.view_model();
+        let Some(ModalVm::RollbackCli(rollback)) = &vm.modal else {
+            panic!("expected the rollback dialog");
+        };
+        assert_eq!(rollback.restore_label, "Unity CLI 1.0.0-beta.16");
+        assert!(!rollback.can_rollback);
+        assert!(!rollback.command.contains("--target"));
+        assert!(!rollback.command.contains("--channel"));
+        assert!(!rollback.command.contains("--dry-run"));
+
+        let _ = app.update(Message::StartCliRollback);
+        assert!(
+            app.active_job.is_none(),
+            "an unconfirmed rollback must do nothing"
+        );
+
+        let _ = app.update(Message::CliRollbackConfirmed(true));
+        let _ = app.update(Message::StartCliRollback);
+        let job = app.active_job.as_ref().expect("rollback job");
+        assert_eq!(job.kind, "cli-rollback");
+        assert!(job.command.contains("--rollback 1.0.0-beta.16"));
+        for refused in [
+            "--check",
+            "--changelog",
+            "--target",
+            "--channel",
+            "--dry-run",
+        ] {
+            assert!(
+                !job.command.contains(refused),
+                "{refused} must never join rollback: {}",
+                job.command
+            );
+        }
+    }
+
+    #[test]
+    fn rollback_bad_args_keeps_the_dialog_and_renders_the_cli_code() {
+        let mut app = connected_app("1.0.0-beta.17");
+        app.modal = Modal::RollbackCli;
+        app.rollback_confirmed = true;
+
+        let _ = app.handle_finished_job(
+            "cli-rollback".to_string(),
+            JobState::Failed,
+            Some(UnityError::new(
+                "BAD_ARGS",
+                "Rollback cannot be combined with --target.",
+            )),
+            None,
+        );
+
+        assert!(matches!(app.modal, Modal::RollbackCli));
+        assert!(!app.rollback_confirmed);
+        let vm = app.view_model();
+        let Some(ModalVm::RollbackCli(rollback)) = &vm.modal else {
+            panic!("expected the rollback dialog");
+        };
+        let error = rollback.error.as_ref().expect("rollback error");
+        assert_eq!(error.code, "BAD_ARGS");
+        let action = error.action.as_ref().expect("a copy action");
+        assert_eq!(action.kind, ErrorActionKind::ShowCommand);
+    }
 
     fn doctor_read() -> DoctorRead {
         let mut params = Map::new();

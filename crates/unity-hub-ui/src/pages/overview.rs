@@ -2,14 +2,15 @@ use iced::widget::{column, container, row, space};
 use iced::{Center, Element, Fill, FillPortion};
 
 use unity_hub_model::{
-    AccountCardVm, AuthVm, CliCardVm, CliDetailsVm, LicenseVm, LoadState, OverviewVm,
-    RunningEditorVm, Tone, UiAction, UpdateVm,
+    AccountCardVm, AuthVm, CliCardVm, CliDetailsVm, CliUpdateFlowVm, LicenseVm, LoadState,
+    OverviewVm, RunningEditorVm, Tone, UiAction, UpdateVm,
 };
 
 use crate::components::{
     badge, button, caption, card, card_with, detail_column, detail_mono, divided, divider,
-    error_text, hint, icon_badge, icon_button, icon_tile, list_row, loading, mono, notice,
-    page_header, refresh_button, stat_strip, status_label, ButtonKind,
+    error_text, field_label, hint, icon_badge, icon_button, icon_tile, list_row, loading, mono,
+    notice, page_header, refresh_button, scroll, segmented, stat_strip, status_label, text_input,
+    ButtonKind,
 };
 use crate::fonts;
 use crate::icons;
@@ -115,6 +116,8 @@ fn cli_card(vm: &OverviewVm) -> Element<'_, UiAction> {
                 body = body.push(error_text(error));
             }
 
+            body = body.push(update_flow(&vm.update_flow));
+
             body = body.push(divider());
             body = body.push(
                 row![
@@ -190,12 +193,144 @@ fn update_callout(update: &UpdateVm) -> Element<'static, UiAction> {
             ]
             .spacing(3)
             .width(Fill),
-            icon_button(icons::DOWNLOAD, "Update CLI", ButtonKind::Primary)
+            icon_button(icons::CIRCLE_ARROW_UP, "Review update", ButtonKind::Primary)
                 .on_press(UiAction::UpdateCli),
         ]
         .spacing(12)
         .align_y(Center),
     )
+}
+
+fn update_flow(vm: &CliUpdateFlowVm) -> Element<'_, UiAction> {
+    let channel_picker = segmented(
+        vm.channel_options
+            .iter()
+            .map(|channel| {
+                (
+                    channel.clone(),
+                    &vm.channel == channel,
+                    UiAction::CliUpdateChannelChanged(channel.clone()),
+                )
+            })
+            .collect(),
+    );
+
+    let mut body = column![
+        divider(),
+        caption("Update the Unity CLI"),
+        row![
+            column![
+                field_label("Target version"),
+                text_input("latest or 1.0.0-beta.18", &vm.target_input)
+                    .on_input(UiAction::CliUpdateTargetChanged),
+            ]
+            .spacing(6)
+            .width(Fill),
+            column![
+                field_label("Channel"),
+                channel_picker,
+            ]
+            .spacing(6),
+        ]
+        .spacing(16),
+        hint("The target release notes must load before Apply is enabled. Empty target means the newest release on the channel."),
+        row![
+            button("Load release notes", ButtonKind::Secondary)
+                .on_press(UiAction::LoadCliUpdateChangelog),
+            button("Preview (--dry-run)", ButtonKind::Ghost).on_press(UiAction::PreviewCliUpdate),
+            space().width(Fill),
+            icon_button(icons::CIRCLE_ARROW_UP, "Apply update", ButtonKind::Primary)
+                .on_press_maybe(vm.can_apply.then_some(UiAction::StartCliUpdate)),
+            button("Roll back…", ButtonKind::Ghost).on_press(UiAction::OpenCliRollback),
+        ]
+        .spacing(8)
+        .align_y(Center),
+        mono(vm.apply_command.as_str()),
+    ]
+    .spacing(12);
+
+    body = body.push(changelog_state(vm));
+    body = body.push(dry_run_state(vm));
+
+    if let Some(reason) = &vm.apply_blocked_reason {
+        body = body.push(hint(reason.as_str()));
+    }
+
+    body.into()
+}
+
+fn changelog_state(vm: &CliUpdateFlowVm) -> Element<'_, UiAction> {
+    match &vm.changelog {
+        LoadState::Idle => hint(format!(
+            "Release notes not loaded. Runs `{}`.",
+            vm.changelog_command
+        )),
+        LoadState::Loading { previous } => match previous {
+            Some(notes) => column![loading("Loading release notes…"), changelog_ready(notes)]
+                .spacing(10)
+                .into(),
+            None => loading("Loading target release notes…"),
+        },
+        LoadState::Failed { error, .. } => error_text(error),
+        LoadState::Ready(notes) => changelog_ready(notes),
+    }
+}
+
+fn changelog_ready(notes: &unity_hub_model::CliChangelogVm) -> Element<'_, UiAction> {
+    container(
+        column![
+            caption(format!("Release notes · {}", notes.version)),
+            container(scroll(
+                text(notes.text.as_str())
+                    .size(font::BODY)
+                    .line_height(1.5)
+                    .style(theme::muted_text)
+            ))
+            .max_height(180)
+            .width(Fill)
+            .padding(12)
+            .style(theme::inset),
+        ]
+        .spacing(8),
+    )
+    .width(Fill)
+    .into()
+}
+
+fn dry_run_state(vm: &CliUpdateFlowVm) -> Element<'_, UiAction> {
+    match &vm.dry_run {
+        LoadState::Idle => space().height(0).into(),
+        LoadState::Loading { previous } => match previous {
+            Some(text) => column![loading("Previewing…"), dry_run_ready(text)]
+                .spacing(8)
+                .into(),
+            None => loading("Previewing the update…"),
+        },
+        LoadState::Failed { error, .. } => error_text(error),
+        LoadState::Ready(text) => dry_run_ready(text),
+    }
+}
+
+fn dry_run_ready(preview: &str) -> Element<'_, UiAction> {
+    container(
+        column![
+            caption("Dry-run preview"),
+            container(scroll(
+                text(preview)
+                    .size(font::MONO)
+                    .font(fonts::MONO)
+                    .line_height(1.5)
+                    .style(theme::muted_text)
+            ))
+            .max_height(160)
+            .width(Fill)
+            .padding(12)
+            .style(theme::inset),
+        ]
+        .spacing(8),
+    )
+    .width(Fill)
+    .into()
 }
 
 fn install_callout() -> Element<'static, UiAction> {

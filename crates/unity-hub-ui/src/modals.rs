@@ -3,13 +3,13 @@ use iced::{Center, Element, Fill};
 
 use unity_hub_model::{
     CheckStatus, EditorModulesVm, InstallCliVm, LoadState, ModalVm, ModuleOptionVm,
-    PruneCandidateVm, PruneEditorsVm, PruneReportVm, Tone, UiAction, UpgradeProjectVm,
-    VerifyCheckVm, VerifyEditorVm, VerifyResultVm,
+    PruneCandidateVm, PruneEditorsVm, PruneReportVm, RollbackCliVm, Tone, UiAction,
+    UpgradeProjectVm, VerifyCheckVm, VerifyEditorVm, VerifyResultVm,
 };
 
 use crate::components::{
     badge, button, caption, checkbox, detail_column, divided, divider, error_text, field_label,
-    hint, icon_button, loading, mono, notice, scroll, ButtonKind, PICK_LIST_PADDING,
+    hint, icon_button, loading, mono, notice, scroll, text_input, ButtonKind, PICK_LIST_PADDING,
 };
 use crate::fonts;
 use crate::icons::{self, icon};
@@ -27,6 +27,7 @@ pub fn view(modal: &ModalVm) -> Element<'_, UiAction> {
         ModalVm::UpgradeProject(vm) => upgrade_modal(vm),
         ModalVm::PruneEditors(vm) => prune_modal(vm),
         ModalVm::VerifyEditor(vm) => verify_modal(vm),
+        ModalVm::RollbackCli(vm) => rollback_cli_modal(vm),
     };
 
     container(iced::widget::center(card).padding(24))
@@ -196,7 +197,7 @@ fn editor_modules_modal(vm: &EditorModulesVm) -> Element<'_, UiAction> {
         hint("Load modules for this Editor to add them.")
     };
 
-    let body = column![
+    let mut body_column = column![
         labelled("Installed", installed),
         labelled("Available", module_list),
         checkbox(
@@ -204,8 +205,39 @@ fn editor_modules_modal(vm: &EditorModulesVm) -> Element<'_, UiAction> {
             vm.accept_eula,
             UiAction::DialogEulaToggled,
         ),
+        row![
+            container(
+                column![
+                    field_label("Download retries (0 disables)"),
+                    text_input("2", &vm.retries_input)
+                        .on_input(UiAction::DialogRetriesChanged),
+                ]
+                .spacing(6)
+            )
+            .width(Fill),
+            container(
+                column![
+                    field_label("Portable download directory (optional)"),
+                    text_input("./.unity", &vm.download_directory)
+                        .on_input(UiAction::DialogDownloadDirectoryChanged),
+                ]
+                .spacing(6)
+            )
+            .width(Fill),
+        ]
+        .spacing(16),
+        hint("Retries passed as --retries; 0 disables. A directory targets a portable install and is passed as --download-directory."),
     ]
     .spacing(20);
+
+    if let Some(error) = &vm.retries_error {
+        body_column = body_column.push(hint(error.as_str()));
+    }
+
+    body_column = body_column.push(hint("Exact command"));
+    body_column = body_column.push(mono(vm.command_preview.as_str()));
+
+    let body = body_column;
 
     let actions = row![
         button("Cancel", ButtonKind::Ghost).on_press(UiAction::CloseModal),
@@ -762,6 +794,74 @@ fn verify_check_row(check: &VerifyCheckVm) -> Element<'_, UiAction> {
     .padding([10.0, 0.0])
     .width(Fill)
     .into()
+}
+
+/// Confirm `unity self-update --rollback`. The dialog names exactly what is
+/// restored and never carries a target, channel, changelog, check or dry-run
+/// flag, because beta.17 refuses that combination with `BAD_ARGS`.
+fn rollback_cli_modal(vm: &RollbackCliVm) -> Element<'_, UiAction> {
+    let mut body = column![
+        notice(
+            Tone::Warning,
+            icons::TRIANGLE_ALERT,
+            column![
+                text(format!("Restore {}.", vm.restore_label))
+                    .size(font::BODY_LARGE)
+                    .font(fonts::MEDIUM),
+                text("The CLI replaces its current binary with the kept one. Open Editors and running jobs keep their files, but the command line changes immediately.")
+                    .size(font::BODY)
+                    .line_height(1.5)
+                    .style(theme::muted_text),
+            ]
+            .spacing(6),
+        ),
+        labelled(
+            "Kept version (leave empty for the most recent)",
+            text_input("e.g. 1.0.0-beta.16", &vm.version_input)
+                .on_input(UiAction::CliRollbackVersionChanged)
+                .into(),
+        ),
+        row![
+            checkbox(
+                format!("I understand the CLI will restore {}.", vm.restore_label),
+                vm.confirmed,
+                UiAction::CliRollbackConfirmed,
+            )
+            .width(Fill),
+        ],
+        hint("Exact command"),
+        mono(vm.command.as_str()),
+        hint("Rollback is never combined with --check, --changelog, --target, --channel or --dry-run."),
+    ]
+    .spacing(18);
+
+    if vm.job_running {
+        body = body.push(notice(
+            Tone::Info,
+            icons::LOADER,
+            text("Rolling back… the job card shows the live log and Cancel.")
+                .size(font::BODY)
+                .style(theme::muted_text),
+        ));
+    }
+
+    if let Some(error) = &vm.error {
+        body = body.push(error_text(error));
+    }
+
+    let actions = row![
+        button("Cancel", ButtonKind::Ghost).on_press(UiAction::CloseModal),
+        icon_button(icons::CIRCLE_ARROW_UP, "Roll back", ButtonKind::Danger)
+            .on_press_maybe(vm.can_rollback.then_some(UiAction::StartCliRollback)),
+    ]
+    .spacing(8);
+
+    dialog(
+        "Roll back the Unity CLI",
+        "A rollback restores a binary the CLI kept from a previous update.",
+        body.into(),
+        actions.into(),
+    )
 }
 
 fn status_line(label: impl Into<String>, tone: Tone, glyph: char) -> Element<'static, UiAction> {

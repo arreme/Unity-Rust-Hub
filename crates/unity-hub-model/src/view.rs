@@ -234,6 +234,7 @@ pub enum ModalVm {
     UpgradeProject(UpgradeProjectVm),
     PruneEditors(PruneEditorsVm),
     VerifyEditor(VerifyEditorVm),
+    RollbackCli(RollbackCliVm),
 }
 
 #[derive(Debug, Clone)]
@@ -251,12 +252,42 @@ pub struct ViewModel {
 pub struct OverviewVm {
     pub cli: CliCardVm,
     pub update: LoadState<UpdateVm>,
+    /// The CLI self-update surface: channel/target, the target release notes
+    /// that must be shown before applying, the dry-run preview, and the
+    /// rollback entry point.
+    pub update_flow: CliUpdateFlowVm,
     pub account: AccountCardVm,
     pub running: LoadState<Vec<RunningEditorVm>>,
     /// Installed Editors, once the list has loaded.
     pub editor_count: Option<usize>,
     /// Registered projects, once the list has loaded.
     pub project_count: Option<usize>,
+}
+
+/// `unity self-update` controls and their current read states.
+///
+/// `can_apply` stays false until the target changelog has loaded, so the app
+/// never replaces the CLI before showing what the target release changes.
+#[derive(Debug, Clone)]
+pub struct CliUpdateFlowVm {
+    /// `stable` or `beta`.
+    pub channel: String,
+    pub channel_options: Vec<String>,
+    /// Empty means the newest release on the channel.
+    pub target_input: String,
+    pub changelog: LoadState<CliChangelogVm>,
+    pub dry_run: LoadState<String>,
+    pub changelog_command: String,
+    pub apply_command: String,
+    pub rollback_command: String,
+    pub can_apply: bool,
+    pub apply_blocked_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CliChangelogVm {
+    pub version: String,
+    pub text: String,
 }
 
 #[derive(Debug, Clone)]
@@ -402,6 +433,42 @@ pub struct InstallEditorVm {
     pub preview_note: Option<String>,
     pub preview_error: Option<UiError>,
     pub preview_loading: bool,
+    /// The collapsed Advanced area. All flags are off by default.
+    pub advanced: InstallAdvancedVm,
+    /// The exact `unity install` command the buttons would run.
+    pub command_preview: String,
+    /// Present after a failed/interrupted install when the CLI reported a
+    /// cache/interrupted state (or the user asked for `--resume`).
+    pub resume_offer: Option<ResumeInstallVm>,
+    /// Set after a successful `--download-only` run: where the files landed.
+    pub download_report: Option<String>,
+}
+
+/// Advanced `unity install` fields.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstallAdvancedVm {
+    pub expanded: bool,
+    pub resume: bool,
+    pub download_only: bool,
+    pub no_wait: bool,
+    pub timeout_input: String,
+    pub set_default: bool,
+    pub retries_input: String,
+    /// Explains a cleared conflicting option or a refused combination.
+    pub conflict_note: Option<String>,
+    pub timeout_error: Option<String>,
+    pub retries_error: Option<String>,
+    pub can_install: bool,
+}
+
+/// A resume action offered after an interrupted or failed download.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResumeInstallVm {
+    pub version: String,
+    /// Empty is the host default.
+    pub architecture: String,
+    pub reason: String,
+    pub can_resume: bool,
 }
 
 /// One choice in the install card's architecture picker.
@@ -666,6 +733,14 @@ pub struct EditorModulesVm {
     pub selected_count: usize,
     pub accept_eula: bool,
     pub can_install: bool,
+    /// `install-modules --retries <n>`; empty leaves the CLI default.
+    pub retries_input: String,
+    /// `install-modules -d/--download-directory`; empty means the registered
+    /// install, a path targets a portable install.
+    pub download_directory: String,
+    pub retries_error: Option<String>,
+    /// The exact `unity install-modules` command the button would run.
+    pub command_preview: String,
 }
 
 #[derive(Debug, Clone)]
@@ -716,6 +791,24 @@ pub struct PruneEditorsVm {
     pub can_remove: bool,
     pub can_remove_missing: bool,
     /// A failed remove run, kept beside the candidates so `--force` has context.
+    pub error: Option<UiError>,
+    pub job_running: bool,
+}
+
+/// `unity self-update --rollback [version]` confirmation.
+///
+/// The dialog never carries a target, channel, changelog, check or dry-run
+/// flag: beta.17 refuses that combination with `BAD_ARGS`.
+#[derive(Debug, Clone)]
+pub struct RollbackCliVm {
+    /// Empty restores the most recent kept version.
+    pub version_input: String,
+    /// Names exactly what is restored (`Unity CLI 1.0.0-beta.16` or
+    /// "the most recent kept version").
+    pub restore_label: String,
+    pub confirmed: bool,
+    pub can_rollback: bool,
+    pub command: String,
     pub error: Option<UiError>,
     pub job_running: bool,
 }

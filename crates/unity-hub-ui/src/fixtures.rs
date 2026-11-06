@@ -5,14 +5,15 @@
 
 use unity_hub_model::{
     AccountCardVm, AdvisoryVm, ArchitectureOptionVm, AuthVm, BadgeVm, BreakingChangeVm,
-    ChangelogDataVm, ChangelogSectionVm, ChangelogVm, CheckStatus, CliCardVm, CliConnectionVm,
-    CliDetailsVm, DiagnoseReportVm, DiagnoseTopic, DiagnosticsVm, DoctorCheckVm, DoctorVm,
-    EditorModulesVm, EditorRowVm, EditorsVm, EnvironmentVm, ErrorActionKind, ErrorActionVm,
-    InstallCliVm, InstallEditorVm, JobLogVm, JobPhase, JobVm, LicenseRowVm, LicenseVm, LoadState,
-    ModalVm, ModuleOptionVm, NoticeVm, OverviewVm, Page, PageVm, ProjectRowVm, ProjectsVm, ProxyVm,
-    PruneCandidateVm, PruneEditorsVm, PruneReportVm, ReleaseRowVm, RunningEditorVm, SectionKind,
-    SettingsVm, ShellVm, TextScaleOptionVm, Tone, UiError, UpdateVm, UpgradeProjectVm,
-    VerifyCheckVm, VerifyEditorVm, VerifyResultVm, ViewModel,
+    ChangelogDataVm, ChangelogSectionVm, ChangelogVm, CheckStatus, CliCardVm, CliChangelogVm,
+    CliConnectionVm, CliDetailsVm, CliUpdateFlowVm, DiagnoseReportVm, DiagnoseTopic, DiagnosticsVm,
+    DoctorCheckVm, DoctorVm, EditorModulesVm, EditorRowVm, EditorsVm, EnvironmentVm,
+    ErrorActionKind, ErrorActionVm, InstallAdvancedVm, InstallCliVm, InstallEditorVm, JobLogVm,
+    JobPhase, JobVm, LicenseRowVm, LicenseVm, LoadState, ModalVm, ModuleOptionVm, NoticeVm,
+    OverviewVm, Page, PageVm, ProjectRowVm, ProjectsVm, ProxyVm, PruneCandidateVm, PruneEditorsVm,
+    PruneReportVm, ReleaseRowVm, RollbackCliVm, RunningEditorVm, SectionKind, SettingsVm, ShellVm,
+    TextScaleOptionVm, Tone, UiError, UpdateVm, UpgradeProjectVm, VerifyCheckVm, VerifyEditorVm,
+    VerifyResultVm, ViewModel,
 };
 
 pub struct Fixture {
@@ -33,6 +34,10 @@ pub fn all() -> Vec<Fixture> {
         Fixture {
             name: "Overview · load error",
             view_model: overview_error(),
+        },
+        Fixture {
+            name: "Overview · CLI update flow",
+            view_model: overview_update_flow(),
         },
         Fixture {
             name: "Error · actionable (retry)",
@@ -69,6 +74,18 @@ pub fn all() -> Vec<Fixture> {
         Fixture {
             name: "Editors · default cleared",
             view_model: editors_default_cleared(),
+        },
+        Fixture {
+            name: "Editors · advanced install options",
+            view_model: editors_advanced(),
+        },
+        Fixture {
+            name: "Editors · resume offered",
+            view_model: editors_resume_offered(),
+        },
+        Fixture {
+            name: "Editors · download-only finished",
+            view_model: editors_download_only_done(),
         },
         Fixture {
             name: "Projects",
@@ -175,6 +192,14 @@ pub fn all() -> Vec<Fixture> {
             view_model: verify_modal_failed_read(),
         },
         Fixture {
+            name: "Modal · CLI rollback",
+            view_model: rollback_modal(),
+        },
+        Fixture {
+            name: "Modal · CLI rollback BAD_ARGS",
+            view_model: rollback_modal_bad_args(),
+        },
+        Fixture {
             name: "Job · running",
             view_model: job_running(),
         },
@@ -206,6 +231,41 @@ fn base(page: Page, page_vm: PageVm) -> ViewModel {
     }
 }
 
+fn update_flow_idle() -> CliUpdateFlowVm {
+    CliUpdateFlowVm {
+        channel: "beta".to_string(),
+        channel_options: vec!["stable".to_string(), "beta".to_string()],
+        target_input: String::new(),
+        changelog: LoadState::Idle,
+        dry_run: LoadState::Idle,
+        changelog_command: "unity self-update --changelog --format json".to_string(),
+        apply_command: "unity self-update --yes --format ndjson".to_string(),
+        rollback_command: "unity self-update --rollback --yes --format ndjson".to_string(),
+        can_apply: false,
+        apply_blocked_reason: Some(
+            "Load the target release notes before applying the update.".to_string(),
+        ),
+    }
+}
+
+fn update_flow_ready() -> CliUpdateFlowVm {
+    CliUpdateFlowVm {
+        target_input: "1.0.0-beta.18".to_string(),
+        changelog: LoadState::Ready(CliChangelogVm {
+            version: "1.0.0-beta.18".to_string(),
+            text: "## Added\n\n- `unity self-update --rollback` restores a kept CLI version.\n- `unity install --download-only` reports the download folder and registers no Editor.\n\n## Changed\n\n- `--rollback` refuses `--dry-run`, `--check`, `--changelog`, `--target` and `--channel` with `BAD_ARGS`."
+                .to_string(),
+        }),
+        dry_run: LoadState::Ready(
+            "{\n  \"currentVersion\": \"1.0.0-beta.17\",\n  \"targetVersion\": \"1.0.0-beta.18\",\n  \"channel\": \"beta\",\n  \"dryRun\": true\n}"
+                .to_string(),
+        ),
+        can_apply: true,
+        apply_blocked_reason: None,
+        ..update_flow_idle()
+    }
+}
+
 fn overview() -> ViewModel {
     base(
         Page::Overview,
@@ -228,6 +288,7 @@ fn overview() -> ViewModel {
                 current_version: "1.0.0-beta.17".to_string(),
                 latest_version: "1.0.0-beta.17".to_string(),
             }),
+            update_flow: update_flow_idle(),
             account: AccountCardVm {
                 auth: AuthVm::SignedIn {
                     name: "Ada Lovelace".to_string(),
@@ -275,6 +336,7 @@ fn overview_missing() -> ViewModel {
         PageVm::Overview(OverviewVm {
             cli: CliCardVm::Missing,
             update: LoadState::Idle,
+            update_flow: update_flow_idle(),
             account: AccountCardVm {
                 auth: AuthVm::SignedOut { expired: false },
                 license: LicenseVm::Idle,
@@ -307,6 +369,7 @@ fn overview_error() -> ViewModel {
                 },
                 previous: None,
             },
+            update_flow: update_flow_idle(),
             account: AccountCardVm {
                 auth: AuthVm::Failed(UiError {
                     code: "AUTH_ERROR".to_string(),
@@ -326,6 +389,19 @@ fn overview_error() -> ViewModel {
             project_count: None,
         }),
     )
+}
+
+fn overview_update_flow() -> ViewModel {
+    let mut vm = overview();
+    if let PageVm::Overview(overview) = &mut vm.page {
+        overview.update = LoadState::Ready(UpdateVm {
+            available: true,
+            current_version: "1.0.0-beta.17".to_string(),
+            latest_version: "1.0.0-beta.18".to_string(),
+        });
+        overview.update_flow = update_flow_ready();
+    }
+    vm
 }
 
 fn error_actionable() -> ViewModel {
@@ -411,6 +487,10 @@ fn editors() -> ViewModel {
                 preview_note: None,
                 preview_error: None,
                 preview_loading: false,
+                advanced: advanced_fixture(),
+                command_preview: "unity install lts --yes --format ndjson --no-pager --no-banner --non-interactive".to_string(),
+                resume_offer: None,
+                download_report: None,
             },
             releases: LoadState::Ready(vec![
                 ReleaseRowVm {
@@ -484,6 +564,10 @@ fn editors_two_builds() -> ViewModel {
             preview_note: None,
             preview_error: None,
             preview_loading: false,
+            advanced: advanced_fixture(),
+            command_preview: "unity install 6000.1.1f1 --yes --architecture x86_64 --accept-eula --format ndjson".to_string(),
+            resume_offer: None,
+            download_report: None,
         };
     }
     vm
@@ -498,6 +582,77 @@ fn editors_default_cleared() -> ViewModel {
                 row.is_default = false;
             }
         }
+    }
+    vm
+}
+
+fn advanced_fixture() -> InstallAdvancedVm {
+    InstallAdvancedVm {
+        expanded: false,
+        resume: false,
+        download_only: false,
+        no_wait: false,
+        timeout_input: String::new(),
+        set_default: false,
+        retries_input: String::new(),
+        conflict_note: None,
+        timeout_error: None,
+        retries_error: None,
+        can_install: true,
+    }
+}
+
+fn editors_advanced() -> ViewModel {
+    let mut vm = editors();
+    if let PageVm::Editors(editors_vm) = &mut vm.page {
+        editors_vm.install.advanced = InstallAdvancedVm {
+            expanded: true,
+            resume: true,
+            download_only: false,
+            no_wait: true,
+            timeout_input: String::new(),
+            set_default: false,
+            retries_input: "2".to_string(),
+            conflict_note: Some(
+                "No-wait fails immediately when another install holds the lock, so it cleared the timeout. The CLI refuses both at once."
+                    .to_string(),
+            ),
+            timeout_error: None,
+            retries_error: None,
+            can_install: true,
+        };
+        editors_vm.install.command_preview =
+            "unity install lts --yes --resume --no-wait --format ndjson".to_string();
+    }
+    vm
+}
+
+fn editors_resume_offered() -> ViewModel {
+    let mut vm = editors();
+    if let PageVm::Editors(editors_vm) = &mut vm.page {
+        editors_vm.install.resume_offer = Some(unity_hub_model::ResumeInstallVm {
+            version: "6000.3.15f1".to_string(),
+            architecture: "x86_64".to_string(),
+            reason: "The CLI kept the partial download at /home/ada/Unity/Cache/6000.3.15f1."
+                .to_string(),
+            can_resume: true,
+        });
+    }
+    vm
+}
+
+fn editors_download_only_done() -> ViewModel {
+    let mut vm = editors();
+    if let PageVm::Editors(editors_vm) = &mut vm.page {
+        editors_vm.install.advanced = InstallAdvancedVm {
+            expanded: true,
+            download_only: true,
+            ..advanced_fixture()
+        };
+        editors_vm.install.download_report = Some(
+            "Files downloaded to /home/ada/Unity/downloads. Nothing was installed or registered, so no Editor was added."
+                .to_string(),
+        );
     }
     vm
 }
@@ -746,6 +901,40 @@ fn verify_modal_failed_read() -> ViewModel {
         },
         false,
     )
+}
+
+fn rollback_modal() -> ViewModel {
+    let mut vm = overview();
+    vm.modal = Some(ModalVm::RollbackCli(RollbackCliVm {
+        version_input: "1.0.0-beta.16".to_string(),
+        restore_label: "Unity CLI 1.0.0-beta.16".to_string(),
+        confirmed: true,
+        can_rollback: true,
+        command: "unity self-update --rollback 1.0.0-beta.16 --yes --format ndjson --no-pager --no-banner --non-interactive".to_string(),
+        error: None,
+        job_running: false,
+    }));
+    vm
+}
+
+fn rollback_modal_bad_args() -> ViewModel {
+    let mut vm = rollback_modal();
+    if let Some(ModalVm::RollbackCli(rollback)) = &mut vm.modal {
+        rollback.error = Some(UiError {
+            code: "BAD_ARGS".to_string(),
+            message: "The CLI refused the rollback arguments.".to_string(),
+            detail: Some(
+                "Rollback cannot be combined with --check, --changelog, --target, --channel or --dry-run. No binary changed."
+                    .to_string(),
+            ),
+            action: Some(ErrorActionVm {
+                label: "Copy the command".to_string(),
+                command: Some("unity self-update --rollback".to_string()),
+                kind: ErrorActionKind::ShowCommand,
+            }),
+        });
+    }
+    vm
 }
 
 fn projects() -> ViewModel {
@@ -1126,6 +1315,10 @@ fn editor_modules_modal() -> ViewModel {
         selected_count: 1,
         accept_eula: true,
         can_install: true,
+        retries_input: "2".to_string(),
+        download_directory: String::new(),
+        retries_error: None,
+        command_preview: "unity install-modules --editor-version 6000.1.1f1 --yes --architecture x86_64 -m webgl --accept-eula --retries 2 --format ndjson".to_string(),
     }));
     vm
 }

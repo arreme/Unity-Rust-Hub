@@ -40,6 +40,17 @@ pub enum UiAction {
     CliConsentToggled(bool),
     InstallCli,
     UpdateCli,
+    CliUpdateChannelChanged(String),
+    CliUpdateTargetChanged(String),
+    LoadCliUpdateChangelog,
+    PreviewCliUpdate,
+    /// Applies the update after the target changelog was shown.
+    StartCliUpdate,
+    /// Opens the confirmed `--rollback` dialog.
+    OpenCliRollback,
+    CliRollbackVersionChanged(String),
+    CliRollbackConfirmed(bool),
+    StartCliRollback,
     InstallVersionChanged(String),
     /// Selects the build to install. `None` is the host default and is left
     /// out of the command.
@@ -51,6 +62,20 @@ pub enum UiAction {
     AcceptEulaToggled(bool),
     PreviewInstall,
     StartInstallEditor,
+    /// Expands or collapses the install card's Advanced area.
+    InstallAdvancedToggled(bool),
+    InstallResumeToggled(bool),
+    InstallDownloadOnlyToggled(bool),
+    InstallNoWaitToggled(bool),
+    InstallTimeoutChanged(String),
+    InstallSetDefaultToggled(bool),
+    InstallRetriesChanged(String),
+    /// Re-runs the interrupted install with `--resume`, reusing its cache.
+    ResumeInstallEditor,
+    /// `install-modules --retries`.
+    DialogRetriesChanged(String),
+    /// `install-modules -d/--download-directory`.
+    DialogDownloadDirectoryChanged(String),
     UseRelease(String, String),
     /// Version and architecture identify one installed build, because the CLI
     /// can have an `arm64` and an `x86_64` Editor of the same version.
