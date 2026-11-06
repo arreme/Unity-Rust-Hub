@@ -3,23 +3,27 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use iced::{Subscription, Task};
-use serde_json::Value;
+use serde_json::{Map, Value};
 use unity_core::bootstrap;
 use unity_core::changelog::{ChangelogRequest, ChangelogView, CliChangelogProvider};
 use unity_core::errors::{redact_proxy, remediation_for, RemediationKind};
 use unity_core::models::{
-    AuthStatus, CliStatus, CliUpdateInfo, Editor, InstallPreview, LicenseStatus, Module, Project,
-    Release, RunningEditor, RunningEditors,
+    AuthStatus, CliStatus, CliUpdateInfo, DoctorCheck, Editor, EnvironmentInfo, EnvironmentProxy,
+    InstallPreview, LicenseStatus, Module, Project, Release, RunningEditor, RunningEditors,
 };
-use unity_core::{AdvisoryOrigin, CliAdvisory, CommandSpec, UnityCli, UnityError};
+use unity_core::{
+    AdvisoryOrigin, CliAdvisory, CommandSpec, DiagnoseTopic as CliDiagnose, DoctorRead, UnityCli,
+    UnityError,
+};
 use unity_hub_model::{
     AccountCardVm, AdvisoryVm, AuthVm, BadgeVm, BreakingChangeVm, ChangelogDataVm,
-    ChangelogSectionVm, ChangelogVm, CliCardVm, CliConnectionVm, CliDetailsVm, EditorModulesVm,
-    EditorRowVm, EditorsVm, ErrorActionKind, ErrorActionVm, InstallCliVm, InstallEditorVm,
-    InstallPreviewVm, JobLogVm, JobPhase, JobVm, LicenseRowVm, LicenseVm, LoadState, ModalVm,
-    ModuleOptionVm, NoticeVm, OverviewVm, Page, PageVm, ProjectRowVm, ProjectsVm, ReleaseRowVm,
-    RunningEditorVm, SectionKind, SettingsVm, ShellVm, TextScaleOptionVm, Tone, UiAction, UiError,
-    UpdateVm, UpgradeProjectVm, ViewModel,
+    ChangelogSectionVm, ChangelogVm, CheckStatus, CliCardVm, CliConnectionVm, CliDetailsVm,
+    DiagnoseReportVm, DiagnoseTopic, DiagnosticsVm, DoctorCheckVm, DoctorVm, EditorModulesVm,
+    EditorRowVm, EditorsVm, EnvironmentVm, ErrorActionKind, ErrorActionVm, InstallCliVm,
+    InstallEditorVm, InstallPreviewVm, JobLogVm, JobPhase, JobVm, LicenseRowVm, LicenseVm,
+    LoadState, ModalVm, ModuleOptionVm, NoticeVm, OverviewVm, Page, PageVm, ProjectRowVm,
+    ProjectsVm, ProxyVm, ReleaseRowVm, RunningEditorVm, SectionKind, SettingsVm, ShellVm,
+    TextScaleOptionVm, Tone, UiAction, UiError, UpdateVm, UpgradeProjectVm, ViewModel,
 };
 
 use crate::jobs::{JobManager, JobStarted, JobState, StreamKind};
@@ -92,6 +96,11 @@ pub enum ReadKind {
     PreviewInstall,
     Changelog,
     RawChangelog,
+    Doctor,
+    Environment,
+    DiagnoseProxy,
+    DiagnoseAccelerator,
+    DiagnoseUpdate,
 }
 
 impl ReadKind {
@@ -110,6 +119,11 @@ impl ReadKind {
             Self::PreviewInstall => "read:preview-install",
             Self::Changelog => "read:changelog",
             Self::RawChangelog => "read:raw-changelog",
+            Self::Doctor => "read:doctor",
+            Self::Environment => "read:environment",
+            Self::DiagnoseProxy => "read:diagnose-proxy",
+            Self::DiagnoseAccelerator => "read:diagnose-accelerator",
+            Self::DiagnoseUpdate => "read:diagnose-update",
         }
     }
 }
@@ -297,6 +311,11 @@ pub struct App {
     pub changelog_target: Option<String>,
     pub show_raw_changelog: bool,
     pub raw_changelog: Loadable<String>,
+    pub doctor: Loadable<DoctorRead>,
+    pub environment: Loadable<EnvironmentInfo>,
+    pub diagnose_proxy: Loadable<String>,
+    pub diagnose_accelerator: Loadable<String>,
+    pub diagnose_update: Loadable<String>,
     pub modules: Loadable<Vec<Module>>,
     pub dialog_modules: Loadable<Vec<Module>>,
     pub modal: Modal,
@@ -338,6 +357,8 @@ pub enum Message {
     CancelJob,
     DismissNotice,
     RunErrorAction(ErrorActionVm),
+    CopyDiagnosticsReport,
+    CopyDiagnoseReport(DiagnoseTopic),
     DismissAdvisory(String),
     CopyAdvisoryCommand(String),
     RunAdvisoryRemediation(String),
@@ -389,6 +410,11 @@ pub enum Message {
     PreviewLoaded(Result<Value, UnityError>),
     ChangelogLoaded(Result<ChangelogView, UnityError>),
     RawChangelogLoaded(Result<String, UnityError>),
+    DoctorLoaded(Result<DoctorRead, UnityError>),
+    EnvironmentLoaded(Result<EnvironmentInfo, UnityError>),
+    DiagnoseProxyLoaded(Result<String, UnityError>),
+    DiagnoseAcceleratorLoaded(Result<String, UnityError>),
+    DiagnoseUpdateLoaded(Result<String, UnityError>),
     PollJobs,
     ProjectOpened(Result<(), UnityError>),
 }
@@ -400,6 +426,8 @@ impl From<UiAction> for Message {
             UiAction::Refresh => Self::Refresh,
             UiAction::DismissNotice => Self::DismissNotice,
             UiAction::RunErrorAction(action) => Self::RunErrorAction(action),
+            UiAction::CopyDiagnosticsReport => Self::CopyDiagnosticsReport,
+            UiAction::CopyDiagnoseReport(topic) => Self::CopyDiagnoseReport(topic),
             UiAction::DismissAdvisory(id) => Self::DismissAdvisory(id),
             UiAction::CopyAdvisoryCommand(id) => Self::CopyAdvisoryCommand(id),
             UiAction::RunAdvisoryRemediation(id) => Self::RunAdvisoryRemediation(id),
@@ -474,6 +502,11 @@ impl App {
             changelog_target: None,
             show_raw_changelog: false,
             raw_changelog: Loadable::default(),
+            doctor: Loadable::default(),
+            environment: Loadable::default(),
+            diagnose_proxy: Loadable::default(),
+            diagnose_accelerator: Loadable::default(),
+            diagnose_update: Loadable::default(),
             modules: Loadable::default(),
             dialog_modules: Loadable::default(),
             modal: Modal::None,
@@ -786,6 +819,44 @@ impl App {
                 }
                 Task::none()
             }
+            Message::DoctorLoaded(result) => {
+                match result {
+                    Ok(read) => {
+                        self.doctor.succeeded(read);
+                        self.clear_retry(ReadKind::Doctor);
+                    }
+                    Err(error) => {
+                        self.doctor.failed(error);
+                        self.note_read_failed(ReadKind::Doctor);
+                    }
+                }
+                Task::none()
+            }
+            Message::EnvironmentLoaded(result) => {
+                match result {
+                    Ok(environment) => {
+                        self.environment.succeeded(environment);
+                        self.clear_retry(ReadKind::Environment);
+                    }
+                    Err(error) => {
+                        self.environment.failed(error);
+                        self.note_read_failed(ReadKind::Environment);
+                    }
+                }
+                Task::none()
+            }
+            Message::DiagnoseProxyLoaded(result) => {
+                self.note_diagnose_result(ReadKind::DiagnoseProxy, result);
+                Task::none()
+            }
+            Message::DiagnoseAcceleratorLoaded(result) => {
+                self.note_diagnose_result(ReadKind::DiagnoseAccelerator, result);
+                Task::none()
+            }
+            Message::DiagnoseUpdateLoaded(result) => {
+                self.note_diagnose_result(ReadKind::DiagnoseUpdate, result);
+                Task::none()
+            }
             Message::PollJobs => self.poll_jobs(),
             Message::DismissJob => {
                 self.active_job = None;
@@ -804,6 +875,17 @@ impl App {
                 Task::none()
             }
             Message::RunErrorAction(action) => self.run_error_action(action),
+            Message::CopyDiagnosticsReport => {
+                let text = self.diagnostics_report_text();
+                self.copy_report(text, "Diagnostics report copied to the clipboard.")
+            }
+            Message::CopyDiagnoseReport(topic) => {
+                let text = self.diagnose_text(topic).unwrap_or_default();
+                self.copy_report(
+                    text,
+                    format!("The {} report was copied to the clipboard.", topic.label()),
+                )
+            }
             Message::DismissAdvisory(id) => {
                 let version = self.cli_version_key();
                 self.app_settings.dismiss_advisory(&version, &id);
@@ -1292,6 +1374,27 @@ impl App {
         self.retry_targets.remove(kind.id());
     }
 
+    /// Stores one `unity diagnose` answer in the `Loadable` its section owns.
+    fn note_diagnose_result(&mut self, kind: ReadKind, result: Result<String, UnityError>) {
+        let loadable = match kind {
+            ReadKind::DiagnoseProxy => &mut self.diagnose_proxy,
+            ReadKind::DiagnoseAccelerator => &mut self.diagnose_accelerator,
+            ReadKind::DiagnoseUpdate => &mut self.diagnose_update,
+            _ => return,
+        };
+
+        match result {
+            Ok(text) => {
+                loadable.succeeded(text);
+                self.clear_retry(kind);
+            }
+            Err(error) => {
+                loadable.failed(error);
+                self.note_read_failed(kind);
+            }
+        }
+    }
+
     fn load_state<T, U>(
         &self,
         kind: ReadKind,
@@ -1496,6 +1599,26 @@ impl App {
                     run_blocking(move || cli.changelog(target.as_deref()).map(|raw| raw.changelog)),
                     Message::RawChangelogLoaded,
                 )
+            }
+            RetryRequest::Read(ReadKind::Doctor) => {
+                self.doctor.begin();
+                load_doctor(self.cli.clone())
+            }
+            RetryRequest::Read(ReadKind::Environment) => {
+                self.environment.begin();
+                load_environment(self.cli.clone())
+            }
+            RetryRequest::Read(ReadKind::DiagnoseProxy) => {
+                self.diagnose_proxy.begin();
+                load_diagnose(self.cli.clone(), CliDiagnose::Proxy)
+            }
+            RetryRequest::Read(ReadKind::DiagnoseAccelerator) => {
+                self.diagnose_accelerator.begin();
+                load_diagnose(self.cli.clone(), CliDiagnose::Accelerator)
+            }
+            RetryRequest::Read(ReadKind::DiagnoseUpdate) => {
+                self.diagnose_update.begin();
+                load_diagnose(self.cli.clone(), CliDiagnose::Update)
             }
             RetryRequest::Read(ReadKind::Modules)
             | RetryRequest::Read(ReadKind::DialogModules)
@@ -1745,6 +1868,37 @@ impl App {
         )
     }
 
+    /// Starts every Diagnostics read that is missing (or all of them on a
+    /// refresh). Each section owns its `Loadable`, so one slow report never
+    /// holds back the doctor checks or the environment paths.
+    fn load_diagnostics_page(&mut self, force: bool) -> Task<Message> {
+        let mut tasks = Vec::new();
+
+        if (force || self.doctor.data.is_none()) && !self.doctor.loading {
+            self.doctor.begin();
+            tasks.push(load_doctor(self.cli.clone()));
+        }
+        if (force || self.environment.data.is_none()) && !self.environment.loading {
+            self.environment.begin();
+            tasks.push(load_environment(self.cli.clone()));
+        }
+        if (force || self.diagnose_proxy.data.is_none()) && !self.diagnose_proxy.loading {
+            self.diagnose_proxy.begin();
+            tasks.push(load_diagnose(self.cli.clone(), CliDiagnose::Proxy));
+        }
+        if (force || self.diagnose_accelerator.data.is_none()) && !self.diagnose_accelerator.loading
+        {
+            self.diagnose_accelerator.begin();
+            tasks.push(load_diagnose(self.cli.clone(), CliDiagnose::Accelerator));
+        }
+        if (force || self.diagnose_update.data.is_none()) && !self.diagnose_update.loading {
+            self.diagnose_update.begin();
+            tasks.push(load_diagnose(self.cli.clone(), CliDiagnose::Update));
+        }
+
+        Task::batch(tasks)
+    }
+
     /// Refreshes the running-Editor list unless a read is already in flight.
     fn refresh_running_editors(&mut self) -> Task<Message> {
         if self.running.loading {
@@ -1767,6 +1921,7 @@ impl App {
             Page::Overview => self.load_overview_data(false),
             Page::Editors => self.load_editors_page(false),
             Page::Projects => self.load_projects_page(false),
+            Page::Diagnostics => self.load_diagnostics_page(false),
             Page::Changelog => self.load_changelog_page(false),
             _ => Task::none(),
         }
@@ -1779,6 +1934,7 @@ impl App {
             }
             Page::Editors => self.load_editors_page(true),
             Page::Projects => self.load_projects_page(true),
+            Page::Diagnostics => self.load_diagnostics_page(true),
             Page::Changelog => self.load_changelog_page(true),
             Page::Settings => self.refresh_status(),
         }
@@ -1793,6 +1949,7 @@ impl App {
                 Page::Overview => PageVm::Overview(self.overview_vm()),
                 Page::Editors => PageVm::Editors(self.editors_vm()),
                 Page::Projects => PageVm::Projects(self.projects_vm()),
+                Page::Diagnostics => PageVm::Diagnostics(self.diagnostics_vm()),
                 Page::Changelog => PageVm::Changelog(self.changelog_vm()),
                 Page::Settings => PageVm::Settings(self.settings_vm()),
             },
@@ -2227,6 +2384,105 @@ impl App {
         }
     }
 
+    fn diagnostics_vm(&self) -> DiagnosticsVm {
+        DiagnosticsVm {
+            doctor: self.load_state(ReadKind::Doctor, &self.doctor, doctor_vm),
+            environment: self.load_state(ReadKind::Environment, &self.environment, environment_vm),
+            proxy_report: self.load_state(ReadKind::DiagnoseProxy, &self.diagnose_proxy, |text| {
+                diagnose_report_vm(DiagnoseTopic::Proxy, text)
+            }),
+            accelerator_report: self.load_state(
+                ReadKind::DiagnoseAccelerator,
+                &self.diagnose_accelerator,
+                |text| diagnose_report_vm(DiagnoseTopic::Accelerator, text),
+            ),
+            update_report: self.load_state(
+                ReadKind::DiagnoseUpdate,
+                &self.diagnose_update,
+                |text| diagnose_report_vm(DiagnoseTopic::Update, text),
+            ),
+            can_copy: self.doctor.data.is_some()
+                || self.environment.data.is_some()
+                || self.diagnose_proxy.data.is_some(),
+        }
+    }
+
+    /// The combined plain-text report for the Copy button. It contains only
+    /// values the CLI reported; a section that failed is named as unavailable
+    /// instead of being omitted silently.
+    fn diagnostics_report_text(&self) -> String {
+        let has_content = self.doctor.data.is_some()
+            || self.environment.data.is_some()
+            || self.diagnose_proxy.data.is_some()
+            || self.doctor.error.is_some()
+            || self.environment.error.is_some()
+            || self.diagnose_proxy.error.is_some();
+        if !has_content {
+            return String::new();
+        }
+
+        let mut out = String::from("Unity Rust Hub — diagnostics\n");
+
+        if let Some(read) = &self.doctor.data {
+            out.push_str("\n== Unity doctor ==\n");
+            push_doctor_report(&mut out, read);
+        } else if let Some(error) = &self.doctor.error {
+            out.push_str("\n== Unity doctor ==\n");
+            push_unavailable(&mut out, error);
+        }
+
+        if let Some(environment) = &self.environment.data {
+            out.push_str("\n== Environment ==\n");
+            push_environment_report(&mut out, environment);
+        } else if let Some(error) = &self.environment.error {
+            out.push_str("\n== Environment ==\n");
+            push_unavailable(&mut out, error);
+        }
+
+        if let Some(report) = &self.diagnose_proxy.data {
+            out.push_str("\n== Diagnose proxy ==\n");
+            out.push_str(report.trim_end());
+            out.push('\n');
+        } else if let Some(error) = &self.diagnose_proxy.error {
+            out.push_str("\n== Diagnose proxy ==\n");
+            push_unavailable(&mut out, error);
+        }
+
+        out
+    }
+
+    fn diagnose_text(&self, topic: DiagnoseTopic) -> Option<String> {
+        let report = match topic {
+            DiagnoseTopic::Proxy => &self.diagnose_proxy,
+            DiagnoseTopic::Accelerator => &self.diagnose_accelerator,
+            DiagnoseTopic::Update => &self.diagnose_update,
+        };
+        report
+            .data
+            .as_ref()
+            .map(|text| text.trim().to_string())
+            .filter(|text| !text.is_empty())
+    }
+
+    /// Writes a report to the clipboard. iced's clipboard action has no result
+    /// channel, so the only failures we can observe are an empty report and a
+    /// missing display server; both become an error notice instead of a panic.
+    fn copy_report(&mut self, text: String, success: impl Into<String>) -> Task<Message> {
+        if text.trim().is_empty() {
+            self.notice = Some(Notice::error("There is no report to copy yet."));
+            return Task::none();
+        }
+        if let Err(reason) = clipboard_backend() {
+            self.notice = Some(Notice::error(format!(
+                "Could not copy the report to the clipboard: {reason}"
+            )));
+            return Task::none();
+        }
+
+        self.notice = Some(Notice::success(success));
+        iced::clipboard::write(text)
+    }
+
     fn settings_vm(&self) -> SettingsVm {
         let resolved_executable = self
             .cli_status
@@ -2588,6 +2844,337 @@ fn advisory_detail(advisory: &CliAdvisory) -> Option<String> {
     }
 }
 
+fn doctor_vm(read: &DoctorRead) -> DoctorVm {
+    let report = &read.report;
+
+    DoctorVm {
+        platform: dash(&report.platform),
+        arch: dash(&report.arch),
+        runtime_version: option_dash(report.runtime_version.as_deref()),
+        node_version: option_dash(report.node_version.as_deref()),
+        cli_version: option_dash(report.cli_version.as_deref()),
+        install_path: option_dash(report.install_path.as_deref()),
+        log_directory: option_dash(report.log_directory.as_deref()),
+        checks: report.checks.iter().map(doctor_check_vm).collect(),
+        auth: report.auth.as_ref().and_then(value_summary),
+        license: report.license.as_ref().and_then(value_summary),
+        raw: read.raw.clone(),
+    }
+}
+
+fn doctor_check_vm(check: &DoctorCheck) -> DoctorCheckVm {
+    DoctorCheckVm {
+        id: check.id.clone(),
+        label: check_label(check),
+        status: check_status(&check.status),
+        detail: params_detail(&check.params),
+    }
+}
+
+/// Humanizes an id first, then a pre-rendered CLI message, then the
+/// localization key. The key is never shown raw unless nothing else exists.
+fn check_label(check: &DoctorCheck) -> String {
+    let id = check.id.trim();
+    if !id.is_empty() {
+        return humanize_identifier(id);
+    }
+    if let Some(message) = check.message.as_deref().map(str::trim) {
+        if !message.is_empty() {
+            return message.to_string();
+        }
+    }
+    if let Some(key) = check.message_key.as_deref().map(str::trim) {
+        if !key.is_empty() {
+            return humanize_message_key(key);
+        }
+    }
+    "Check".to_string()
+}
+
+fn humanize_message_key(key: &str) -> String {
+    let leaf = key.rsplit('.').find(|part| !part.is_empty()).unwrap_or(key);
+    humanize_identifier(leaf)
+}
+
+/// Turns `path-available`, `git-credential-helper`, or `pathAvailable` into a
+/// readable label. Known acronyms keep their uppercase spelling.
+fn humanize_identifier(value: &str) -> String {
+    const ACRONYMS: [&str; 15] = [
+        "cli", "url", "id", "os", "cpu", "gpu", "fex", "vcs", "http", "https", "tls", "ssl", "tpm",
+        "api", "sdk",
+    ];
+    const ACRONYM_IL2CPP: &str = "il2cpp";
+
+    let mut words = Vec::new();
+    let mut word = String::new();
+    for character in value.chars() {
+        if character.is_alphanumeric() {
+            let boundary = character.is_uppercase()
+                && !word.is_empty()
+                && word
+                    .chars()
+                    .last()
+                    .is_some_and(|previous| previous.is_lowercase() || previous.is_numeric());
+            if boundary {
+                words.push(std::mem::take(&mut word));
+            }
+            word.push(character);
+        } else if !word.is_empty() {
+            words.push(std::mem::take(&mut word));
+        }
+    }
+    if !word.is_empty() {
+        words.push(word);
+    }
+    if words.is_empty() {
+        return value.trim().to_string();
+    }
+
+    words
+        .iter()
+        .enumerate()
+        .map(|(index, word)| {
+            let lower = word.to_lowercase();
+            if lower == ACRONYM_IL2CPP || ACRONYMS.contains(&lower.as_str()) {
+                lower.to_uppercase()
+            } else if index == 0 {
+                let mut characters = lower.chars();
+                match characters.next() {
+                    Some(first) => first.to_uppercase().collect::<String>() + characters.as_str(),
+                    None => String::new(),
+                }
+            } else {
+                lower
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn check_status(status: &str) -> CheckStatus {
+    match status.trim().to_ascii_lowercase().as_str() {
+        "pass" => CheckStatus::Pass,
+        "warn" => CheckStatus::Warn,
+        "fail" => CheckStatus::Fail,
+        "info" => CheckStatus::Info,
+        _ => CheckStatus::Unknown,
+    }
+}
+
+fn check_status_label(status: CheckStatus) -> &'static str {
+    match status {
+        CheckStatus::Pass => "pass",
+        CheckStatus::Warn => "warn",
+        CheckStatus::Fail => "fail",
+        CheckStatus::Info => "info",
+        CheckStatus::Unknown => "unknown",
+    }
+}
+
+fn params_detail(params: &Map<String, Value>) -> Option<String> {
+    let details = params
+        .iter()
+        .filter_map(|(key, value)| {
+            scalar_text(value).map(|value| format!("{}: {value}", humanize_identifier(key)))
+        })
+        .collect::<Vec<_>>();
+    (!details.is_empty()).then(|| details.join(" · "))
+}
+
+/// A faithful, one-line rendering of a JSON scalar or small container. Nothing
+/// is interpreted: a string stays a string, a number stays a number.
+fn scalar_text(value: &Value) -> Option<String> {
+    match value {
+        Value::String(text) => {
+            let text = text.trim();
+            (!text.is_empty()).then(|| text.to_string())
+        }
+        Value::Number(number) => Some(number.to_string()),
+        Value::Bool(value) => Some(value.to_string()),
+        Value::Array(items) => {
+            let parts = items.iter().filter_map(scalar_text).collect::<Vec<_>>();
+            (!parts.is_empty()).then(|| parts.join(", "))
+        }
+        Value::Object(map) => {
+            let text = serde_json::to_string(value).ok()?;
+            (!map.is_empty()).then_some(text)
+        }
+        Value::Null => None,
+    }
+}
+
+/// The CLI's `auth` / `license` sections have no stable schema this app can
+/// model yet, so their scalar fields are summarized without interpretation.
+fn value_summary(value: &Value) -> Option<String> {
+    match value {
+        Value::Object(map) => {
+            let parts = map
+                .iter()
+                .filter_map(|(key, value)| {
+                    scalar_text(value).map(|value| format!("{}: {value}", humanize_identifier(key)))
+                })
+                .collect::<Vec<_>>();
+            (!parts.is_empty()).then(|| parts.join(" · "))
+        }
+        other => scalar_text(other),
+    }
+}
+
+fn environment_vm(info: &EnvironmentInfo) -> EnvironmentVm {
+    EnvironmentVm {
+        user_data_path: dash(&info.user_data_path),
+        editor_install_path: dash(&info.editor_install_path),
+        download_cache_path: dash(&info.download_cache_path),
+        config_path: dash(&info.config_path),
+        cli_version: option_dash(info.cli_version.as_deref()),
+        hub_version: option_dash(info.hub_version.as_deref()),
+        proxy: info.proxy.as_ref().map(proxy_vm),
+    }
+}
+
+fn proxy_vm(proxy: &EnvironmentProxy) -> ProxyVm {
+    let url = proxy
+        .url
+        .as_deref()
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+        .map(redact_proxy)
+        .unwrap_or_else(|| "Not configured".to_string());
+
+    ProxyVm {
+        url,
+        source: option_dash(proxy.source.as_deref()),
+        auth_source: option_dash(proxy.auth_source.as_deref()),
+        no_proxy: proxy
+            .no_proxy
+            .iter()
+            .map(|item| item.trim().to_string())
+            .filter(|item| !item.is_empty())
+            .collect(),
+    }
+}
+
+fn diagnose_report_vm(topic: DiagnoseTopic, text: &str) -> DiagnoseReportVm {
+    DiagnoseReportVm {
+        topic,
+        text: text.trim().to_string(),
+    }
+}
+
+fn dash(value: &str) -> String {
+    let value = value.trim();
+    if value.is_empty() {
+        "—".to_string()
+    } else {
+        value.to_string()
+    }
+}
+
+fn option_dash(value: Option<&str>) -> String {
+    value.map(dash).unwrap_or_else(|| "—".to_string())
+}
+
+fn push_unavailable(out: &mut String, error: &UnityError) {
+    out.push_str(&format!(
+        "Unavailable: {} — {}\n",
+        error.code,
+        error.message.trim()
+    ));
+    if let Some(detail) = error.detail.as_deref().map(str::trim) {
+        if !detail.is_empty() {
+            out.push_str(detail);
+            out.push('\n');
+        }
+    }
+}
+
+fn push_doctor_report(out: &mut String, read: &DoctorRead) {
+    let report = &read.report;
+    out.push_str(&format!(
+        "Platform: {} {}\nRuntime: {}\nNode: {}\nCLI: {}\nInstall path: {}\nLog directory: {}\n",
+        dash(&report.platform),
+        dash(&report.arch),
+        option_dash(report.runtime_version.as_deref()),
+        option_dash(report.node_version.as_deref()),
+        option_dash(report.cli_version.as_deref()),
+        option_dash(report.install_path.as_deref()),
+        option_dash(report.log_directory.as_deref()),
+    ));
+
+    if !report.checks.is_empty() {
+        out.push_str("\nChecks:\n");
+        for check in &report.checks {
+            out.push_str(&format!(
+                "[{}] {}\n",
+                check_status_label(check_status(&check.status)),
+                check_label(check)
+            ));
+            if let Some(detail) = params_detail(&check.params) {
+                out.push_str(&format!("    {detail}\n"));
+            }
+        }
+    }
+
+    if let Some(auth) = report.auth.as_ref().and_then(value_summary) {
+        out.push_str(&format!("\nAuth: {auth}\n"));
+    }
+    if let Some(license) = report.license.as_ref().and_then(value_summary) {
+        out.push_str(&format!("License: {license}\n"));
+    }
+
+    out.push_str("\nRaw report:\n");
+    out.push_str(read.raw.trim_end());
+    out.push('\n');
+}
+
+fn push_environment_report(out: &mut String, info: &EnvironmentInfo) {
+    out.push_str(&format!(
+        "User data: {}\nEditor installs: {}\nDownload cache: {}\nConfig: {}\nCLI: {}\nHub: {}\n",
+        dash(&info.user_data_path),
+        dash(&info.editor_install_path),
+        dash(&info.download_cache_path),
+        dash(&info.config_path),
+        option_dash(info.cli_version.as_deref()),
+        option_dash(info.hub_version.as_deref()),
+    ));
+
+    match &info.proxy {
+        Some(proxy) => {
+            let url = proxy
+                .url
+                .as_deref()
+                .map(redact_proxy)
+                .map(|url| dash(&url))
+                .unwrap_or_else(|| "—".to_string());
+            out.push_str(&format!(
+                "Proxy: {url}\nProxy source: {}\nProxy auth source: {}\n",
+                option_dash(proxy.source.as_deref()),
+                option_dash(proxy.auth_source.as_deref()),
+            ));
+            let no_proxy = if proxy.no_proxy.is_empty() {
+                "none".to_string()
+            } else {
+                proxy.no_proxy.join(", ")
+            };
+            out.push_str(&format!("No proxy: {no_proxy}\n"));
+        }
+        None => out.push_str("Proxy: not reported\n"),
+    }
+}
+
+/// A Linux process without a display server cannot own a clipboard. This is
+/// the only clipboard failure iced exposes before the write; the write itself
+/// logs and returns no error to the application.
+fn clipboard_backend() -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        if std::env::var_os("WAYLAND_DISPLAY").is_none() && std::env::var_os("DISPLAY").is_none() {
+            return Err("no display server is available".to_string());
+        }
+    }
+    Ok(())
+}
+
 fn editor_row_vm(editor: &Editor) -> EditorRowVm {
     EditorRowVm {
         version: editor.version.clone(),
@@ -2728,6 +3315,28 @@ fn load_projects(cli: UnityCli) -> Task<Message> {
     Task::perform(
         run_blocking(move || cli.projects()),
         Message::ProjectsLoaded,
+    )
+}
+
+fn load_doctor(cli: UnityCli) -> Task<Message> {
+    Task::perform(run_blocking(move || cli.doctor()), Message::DoctorLoaded)
+}
+
+fn load_environment(cli: UnityCli) -> Task<Message> {
+    Task::perform(
+        run_blocking(move || cli.environment()),
+        Message::EnvironmentLoaded,
+    )
+}
+
+fn load_diagnose(cli: UnityCli, topic: CliDiagnose) -> Task<Message> {
+    Task::perform(
+        run_blocking(move || cli.diagnose(topic)),
+        move |result| match topic {
+            CliDiagnose::Proxy => Message::DiagnoseProxyLoaded(result),
+            CliDiagnose::Accelerator => Message::DiagnoseAcceleratorLoaded(result),
+            CliDiagnose::Update => Message::DiagnoseUpdateLoaded(result),
+        },
     )
 }
 
@@ -3373,6 +3982,365 @@ mod tests {
 
         let _task = app.update(Message::RunErrorAction(action));
         assert!(app.preview_loading);
+    }
+
+    // ------------------------------------------------------------------
+    // Diagnostics
+
+    fn doctor_read() -> DoctorRead {
+        let mut params = Map::new();
+        params.insert(
+            "directory".to_string(),
+            Value::String("/home/ada/.local/bin".to_string()),
+        );
+        params.insert("expected".to_string(), Value::Bool(true));
+
+        DoctorRead {
+            report: unity_core::models::DoctorReport {
+                platform: "linux".to_string(),
+                arch: "x86_64".to_string(),
+                runtime_version: Some("8.0.4".to_string()),
+                cli_version: Some("1.0.0-beta.17".to_string()),
+                install_path: Some("/home/ada/.unity".to_string()),
+                log_directory: Some("/home/ada/.unity/logs".to_string()),
+                checks: vec![
+                    DoctorCheck {
+                        id: "path-available".to_string(),
+                        status: "pass".to_string(),
+                        message_key: Some("doctor.checks.pathAvailable".to_string()),
+                        params,
+                        ..DoctorCheck::default()
+                    },
+                    DoctorCheck {
+                        id: String::new(),
+                        status: "warn".to_string(),
+                        message_key: Some("doctor.checks.longPathSupport".to_string()),
+                        ..DoctorCheck::default()
+                    },
+                    DoctorCheck {
+                        id: String::new(),
+                        status: "fail".to_string(),
+                        message: Some("Git credential helper is not configured.".to_string()),
+                        ..DoctorCheck::default()
+                    },
+                    DoctorCheck {
+                        id: "future-check".to_string(),
+                        status: "future".to_string(),
+                        ..DoctorCheck::default()
+                    },
+                ],
+                auth: Some(serde_json::json!({ "loggedIn": true, "user": "ada" })),
+                license: Some(serde_json::json!({ "active": false })),
+                ..unity_core::models::DoctorReport::default()
+            },
+            raw: "{\n  \"platform\": \"linux\"\n}".to_string(),
+        }
+    }
+
+    fn environment_info() -> EnvironmentInfo {
+        EnvironmentInfo {
+            user_data_path: "/home/ada/.config/Unity".to_string(),
+            editor_install_path: "/home/ada/Unity/Editors".to_string(),
+            download_cache_path: "/home/ada/Unity/Cache".to_string(),
+            config_path: "/home/ada/.unity".to_string(),
+            cli_version: Some("1.0.0-beta.17".to_string()),
+            hub_version: Some("0.2.1".to_string()),
+            proxy: Some(EnvironmentProxy {
+                url: Some("http://proxy.example:8080".to_string()),
+                source: Some("env".to_string()),
+                auth_source: Some("keyring".to_string()),
+                no_proxy: vec!["localhost".to_string(), "*.unity.local".to_string()],
+                ..EnvironmentProxy::default()
+            }),
+            ..EnvironmentInfo::default()
+        }
+    }
+
+    #[test]
+    fn doctor_and_environment_map_to_humanized_diagnostics() {
+        let (mut app, _) = App::boot();
+        app.page = Page::Diagnostics;
+        app.doctor.data = Some(doctor_read());
+        app.environment.data = Some(environment_info());
+
+        let vm = app.view_model();
+        let PageVm::Diagnostics(diagnostics) = &vm.page else {
+            panic!("expected the Diagnostics page");
+        };
+
+        let doctor = diagnostics.doctor.data().expect("doctor data");
+        assert_eq!(doctor.platform, "linux");
+        assert_eq!(doctor.arch, "x86_64");
+        assert_eq!(doctor.runtime_version, "8.0.4");
+        assert_eq!(doctor.node_version, "—");
+        assert_eq!(doctor.cli_version, "1.0.0-beta.17");
+        assert_eq!(doctor.checks.len(), 4);
+
+        let path = &doctor.checks[0];
+        assert_eq!(path.id, "path-available");
+        assert_eq!(path.label, "Path available");
+        assert_eq!(path.status, CheckStatus::Pass);
+        assert_eq!(
+            path.detail.as_deref(),
+            Some("Directory: /home/ada/.local/bin · Expected: true")
+        );
+
+        assert_eq!(doctor.checks[1].label, "Long path support");
+        assert_eq!(doctor.checks[1].status, CheckStatus::Warn);
+        assert_eq!(
+            doctor.checks[2].label,
+            "Git credential helper is not configured."
+        );
+        assert_eq!(doctor.checks[2].status, CheckStatus::Fail);
+        assert_eq!(doctor.checks[3].status, CheckStatus::Unknown);
+        assert_eq!(doctor.auth.as_deref(), Some("Logged in: true · User: ada"));
+        assert_eq!(doctor.license.as_deref(), Some("Active: false"));
+        assert_eq!(doctor.raw, "{\n  \"platform\": \"linux\"\n}");
+
+        let environment = diagnostics.environment.data().expect("environment data");
+        assert_eq!(environment.user_data_path, "/home/ada/.config/Unity");
+        assert_eq!(environment.editor_install_path, "/home/ada/Unity/Editors");
+        assert_eq!(environment.download_cache_path, "/home/ada/Unity/Cache");
+        assert_eq!(environment.config_path, "/home/ada/.unity");
+        assert_eq!(environment.cli_version, "1.0.0-beta.17");
+        assert_eq!(environment.hub_version, "0.2.1");
+        let proxy = environment.proxy.as_ref().expect("proxy");
+        assert_eq!(proxy.url, "http://proxy.example:8080");
+        assert_eq!(proxy.source, "env");
+        assert_eq!(proxy.auth_source, "keyring");
+        assert_eq!(proxy.no_proxy, vec!["localhost", "*.unity.local"]);
+    }
+
+    #[test]
+    fn doctor_labels_humanize_ids_and_fall_back_to_the_key() {
+        assert_eq!(humanize_identifier("path-available"), "Path available");
+        assert_eq!(
+            humanize_identifier("git-credential-helper"),
+            "Git credential helper"
+        );
+        assert_eq!(humanize_identifier("fex-emu"), "FEX emu");
+        assert_eq!(humanize_identifier("longPathSupport"), "Long path support");
+        assert_eq!(
+            humanize_message_key("doctor.checks.longPathSupport"),
+            "Long path support"
+        );
+
+        let key_only = DoctorCheck {
+            message_key: Some("doctor.checks.gitCredentialHelper".to_string()),
+            ..DoctorCheck::default()
+        };
+        assert_eq!(check_label(&key_only), "Git credential helper");
+
+        let message_only = DoctorCheck {
+            message_key: Some("doctor.checks.gitCredentialHelper".to_string()),
+            message: Some("Git is not installed.".to_string()),
+            ..DoctorCheck::default()
+        };
+        assert_eq!(check_label(&message_only), "Git is not installed.");
+        assert_eq!(check_label(&DoctorCheck::default()), "Check");
+        assert_eq!(check_status("PASS"), CheckStatus::Pass);
+        assert_eq!(check_status("nope"), CheckStatus::Unknown);
+    }
+
+    #[test]
+    fn diagnostics_sections_keep_independent_states_and_retry_one_at_a_time() {
+        let mut app = connected_app("1.0.0-beta.17");
+        app.page = Page::Diagnostics;
+        app.doctor.data = Some(doctor_read());
+        app.environment.error = Some(
+            UnityError::new(
+                "NETWORK_UNREACHABLE",
+                "A Unity service could not be reached.",
+            )
+            .with_exit_code(Some(7)),
+        );
+        app.note_read_failed(ReadKind::Environment);
+        app.diagnose_proxy.error =
+            Some(UnityError::new("TIMEOUT", "The operation timed out.").with_exit_code(Some(14)));
+        app.note_read_failed(ReadKind::DiagnoseProxy);
+        app.diagnose_accelerator.data = Some("Accelerator: none".to_string());
+        app.diagnose_update.loading = true;
+
+        let vm = app.view_model();
+        let PageVm::Diagnostics(diagnostics) = &vm.page else {
+            panic!("expected the Diagnostics page");
+        };
+
+        assert!(diagnostics.doctor.data().is_some());
+        assert!(diagnostics.environment.error().is_some());
+        assert!(diagnostics.proxy_report.error().is_some());
+        assert_eq!(
+            diagnostics
+                .accelerator_report
+                .data()
+                .expect("accelerator report")
+                .text,
+            "Accelerator: none"
+        );
+        assert!(diagnostics.update_report.is_loading());
+        assert_eq!(
+            diagnostics
+                .environment
+                .error()
+                .expect("environment error")
+                .action
+                .as_ref()
+                .expect("retry")
+                .kind,
+            ErrorActionKind::Retry("read:environment".to_string())
+        );
+        assert_eq!(
+            diagnostics
+                .proxy_report
+                .error()
+                .expect("proxy error")
+                .action
+                .as_ref()
+                .expect("retry")
+                .kind,
+            ErrorActionKind::Retry("read:diagnose-proxy".to_string())
+        );
+
+        let retry = diagnostics
+            .environment
+            .error()
+            .expect("environment error")
+            .action
+            .clone()
+            .expect("retry");
+        let _task = app.update(Message::RunErrorAction(retry));
+
+        assert!(app.environment.loading);
+        assert!(app.doctor.data.is_some() && !app.doctor.loading);
+        assert!(!app.diagnose_proxy.loading);
+        assert!(!app.diagnose_accelerator.loading);
+        // A retry of one section must not disturb a section that is already
+        // loading, ready, or failed.
+        assert!(app.diagnose_update.loading);
+    }
+
+    fn retry_kind<T>(state: &LoadState<T>) -> &ErrorActionKind {
+        &state
+            .error()
+            .expect("section error")
+            .action
+            .as_ref()
+            .expect("retry")
+            .kind
+    }
+
+    #[test]
+    fn every_diagnostics_section_has_its_own_retry_target() {
+        let (mut app, _) = App::boot();
+        app.page = Page::Diagnostics;
+
+        let sections = [
+            (ReadKind::Doctor, "read:doctor"),
+            (ReadKind::Environment, "read:environment"),
+            (ReadKind::DiagnoseProxy, "read:diagnose-proxy"),
+            (ReadKind::DiagnoseAccelerator, "read:diagnose-accelerator"),
+            (ReadKind::DiagnoseUpdate, "read:diagnose-update"),
+        ];
+        for (kind, _) in sections {
+            app.note_read_failed(kind);
+        }
+
+        app.doctor.error = Some(UnityError::new("TIMEOUT", "The read timed out."));
+        app.environment.error = Some(UnityError::new("TIMEOUT", "The read timed out."));
+        app.diagnose_proxy.error = Some(UnityError::new("TIMEOUT", "The read timed out."));
+        app.diagnose_accelerator.error = Some(UnityError::new("TIMEOUT", "The read timed out."));
+        app.diagnose_update.error = Some(UnityError::new("TIMEOUT", "The read timed out."));
+
+        let vm = app.view_model();
+        let PageVm::Diagnostics(diagnostics) = &vm.page else {
+            panic!("expected the Diagnostics page");
+        };
+        for (kind, expected) in [
+            (retry_kind(&diagnostics.doctor), "read:doctor"),
+            (retry_kind(&diagnostics.environment), "read:environment"),
+            (retry_kind(&diagnostics.proxy_report), "read:diagnose-proxy"),
+            (
+                retry_kind(&diagnostics.accelerator_report),
+                "read:diagnose-accelerator",
+            ),
+            (
+                retry_kind(&diagnostics.update_report),
+                "read:diagnose-update",
+            ),
+        ] {
+            assert_eq!(kind, &ErrorActionKind::Retry(expected.to_string()));
+        }
+    }
+
+    #[test]
+    fn proxy_credentials_are_redacted_in_the_view_and_the_report() {
+        let (mut app, _) = App::boot();
+        app.page = Page::Diagnostics;
+        app.environment.data = Some(EnvironmentInfo {
+            proxy: Some(EnvironmentProxy {
+                url: Some("http://user:secret@proxy.example:8080".to_string()),
+                source: Some("env".to_string()),
+                ..EnvironmentProxy::default()
+            }),
+            ..EnvironmentInfo::default()
+        });
+
+        let vm = app.view_model();
+        let PageVm::Diagnostics(diagnostics) = &vm.page else {
+            panic!("expected the Diagnostics page");
+        };
+        let proxy = diagnostics
+            .environment
+            .data()
+            .expect("environment data")
+            .proxy
+            .as_ref()
+            .expect("proxy");
+        assert_eq!(proxy.url, "http://***@proxy.example:8080");
+
+        let report = app.diagnostics_report_text();
+        assert!(report.contains("Proxy: http://***@proxy.example:8080"));
+        assert!(!report.contains("user:secret"));
+    }
+
+    #[test]
+    fn combined_report_contains_doctor_environment_and_proxy() {
+        let (mut app, _) = App::boot();
+        app.doctor.data = Some(doctor_read());
+        app.environment.data = Some(environment_info());
+        app.diagnose_proxy.data = Some("Proxy: http://proxy.example:8080\nSource: env".to_string());
+
+        let report = app.diagnostics_report_text();
+        assert!(report.contains("== Unity doctor =="));
+        assert!(report.contains("Platform: linux x86_64"));
+        assert!(report.contains("[pass] Path available"));
+        assert!(report.contains("Raw report:"));
+        assert!(report.contains("== Environment =="));
+        assert!(report.contains("Proxy: http://proxy.example:8080"));
+        assert!(report.contains("== Diagnose proxy =="));
+        assert!(report.contains("Source: env"));
+        assert!(report.contains("License: Active: false"));
+    }
+
+    #[test]
+    fn copying_an_empty_report_reports_a_notice_without_panicking() {
+        let (mut app, _) = App::boot();
+        let _task = app.update(Message::CopyDiagnosticsReport);
+
+        let notice = app.notice.as_ref().expect("notice");
+        assert!(notice.text.contains("no report to copy"));
+    }
+
+    #[test]
+    fn opening_diagnostics_starts_every_section_without_waiting() {
+        let (mut app, _) = App::boot();
+        let _task = app.update(Message::Navigate(Page::Diagnostics));
+
+        assert!(app.doctor.loading);
+        assert!(app.environment.loading);
+        assert!(app.diagnose_proxy.loading);
+        assert!(app.diagnose_accelerator.loading);
+        assert!(app.diagnose_update.loading);
     }
 
     #[test]

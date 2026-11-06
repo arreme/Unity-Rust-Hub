@@ -5,12 +5,13 @@
 
 use unity_hub_model::{
     AccountCardVm, AdvisoryVm, AuthVm, BadgeVm, BreakingChangeVm, ChangelogDataVm,
-    ChangelogSectionVm, ChangelogVm, CliCardVm, CliConnectionVm, CliDetailsVm, EditorModulesVm,
-    EditorRowVm, EditorsVm, ErrorActionKind, ErrorActionVm, InstallCliVm, InstallEditorVm,
-    JobLogVm, JobPhase, JobVm, LicenseRowVm, LicenseVm, LoadState, ModalVm, ModuleOptionVm,
-    NoticeVm, OverviewVm, Page, PageVm, ProjectRowVm, ProjectsVm, ReleaseRowVm, RunningEditorVm,
-    SectionKind, SettingsVm, ShellVm, TextScaleOptionVm, Tone, UiError, UpdateVm, UpgradeProjectVm,
-    ViewModel,
+    ChangelogSectionVm, ChangelogVm, CheckStatus, CliCardVm, CliConnectionVm, CliDetailsVm,
+    DiagnoseReportVm, DiagnoseTopic, DiagnosticsVm, DoctorCheckVm, DoctorVm, EditorModulesVm,
+    EditorRowVm, EditorsVm, EnvironmentVm, ErrorActionKind, ErrorActionVm, InstallCliVm,
+    InstallEditorVm, JobLogVm, JobPhase, JobVm, LicenseRowVm, LicenseVm, LoadState, ModalVm,
+    ModuleOptionVm, NoticeVm, OverviewVm, Page, PageVm, ProjectRowVm, ProjectsVm, ProxyVm,
+    ReleaseRowVm, RunningEditorVm, SectionKind, SettingsVm, ShellVm, TextScaleOptionVm, Tone,
+    UiError, UpdateVm, UpgradeProjectVm, ViewModel,
 };
 
 pub struct Fixture {
@@ -63,6 +64,26 @@ pub fn all() -> Vec<Fixture> {
         Fixture {
             name: "Projects",
             view_model: projects(),
+        },
+        Fixture {
+            name: "Diagnostics",
+            view_model: diagnostics(),
+        },
+        Fixture {
+            name: "Diagnostics · not loaded",
+            view_model: diagnostics_idle(),
+        },
+        Fixture {
+            name: "Diagnostics · loading",
+            view_model: diagnostics_loading(),
+        },
+        Fixture {
+            name: "Diagnostics · partial failure",
+            view_model: diagnostics_partial_failure(),
+        },
+        Fixture {
+            name: "Diagnostics · fully failed",
+            view_model: diagnostics_failed(),
         },
         Fixture {
             name: "Changelog",
@@ -381,6 +402,208 @@ fn projects() -> ViewModel {
                     }],
                 },
             ]),
+        }),
+    )
+}
+
+fn doctor_fixture() -> DoctorVm {
+    DoctorVm {
+        platform: "linux".to_string(),
+        arch: "x86_64".to_string(),
+        runtime_version: "8.0.4".to_string(),
+        node_version: "22.11.0".to_string(),
+        cli_version: "1.0.0-beta.17".to_string(),
+        install_path: "/home/ada/.unity".to_string(),
+        log_directory: "/home/ada/.unity/logs".to_string(),
+        checks: vec![
+            DoctorCheckVm {
+                id: "path-available".to_string(),
+                label: "Path available".to_string(),
+                status: CheckStatus::Pass,
+                detail: Some("Directory: /home/ada/.local/bin".to_string()),
+            },
+            DoctorCheckVm {
+                id: "git-credential-helper".to_string(),
+                label: "Git credential helper".to_string(),
+                status: CheckStatus::Warn,
+                detail: Some("Helper: none".to_string()),
+            },
+            DoctorCheckVm {
+                id: "disk-space".to_string(),
+                label: "Disk space".to_string(),
+                status: CheckStatus::Fail,
+                detail: Some("Available: 2.1 GB · Required: 15 GB".to_string()),
+            },
+            DoctorCheckVm {
+                id: "fex-emu".to_string(),
+                label: "FEX emu".to_string(),
+                status: CheckStatus::Info,
+                detail: Some("Detected: false".to_string()),
+            },
+            DoctorCheckVm {
+                id: "future-check".to_string(),
+                label: "Future check".to_string(),
+                status: CheckStatus::Unknown,
+                detail: None,
+            },
+        ],
+        auth: Some("Logged in: true · User: ada@example.com".to_string()),
+        license: Some("Active: true · Product: Unity Pro".to_string()),
+        raw: "{\n  \"platform\": \"linux\",\n  \"arch\": \"x86_64\",\n  \"runtimeVersion\": \"8.0.4\",\n  \"cliVersion\": \"1.0.0-beta.17\",\n  \"checks\": [\n    { \"id\": \"path-available\", \"status\": \"pass\" },\n    { \"id\": \"git-credential-helper\", \"status\": \"warn\" },\n    { \"id\": \"disk-space\", \"status\": \"fail\" }\n  ]\n}"
+            .to_string(),
+    }
+}
+
+fn environment_fixture() -> EnvironmentVm {
+    EnvironmentVm {
+        user_data_path: "/home/ada/.config/Unity".to_string(),
+        editor_install_path: "/home/ada/Unity/Editors".to_string(),
+        download_cache_path: "/home/ada/Unity/Cache".to_string(),
+        config_path: "/home/ada/.unity".to_string(),
+        cli_version: "1.0.0-beta.17".to_string(),
+        hub_version: "0.2.1".to_string(),
+        proxy: Some(ProxyVm {
+            url: "http://proxy.example:8080".to_string(),
+            source: "env".to_string(),
+            auth_source: "keyring".to_string(),
+            no_proxy: vec!["localhost".to_string(), "127.0.0.1".to_string()],
+        }),
+    }
+}
+
+fn diagnose_fixture(topic: DiagnoseTopic) -> DiagnoseReportVm {
+    let text = match topic {
+        DiagnoseTopic::Proxy => {
+            "Proxy diagnostic (redacted)\n\nResolved proxy: http://proxy.example:8080\nSource: env\nAuth source: keyring\nNo proxy: localhost, 127.0.0.1\n\nCA bundle: system\nPAC: not configured\nCredentials: present in the OS credential store\n\nA copy was written to /home/ada/.unity/logs/proxy-report.txt"
+        }
+        DiagnoseTopic::Accelerator => {
+            "Unity Accelerator diagnostic\n\nResolved endpoint: 127.0.0.1:10080\nSource: settings\nDisabled: no\n\nProject cache server: disabled\nReachability: connection refused (ECONNREFUSED, 5.0 s)\n"
+        }
+        DiagnoseTopic::Update => {
+            "Unity CLI update diagnostic\n\nChannel: beta\nManifest: https://services.api.unity.com/unity/cli/manifest.json\nCurrent: 1.0.0-beta.17\nLatest: 1.0.0-beta.17\nHolding update back: none\n"
+        }
+    };
+
+    DiagnoseReportVm {
+        topic,
+        text: text.to_string(),
+    }
+}
+
+fn diagnostics() -> ViewModel {
+    base(
+        Page::Diagnostics,
+        PageVm::Diagnostics(DiagnosticsVm {
+            doctor: LoadState::Ready(doctor_fixture()),
+            environment: LoadState::Ready(environment_fixture()),
+            proxy_report: LoadState::Ready(diagnose_fixture(DiagnoseTopic::Proxy)),
+            accelerator_report: LoadState::Ready(diagnose_fixture(DiagnoseTopic::Accelerator)),
+            update_report: LoadState::Ready(diagnose_fixture(DiagnoseTopic::Update)),
+            can_copy: true,
+        }),
+    )
+}
+
+fn diagnostics_idle() -> ViewModel {
+    base(
+        Page::Diagnostics,
+        PageVm::Diagnostics(DiagnosticsVm {
+            doctor: LoadState::Idle,
+            environment: LoadState::Idle,
+            proxy_report: LoadState::Idle,
+            accelerator_report: LoadState::Idle,
+            update_report: LoadState::Idle,
+            can_copy: false,
+        }),
+    )
+}
+
+fn diagnostics_loading() -> ViewModel {
+    base(
+        Page::Diagnostics,
+        PageVm::Diagnostics(DiagnosticsVm {
+            doctor: LoadState::Loading {
+                previous: Some(doctor_fixture()),
+            },
+            environment: LoadState::Loading { previous: None },
+            proxy_report: LoadState::Loading { previous: None },
+            accelerator_report: LoadState::Loading { previous: None },
+            update_report: LoadState::Loading { previous: None },
+            can_copy: true,
+        }),
+    )
+}
+
+fn diagnostics_partial_failure() -> ViewModel {
+    base(
+        Page::Diagnostics,
+        PageVm::Diagnostics(DiagnosticsVm {
+            doctor: LoadState::Ready(doctor_fixture()),
+            environment: LoadState::Failed {
+                error: UiError {
+                    code: "NETWORK_UNREACHABLE".to_string(),
+                    message: "A Unity service could not be reached.".to_string(),
+                    detail: Some(
+                        "The CLI is using the configured proxy `UNITY_PROXY=http://proxy.example:8080`."
+                            .to_string(),
+                    ),
+                    action: Some(ErrorActionVm {
+                        label: "Retry".to_string(),
+                        command: None,
+                        kind: ErrorActionKind::Retry("read:environment".to_string()),
+                    }),
+                },
+                previous: Some(environment_fixture()),
+            },
+            proxy_report: LoadState::Ready(diagnose_fixture(DiagnoseTopic::Proxy)),
+            accelerator_report: LoadState::Failed {
+                error: UiError {
+                    code: "TIMEOUT".to_string(),
+                    message: "The Accelerator report timed out.".to_string(),
+                    detail: None,
+                    action: Some(ErrorActionVm {
+                        label: "Retry".to_string(),
+                        command: None,
+                        kind: ErrorActionKind::Retry("read:diagnose-accelerator".to_string()),
+                    }),
+                },
+                previous: None,
+            },
+            update_report: LoadState::Ready(diagnose_fixture(DiagnoseTopic::Update)),
+            can_copy: true,
+        }),
+    )
+}
+
+fn failed_state<T>(kind: &str) -> LoadState<T> {
+    LoadState::Failed {
+        error: UiError {
+            code: "NETWORK_UNREACHABLE".to_string(),
+            message: "A Unity service could not be reached.".to_string(),
+            detail: Some(
+                "Retry when the connection is back. The CLI is using the configured proxy."
+                    .to_string(),
+            ),
+            action: Some(ErrorActionVm {
+                label: "Retry".to_string(),
+                command: None,
+                kind: ErrorActionKind::Retry(kind.to_string()),
+            }),
+        },
+        previous: None,
+    }
+}
+
+fn diagnostics_failed() -> ViewModel {
+    base(
+        Page::Diagnostics,
+        PageVm::Diagnostics(DiagnosticsVm {
+            doctor: failed_state("read:doctor"),
+            environment: failed_state("read:environment"),
+            proxy_report: failed_state("read:diagnose-proxy"),
+            accelerator_report: failed_state("read:diagnose-accelerator"),
+            update_report: failed_state("read:diagnose-update"),
+            can_copy: false,
         }),
     )
 }

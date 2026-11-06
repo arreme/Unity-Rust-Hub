@@ -58,10 +58,11 @@ fixture when a new state needs review.
 
 ### Shell
 
-- Sidebar navigation (5 destinations), active state.
+- Sidebar navigation (6 destinations: Overview, Editors, Projects, Diagnostics,
+  Changelog, Settings), active state.
 - Sidebar footer: CLI status (checking / connected with version / missing).
 - Page header: title, subtitle, and actions (Refresh on Overview, Editors,
-  Projects).
+  Projects; Refresh plus Copy report on Diagnostics).
 - Advisory banners (above the notice), sourced from the CLI's `notifications[]`
   and `warnings[]` on any read or streamed job result frame:
   - CLI update available: neutral title, CLI message, `current → latest`, the
@@ -111,6 +112,32 @@ fixture when a new state needs review.
 - Badges: Unity Cloud, VCS, favorite, Editor not installed, local project.
 - Pipeline badge or empty, long title, long path, modified date.
 - Row actions: Open, Change version.
+
+### Diagnostics
+
+- Page header: title/subtitle, Refresh, and Copy report. Copy is disabled until
+  at least one of doctor, environment, or proxy has data.
+- Every section has its own load state, so one slow or failed read never gates
+  the others. Each failure renders the shared error treatment and its own Retry;
+  Retry re-runs only that section.
+- Doctor card (`unity doctor`): platform/architecture, runtime, Node, CLI
+  version, install path, log directory, auth/license summaries, and the check
+  list. Checks use pass/warn/fail/info/unknown styling, a humanized label from
+  the check `id` (CLI message, then `messageKey`, then a generic label as
+  fallbacks), and a detail line built from the CLI's `params`. The raw report is
+  visible in a scrollable inset. Loading, error + Retry, empty, and loaded.
+- Environment card (`unity env`): user data path, Editor install path, download
+  cache, config path, CLI and Hub versions, plus the resolved proxy URL, source,
+  auth source, and no-proxy list. A missing proxy section is stated explicitly.
+  Loading, error + Retry, and loaded.
+- Proxy, Accelerator, and Update cards (`unity diagnose <topic>`): the CLI's
+  redacted report as preformatted, scrollable text with a per-report Copy.
+  Loading, error + Retry, empty, and loaded states.
+- Copy report writes the combined plain-text doctor + environment + proxy
+  report. A failed section is named as unavailable rather than omitted. An empty
+  report or an unavailable clipboard backend becomes an error notice, never a
+  panic.
+- No mutation controls appear on this screen.
 
 ### Changelog
 
@@ -163,6 +190,37 @@ drawing their own banners.
   only), and `UiAction::RunAdvisoryRemediation(id)`. Run exists only when the
   adapter has an explicit command builder; otherwise the command is
   visible/copyable and no button is drawn.
+
+## Diagnostics contract
+
+`DiagnosticsVm` carries one independent `LoadState` per section:
+
+- `doctor: LoadState<DoctorVm>` — `DoctorVm { platform, arch, runtime_version,
+  node_version, cli_version, install_path, log_directory, checks, auth, license,
+  raw }`.
+- `environment: LoadState<EnvironmentVm>` — `EnvironmentVm { user_data_path,
+  editor_install_path, download_cache_path, config_path, cli_version,
+  hub_version, proxy: Option<ProxyVm> }`.
+- `proxy_report`, `accelerator_report`, `update_report:
+  LoadState<DiagnoseReportVm>` — `DiagnoseReportVm { topic, text }`.
+- `can_copy: bool` — true when doctor, environment, or proxy has data.
+
+`DoctorCheckVm { id, label, status: CheckStatus, detail }`. `CheckStatus` is
+`Pass | Warn | Fail | Info | Unknown`; unknown CLI statuses are shown neutrally
+instead of guessed. `label` is never a raw localization key unless the key's
+last segment is the only available text. `detail` renders `params` as
+`Humanized key: value` pairs, preserving the CLI's values verbatim.
+
+Actions: `UiAction::CopyDiagnosticsReport` (combined plain text),
+`UiAction::CopyDiagnoseReport(DiagnoseTopic)` (one redacted report), and
+`UiAction::Refresh` (re-runs all five section reads). Retry uses the same
+`ErrorActionKind::Retry("read:doctor" | "read:environment" |
+"read:diagnose-proxy" | "read:diagnose-accelerator" | "read:diagnose-update")`
+targets as every other read.
+
+Gallery fixtures: `Diagnostics`, `Diagnostics · not loaded`,
+`Diagnostics · loading`, `Diagnostics · partial failure`,
+`Diagnostics · fully failed`.
 
 ## Error contract
 

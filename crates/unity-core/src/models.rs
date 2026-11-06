@@ -421,6 +421,171 @@ pub struct RawChangelog {
     pub changelog: String,
 }
 
+/// The useful parts of `unity doctor --format json`.
+///
+/// Every field is optional in practice: the CLI adds report sections between
+/// betas, and a missing or `null` value must never fail the whole read. Fields
+/// whose shape is still evolving (`auth`, `license`) stay as `Value` and are
+/// summarized by the controller instead of guessed at here.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct DoctorReport {
+    #[serde(default, deserialize_with = "default_string")]
+    pub platform: String,
+    #[serde(default, deserialize_with = "default_string")]
+    pub arch: String,
+    #[serde(default, deserialize_with = "optional_text")]
+    pub runtime_version: Option<String>,
+    #[serde(default, deserialize_with = "optional_text")]
+    pub node_version: Option<String>,
+    /// A bare version string, or a version object (`{ "version": … }`).
+    #[serde(default, deserialize_with = "optional_text")]
+    pub cli_version: Option<String>,
+    #[serde(default, deserialize_with = "optional_text")]
+    pub install_path: Option<String>,
+    #[serde(default, deserialize_with = "optional_text")]
+    pub log_directory: Option<String>,
+    #[serde(default, deserialize_with = "default_vec")]
+    pub checks: Vec<DoctorCheck>,
+    /// The CLI's auth section. The shape is still evolving, so it is carried
+    /// verbatim and summarized defensively by the controller.
+    #[serde(default)]
+    pub auth: Option<Value>,
+    /// The CLI's license section, carried for the same reason as `auth`.
+    #[serde(default)]
+    pub license: Option<Value>,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+/// One environment health check from `unity doctor`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct DoctorCheck {
+    #[serde(default, deserialize_with = "default_string")]
+    pub id: String,
+    /// `pass`, `warn`, `fail`, or `info`; an unknown value is kept as-is.
+    #[serde(default, deserialize_with = "default_string")]
+    pub status: String,
+    /// A localization key. The app renders a humanized label first and keeps
+    /// this as the fallback when the id is missing or unknown.
+    #[serde(default, deserialize_with = "optional_text")]
+    pub message_key: Option<String>,
+    /// Values the CLI would interpolate into the localized message.
+    #[serde(default, deserialize_with = "default_map")]
+    pub params: Map<String, Value>,
+    /// A pre-rendered message some CLI versions send alongside `messageKey`.
+    #[serde(default, deserialize_with = "optional_text")]
+    pub message: Option<String>,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+/// The useful parts of `unity env --format json`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct EnvironmentInfo {
+    #[serde(default, deserialize_with = "default_string")]
+    pub user_data_path: String,
+    #[serde(default, deserialize_with = "default_string")]
+    pub editor_install_path: String,
+    #[serde(default, deserialize_with = "default_string")]
+    pub download_cache_path: String,
+    #[serde(default, deserialize_with = "default_string")]
+    pub config_path: String,
+    #[serde(default, deserialize_with = "optional_text")]
+    pub cli_version: Option<String>,
+    #[serde(default, deserialize_with = "optional_text")]
+    pub hub_version: Option<String>,
+    #[serde(default)]
+    pub proxy: Option<EnvironmentProxy>,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+/// The resolved proxy from `unity env`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct EnvironmentProxy {
+    #[serde(default, deserialize_with = "optional_text")]
+    pub url: Option<String>,
+    #[serde(default, deserialize_with = "optional_text")]
+    pub source: Option<String>,
+    #[serde(default, deserialize_with = "optional_text")]
+    pub auth_source: Option<String>,
+    /// The CLI sends an array or a comma/space separated string.
+    #[serde(default, deserialize_with = "string_list")]
+    pub no_proxy: Vec<String>,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+/// A scalar, number, or small object rendered as text. Used where the CLI has
+/// shipped a string in one beta and an object in another.
+fn text_from_value(value: &Value) -> Option<String> {
+    match value {
+        Value::String(text) => {
+            let text = text.trim();
+            (!text.is_empty()).then(|| text.to_string())
+        }
+        Value::Number(number) => Some(number.to_string()),
+        Value::Bool(value) => Some(value.to_string()),
+        Value::Object(object) => ["version", "value", "text", "name"]
+            .iter()
+            .find_map(|key| object.get(*key).and_then(text_from_value)),
+        _ => None,
+    }
+}
+
+fn optional_text<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<Value>::deserialize(deserializer)?;
+    Ok(value.and_then(|value| text_from_value(&value)))
+}
+
+fn default_string<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(optional_text(deserializer)?.unwrap_or_default())
+}
+
+fn default_vec<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Ok(Option::<Vec<T>>::deserialize(deserializer)?.unwrap_or_default())
+}
+
+fn default_map<'de, D>(deserializer: D) -> Result<Map<String, Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<Map<String, Value>>::deserialize(deserializer)?.unwrap_or_default())
+}
+
+fn string_list<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<Value>::deserialize(deserializer)?;
+    let values: Vec<String> = match value {
+        Some(Value::Array(items)) => items.iter().filter_map(text_from_value).collect::<Vec<_>>(),
+        Some(Value::String(text)) => text
+            .split(|character: char| character == ',' || character.is_whitespace())
+            .filter_map(|part| {
+                let part = part.trim();
+                (!part.is_empty()).then(|| part.to_string())
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    Ok(values)
+}
+
 /// The useful parts of `unity install --dry-run` output.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -459,4 +624,128 @@ pub struct PreviewModule {
     pub download_size: u64,
     #[serde(default)]
     pub installed_size: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn doctor_report_keeps_checks_and_tolerates_evolving_shapes() {
+        let report: DoctorReport = serde_json::from_value(serde_json::json!({
+            "platform": "linux",
+            "arch": "x86_64",
+            "runtimeVersion": "8.0.4",
+            "nodeVersion": null,
+            "cliVersion": { "version": "1.0.0-beta.17", "channel": "beta" },
+            "installPath": "/home/ada/.unity",
+            "logDirectory": "/home/ada/.unity/logs",
+            "checks": [
+                {
+                    "id": "path-available",
+                    "status": "pass",
+                    "messageKey": "doctor.checks.pathAvailable",
+                    "params": { "directory": "/home/ada/.local/bin" }
+                },
+                {
+                    "id": "git-credential-helper",
+                    "status": "warn",
+                    "messageKey": null,
+                    "params": null,
+                    "futureField": true
+                },
+                { "status": "fail" }
+            ],
+            "auth": { "loggedIn": true },
+            "license": { "active": false },
+            "futureSection": { "anything": true }
+        }))
+        .expect("doctor report parses");
+
+        assert_eq!(report.platform, "linux");
+        assert_eq!(report.arch, "x86_64");
+        assert_eq!(report.runtime_version.as_deref(), Some("8.0.4"));
+        assert_eq!(report.node_version, None);
+        assert_eq!(report.cli_version.as_deref(), Some("1.0.0-beta.17"));
+        assert_eq!(report.checks.len(), 3);
+        assert_eq!(report.checks[0].id, "path-available");
+        assert_eq!(report.checks[0].status, "pass");
+        assert_eq!(
+            report.checks[0].message_key.as_deref(),
+            Some("doctor.checks.pathAvailable")
+        );
+        assert_eq!(
+            report.checks[0]
+                .params
+                .get("directory")
+                .and_then(Value::as_str),
+            Some("/home/ada/.local/bin")
+        );
+        assert!(report.checks[1].params.is_empty());
+        assert_eq!(report.checks[1].status, "warn");
+        // A check with no id is kept, so the UI can still show its status.
+        assert!(report.checks[2].id.is_empty());
+        assert!(report.auth.is_some());
+        assert!(report.license.is_some());
+        assert!(report.extra.contains_key("futureSection"));
+    }
+
+    #[test]
+    fn doctor_report_accepts_a_bare_version_string() {
+        let report: DoctorReport = serde_json::from_value(serde_json::json!({
+            "cliVersion": "1.0.0-beta.17"
+        }))
+        .unwrap();
+        assert_eq!(report.cli_version.as_deref(), Some("1.0.0-beta.17"));
+        assert_eq!(report.platform, "");
+        assert!(report.checks.is_empty());
+    }
+
+    #[test]
+    fn environment_reads_proxy_and_no_proxy_lists() {
+        let info: EnvironmentInfo = serde_json::from_value(serde_json::json!({
+            "userDataPath": "/home/ada/.config/Unity",
+            "editorInstallPath": "/home/ada/Unity/Editors",
+            "downloadCachePath": "/home/ada/Unity/Cache",
+            "configPath": "/home/ada/.unity",
+            "cliVersion": "1.0.0-beta.17",
+            "hubVersion": "0.2.1",
+            "proxy": {
+                "url": "http://proxy.example:8080",
+                "source": "env",
+                "authSource": "keyring",
+                "noProxy": "localhost,127.0.0.1 .unity.local"
+            }
+        }))
+        .expect("env parses");
+
+        assert_eq!(info.user_data_path, "/home/ada/.config/Unity");
+        assert_eq!(info.hub_version.as_deref(), Some("0.2.1"));
+        let proxy = info.proxy.expect("proxy");
+        assert_eq!(proxy.url.as_deref(), Some("http://proxy.example:8080"));
+        assert_eq!(proxy.source.as_deref(), Some("env"));
+        assert_eq!(proxy.auth_source.as_deref(), Some("keyring"));
+        assert_eq!(
+            proxy.no_proxy,
+            vec!["localhost", "127.0.0.1", ".unity.local"]
+        );
+    }
+
+    #[test]
+    fn environment_accepts_a_no_proxy_array_and_no_proxy() {
+        let info: EnvironmentInfo = serde_json::from_value(serde_json::json!({
+            "proxy": { "url": null, "noProxy": ["localhost", "*.local"] }
+        }))
+        .unwrap();
+        let proxy = info.proxy.expect("proxy");
+        assert_eq!(proxy.url, None);
+        assert_eq!(proxy.no_proxy, vec!["localhost", "*.local"]);
+
+        let info: EnvironmentInfo = serde_json::from_value(serde_json::json!({
+            "proxy": null
+        }))
+        .unwrap();
+        assert!(info.proxy.is_none());
+        assert_eq!(info.user_data_path, "");
+    }
 }

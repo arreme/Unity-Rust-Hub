@@ -83,6 +83,13 @@ update target.
   build target, cloud/VCS badges, an Open action, and a guarded upgrade dialog.
 - **Changelog** — `unity changelog` rendered as sections with readable bullet points and
   a focused heuristic for **possible breaking changes**, plus a raw Markdown view.
+- **Diagnostics** — a read-only answer to "can this machine build?" from `unity doctor`,
+  `unity env`, and the redacted `unity diagnose proxy|accelerator|update` reports. Doctor
+  checks carry pass/warn/fail/info styling and human-readable labels derived from the check
+  id (the localization key is the fallback), and the raw report stays visible. Environment
+  paths and the resolved proxy (URL, source, auth source, no-proxy list) render together.
+  Every section loads independently and retries alone; one Copy writes doctor + environment
+  + proxy as plain text, and a clipboard failure is reported as a notice.
 - **Provider-ready changelog** — `ChangelogProvider` is a trait; v1 uses
   `CliChangelogProvider`. A remote JSON/docs feed can be added without changing the UI.
 - **Settings** — explicit CLI path override with auto-detection fallback and a persisted
@@ -132,7 +139,7 @@ crates/unity-hub-ui/        Visual layer; depends only on unity-hub-model + iced
   src/tokens.rs             Figma-mappable palette, spacing, radii, type tokens.
   src/theme.rs              iced theme/styles built from tokens.
   src/components.rs         Shared cards, badges, tables, headers.
-  src/pages/                overview, editors, projects, changelog, settings.
+  src/pages/                overview, editors, projects, diagnostics, changelog, settings.
   src/shell.rs              Sidebar, advisory banners, notice and job cards.
   src/modals.rs             Full-screen dialog screens.
   src/fixtures.rs           Deterministic content for every screen/state.
@@ -308,7 +315,9 @@ unity <command> --format json --no-pager --no-banner --non-interactive
 
 Long operations use `--format ndjson` and are streamed by `JobManager` into the active
 job card. `projects upgrade` is run **without** `--wait` so the job ends when the
-upgrade does, not when the Editor is closed.
+upgrade does, not when the Editor is closed. Diagnostics reads are `unity doctor`,
+`unity env`, and `unity diagnose <topic>` (the diagnose topics ask for the plain,
+redacted report, not an envelope).
 
 CLI beta.15 removed the `list` subcommands and deprecated a few flags, so the adapter
 uses the current spellings: `unity projects --all`, `unity modules <version>`,

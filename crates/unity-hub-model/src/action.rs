@@ -1,4 +1,4 @@
-use crate::{ErrorActionVm, Page};
+use crate::{DiagnoseTopic, ErrorActionVm, Page};
 
 /// Everything a screen is allowed to ask the application to do.
 ///
@@ -22,6 +22,11 @@ pub enum UiAction {
     /// Runs the primary action shown on a failed read or job. The controller
     /// resolves the target itself; the UI never retries by holding a closure.
     RunErrorAction(ErrorActionVm),
+    /// Copies the combined diagnostics report (doctor + env + proxy) as plain
+    /// text. Reads only; nothing on that page mutates the machine.
+    CopyDiagnosticsReport,
+    /// Copies one redacted `unity diagnose` report.
+    CopyDiagnoseReport(DiagnoseTopic),
     DismissJob,
     CancelJob,
     SignIn,

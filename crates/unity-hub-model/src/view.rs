@@ -6,15 +6,17 @@ pub enum Page {
     Overview,
     Editors,
     Projects,
+    Diagnostics,
     Changelog,
     Settings,
 }
 
 impl Page {
-    pub const ALL: [Page; 5] = [
+    pub const ALL: [Page; 6] = [
         Page::Overview,
         Page::Editors,
         Page::Projects,
+        Page::Diagnostics,
         Page::Changelog,
         Page::Settings,
     ];
@@ -217,6 +219,7 @@ pub enum PageVm {
     Overview(OverviewVm),
     Editors(EditorsVm),
     Projects(ProjectsVm),
+    Diagnostics(DiagnosticsVm),
     Changelog(ChangelogVm),
     Settings(SettingsVm),
 }
@@ -404,6 +407,112 @@ pub struct ProjectRowVm {
     pub short_path: String,
     pub modified: String,
     pub badges: Vec<BadgeVm>,
+}
+
+// ---------------------------------------------------------------------------
+// Diagnostics
+
+/// Read-only machine diagnostics, one independent read per section.
+///
+/// No section gates another: the page renders each `LoadState` on its own, so a
+/// slow `unity diagnose accelerator` never hides the doctor checks that already
+/// arrived. Every failed section carries its own Retry action.
+#[derive(Debug, Clone)]
+pub struct DiagnosticsVm {
+    pub doctor: LoadState<DoctorVm>,
+    pub environment: LoadState<EnvironmentVm>,
+    pub proxy_report: LoadState<DiagnoseReportVm>,
+    pub accelerator_report: LoadState<DiagnoseReportVm>,
+    pub update_report: LoadState<DiagnoseReportVm>,
+    /// True when at least one of doctor, environment, or proxy is loaded, so
+    /// the combined Copy action has something to write.
+    pub can_copy: bool,
+}
+
+/// `unity doctor --format json`, mapped for display.
+#[derive(Debug, Clone)]
+pub struct DoctorVm {
+    pub platform: String,
+    pub arch: String,
+    pub runtime_version: String,
+    pub node_version: String,
+    pub cli_version: String,
+    pub install_path: String,
+    pub log_directory: String,
+    pub checks: Vec<DoctorCheckVm>,
+    /// A short summary of the CLI's auth section, when it reports one.
+    pub auth: Option<String>,
+    /// A short summary of the CLI's license section, when it reports one.
+    pub license: Option<String>,
+    /// The raw `data` document, pretty-printed. Report sections this build does
+    /// not model are never hidden from the user.
+    pub raw: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DoctorCheckVm {
+    pub id: String,
+    /// Humanized from `id`/`params`, with `messageKey` as the fallback.
+    pub label: String,
+    pub status: CheckStatus,
+    /// The `params` values the CLI would interpolate, rendered as key/value
+    /// pairs so a path or version is visible without guessing a template.
+    pub detail: Option<String>,
+}
+
+/// The four documented doctor statuses plus an explicit unknown state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckStatus {
+    Pass,
+    Warn,
+    Fail,
+    Info,
+    Unknown,
+}
+
+/// `unity env --format json`, mapped for display.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnvironmentVm {
+    pub user_data_path: String,
+    pub editor_install_path: String,
+    pub download_cache_path: String,
+    pub config_path: String,
+    pub cli_version: String,
+    pub hub_version: String,
+    pub proxy: Option<ProxyVm>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProxyVm {
+    pub url: String,
+    pub source: String,
+    pub auth_source: String,
+    pub no_proxy: Vec<String>,
+}
+
+/// One of the CLI's redacted `unity diagnose` reports, preformatted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiagnoseReportVm {
+    pub topic: DiagnoseTopic,
+    pub text: String,
+}
+
+/// The fixed diagnose topics. None of them accepts a user-supplied value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiagnoseTopic {
+    Proxy,
+    Accelerator,
+    Update,
+}
+
+impl DiagnoseTopic {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Proxy => "Proxy",
+            Self::Accelerator => "Accelerator",
+            Self::Update => "Update",
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

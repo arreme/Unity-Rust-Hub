@@ -392,6 +392,7 @@ fn page_icon(page: Page) -> char {
         Page::Overview => icons::DASHBOARD,
         Page::Editors => icons::BOX,
         Page::Projects => icons::FOLDERS,
+        Page::Diagnostics => icons::WRENCH,
         Page::Changelog => icons::NEWSPAPER,
         Page::Settings => icons::SETTINGS,
     }
@@ -402,6 +403,7 @@ pub fn page_label(page: Page) -> &'static str {
         Page::Overview => "Overview",
         Page::Editors => "Editors",
         Page::Projects => "Projects",
+        Page::Diagnostics => "Diagnostics",
         Page::Changelog => "Changelog",
         Page::Settings => "Settings",
     }

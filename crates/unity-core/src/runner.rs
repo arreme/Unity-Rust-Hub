@@ -8,11 +8,11 @@ use serde_json::Value;
 
 use crate::advisory::{advisories_from_envelope, AdvisorySink, CliAdvisory};
 use crate::envelope::{parse_data, parse_envelope, parse_items, ValueEnvelope};
-use crate::errors::{message_for_exit_code, UnityError};
+use crate::errors::{code_for_exit_code, message_for_exit_code, UnityError};
 use crate::models::{
-    AuthStatus, CliStatus, CliUpdateInfo, CliVersion, Editor, EditorInfo, InstallPath,
-    LicenseStatus, Module, PipelineEditors, Project, RawChangelog, Release, RunningEditor,
-    RunningEditors,
+    AuthStatus, CliStatus, CliUpdateInfo, CliVersion, DoctorReport, Editor, EditorInfo,
+    EnvironmentInfo, InstallPath, LicenseStatus, Module, PipelineEditors, Project, RawChangelog,
+    Release, RunningEditor, RunningEditors,
 };
 use crate::versions::{
     validate_architecture, validate_cli_version, validate_editor_version, validate_module_id,
@@ -342,6 +342,90 @@ impl UnityCli {
         parse_data(executed.envelope)
     }
 
+    /// Builds the `unity doctor` read invocation. It takes no user input.
+    pub fn doctor_spec(&self) -> Result<CommandSpec, UnityError> {
+        self.spec(&svec(&["doctor"]), "json")
+    }
+
+    /// Reads the CLI's own system diagnostics.
+    pub fn doctor(&self) -> Result<DoctorRead, UnityError> {
+        let executed = self.execute(&self.doctor_spec()?)?;
+        let data = executed.envelope.data.ok_or_else(|| {
+            UnityError::unexpected_output("`unity doctor` returned no `data` field.")
+        })?;
+        let raw = serde_json::to_string_pretty(&data).unwrap_or_else(|_| data.to_string());
+        let report: DoctorReport = serde_json::from_value(data).map_err(|err| {
+            UnityError::unexpected_output(format!("Could not parse the doctor report: {err}"))
+        })?;
+        Ok(DoctorRead { report, raw })
+    }
+
+    /// Builds the `unity env` read invocation. It takes no user input.
+    pub fn environment_spec(&self) -> Result<CommandSpec, UnityError> {
+        self.spec(&svec(&["env"]), "json")
+    }
+
+    /// Reads the CLI's resolved environment paths and proxy.
+    pub fn environment(&self) -> Result<EnvironmentInfo, UnityError> {
+        let executed = self.execute(&self.environment_spec()?)?;
+        parse_data(executed.envelope)
+    }
+
+    /// Builds one `unity diagnose <topic>` invocation.
+    ///
+    /// `diagnose` writes its redacted report as plain text to stdout in every
+    /// format except JSON, so this asks for the human report and does not use
+    /// the JSON envelope flags.
+    pub fn diagnose_spec(&self, topic: DiagnoseTopic) -> Result<CommandSpec, UnityError> {
+        self.spec(&svec(&["diagnose", topic.arg()]), "human")
+    }
+
+    /// Reads one redacted diagnose report as preformatted text.
+    ///
+    /// The output is text, not an envelope, but the command is parsed
+    /// defensively: if a CLI version answers with JSON instead, the report text
+    /// is extracted from it rather than shown as escaped JSON.
+    pub fn diagnose(&self, topic: DiagnoseTopic) -> Result<String, UnityError> {
+        let spec = self.diagnose_spec(topic)?;
+        let output = run_command(&spec, DEFAULT_READ_TIMEOUT)?;
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        let exit_code = output.status.code();
+
+        let envelope = parse_envelope(&stdout).ok();
+        if let Some(envelope) = &envelope {
+            // A diagnose report is read-only, but it can still carry the CLI's
+            // advisories. Collect them before deciding success or failure.
+            self.advisories.push(advisories_from_envelope(envelope));
+        }
+
+        if let Some(envelope) = &envelope {
+            if !envelope.success {
+                return Err(envelope_error(envelope, &stderr, exit_code));
+            }
+        }
+
+        if !output.status.success() {
+            if let Some(envelope) = &envelope {
+                return Err(envelope_error(envelope, &stderr, exit_code));
+            }
+            let code = exit_code
+                .map(code_for_exit_code)
+                .unwrap_or("COMMAND_FAILED");
+            let message = exit_code
+                .map(message_for_exit_code)
+                .unwrap_or("The Unity CLI command failed.");
+            let mut error = UnityError::new(code, message).with_exit_code(exit_code);
+            let stderr = stderr.trim();
+            if !stderr.is_empty() {
+                error.detail = Some(stderr.to_string());
+            }
+            return Err(error);
+        }
+
+        Ok(report_text(envelope.as_ref(), &stdout))
+    }
+
     /// Runs `unity install <version> --dry-run` and returns the raw preview.
     pub fn dry_run_install(
         &self,
@@ -506,6 +590,46 @@ fn same_project_path(left: &str, right: &str) -> bool {
     left == right || (cfg!(windows) && left.eq_ignore_ascii_case(right))
 }
 
+/// Extracts the report body from a `unity diagnose` answer.
+///
+/// The documented output is plain text. Some CLI builds can still answer with
+/// an envelope (or a JSON object) under a format flag, so a JSON body is
+/// unwrapped to its report text and only pretty-printed as a last resort.
+fn report_text(envelope: Option<&ValueEnvelope>, stdout: &str) -> String {
+    if let Some(envelope) = envelope {
+        if let Some(data) = &envelope.data {
+            return report_from_data(data);
+        }
+    }
+
+    let trimmed = stdout.trim();
+    if trimmed.is_empty() {
+        return "The CLI wrote an empty report.".to_string();
+    }
+    if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
+        return report_from_data(&value);
+    }
+    trimmed.to_string()
+}
+
+fn report_from_data(data: &Value) -> String {
+    if let Some(text) = data.as_str() {
+        let text = text.trim();
+        if !text.is_empty() {
+            return text.to_string();
+        }
+    }
+    for key in ["report", "text", "message"] {
+        if let Some(text) = data.get(key).and_then(Value::as_str) {
+            let text = text.trim();
+            if !text.is_empty() {
+                return text.to_string();
+            }
+        }
+    }
+    serde_json::to_string_pretty(data).unwrap_or_else(|_| data.to_string())
+}
+
 fn envelope_error(envelope: &ValueEnvelope, stderr: &str, exit_code: Option<i32>) -> UnityError {
     envelope
         .errors
@@ -620,6 +744,41 @@ where
         let _ = reader.read_to_end(&mut buffer);
         buffer
     })
+}
+
+/// A `unity diagnose` topic. The set is fixed here because none of these
+/// commands takes a user-supplied value; nothing from a form reaches argv.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiagnoseTopic {
+    Proxy,
+    Accelerator,
+    Update,
+}
+
+impl DiagnoseTopic {
+    pub const ALL: [DiagnoseTopic; 3] = [
+        DiagnoseTopic::Proxy,
+        DiagnoseTopic::Accelerator,
+        DiagnoseTopic::Update,
+    ];
+
+    pub fn arg(self) -> &'static str {
+        match self {
+            Self::Proxy => "proxy",
+            Self::Accelerator => "accelerator",
+            Self::Update => "update",
+        }
+    }
+}
+
+/// A doctor report plus the raw JSON the CLI returned.
+///
+/// The page renders the typed checks and keeps the raw document visible, so a
+/// report section this build does not model yet is never hidden from the user.
+#[derive(Debug, Clone)]
+pub struct DoctorRead {
+    pub report: DoctorReport,
+    pub raw: String,
 }
 
 /// The result of one synchronous CLI invocation.
@@ -1436,5 +1595,110 @@ mod tests {
         let stdout = String::from_utf8_lossy(&output.stdout);
 
         assert_eq!(stdout, "unset|unset|unset|unset");
+    }
+
+    #[test]
+    fn diagnostics_read_specs_take_no_user_value_and_use_the_standard_machine_flags() {
+        let path = std::env::temp_dir().join(format!(
+            "unity-rust-hub-cli-test-{}-doctor-env",
+            std::process::id()
+        ));
+        std::fs::write(&path, b"test").unwrap();
+
+        let cli = UnityCli::new();
+        cli.set_override_path(Some(path.clone()));
+        let doctor = cli.doctor_spec().expect("the doctor spec resolves");
+        let environment = cli.environment_spec().expect("the env spec resolves");
+        std::fs::remove_file(path).ok();
+
+        assert_eq!(
+            doctor.args,
+            svec(&[
+                "doctor",
+                "--format",
+                "json",
+                "--no-pager",
+                "--no-banner",
+                "--non-interactive",
+            ])
+        );
+        assert_eq!(
+            environment.args,
+            svec(&[
+                "env",
+                "--format",
+                "json",
+                "--no-pager",
+                "--no-banner",
+                "--non-interactive",
+            ])
+        );
+        assert!(doctor
+            .env
+            .iter()
+            .any(|(key, value)| key == DO_NOT_TRACK_ENV && value == "1"));
+        assert!(environment
+            .env
+            .iter()
+            .any(|(key, value)| key == DO_NOT_TRACK_ENV && value == "1"));
+    }
+
+    #[test]
+    fn diagnose_specs_ask_for_the_plain_report_and_never_a_shell_string() {
+        let path = std::env::temp_dir().join(format!(
+            "unity-rust-hub-cli-test-{}-diagnose",
+            std::process::id()
+        ));
+        std::fs::write(&path, b"test").unwrap();
+
+        let cli = UnityCli::new();
+        cli.set_override_path(Some(path.clone()));
+        let spec = cli
+            .diagnose_spec(DiagnoseTopic::Proxy)
+            .expect("the diagnose spec resolves");
+        std::fs::remove_file(path).ok();
+
+        assert_eq!(
+            spec.args,
+            svec(&[
+                "diagnose",
+                "proxy",
+                "--format",
+                "human",
+                "--no-pager",
+                "--no-banner",
+                "--non-interactive",
+            ])
+        );
+        assert!(spec
+            .env
+            .iter()
+            .any(|(key, value)| key == DO_NOT_TRACK_ENV && value == "1"));
+        assert_eq!(DiagnoseTopic::Accelerator.arg(), "accelerator");
+        assert_eq!(DiagnoseTopic::Update.arg(), "update");
+    }
+
+    #[test]
+    fn diagnose_text_unwraps_an_envelope_or_keeps_the_plain_report() {
+        let envelope = parse_envelope(
+            r#"{"success":true,"data":{"report":"Proxy: none\nNo proxy configured."}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            report_text(Some(&envelope), ""),
+            "Proxy: none\nNo proxy configured."
+        );
+
+        let envelope = parse_envelope(r#"{"success":true,"data":"Proxy: none"}"#).unwrap();
+        assert_eq!(report_text(Some(&envelope), ""), "Proxy: none");
+
+        let envelope = parse_envelope(r#"{"success":true,"data":{"endpoint":"none"}}"#).unwrap();
+        assert!(report_text(Some(&envelope), "").contains("\"endpoint\": \"none\""));
+
+        assert_eq!(
+            report_text(None, "Proxy: http://proxy.example\n  source: env"),
+            "Proxy: http://proxy.example\n  source: env"
+        );
+        assert_eq!(report_text(None, "   "), "The CLI wrote an empty report.");
     }
 }

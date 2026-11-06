@@ -15,4 +15,4 @@ pub mod versions;
 
 pub use advisory::{AdvisoryOrigin, AdvisorySink, CliAdvisory};
 pub use errors::UnityError;
-pub use runner::{scrub_appimage_env, CommandSpec, Executed, UnityCli};
+pub use runner::{scrub_appimage_env, CommandSpec, DiagnoseTopic, DoctorRead, Executed, UnityCli};
