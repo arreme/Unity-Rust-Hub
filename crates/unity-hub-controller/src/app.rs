@@ -77,6 +77,15 @@ impl<T> Loadable<T> {
     pub fn is_loading(&self) -> bool {
         self.loading
     }
+
+    /// Whether an automatic page load should start this read.
+    ///
+    /// A failed read waits for the user's Retry action or an explicit Refresh.
+    /// Re-running it on every navigation would turn a denied authorization
+    /// into a prompt/retry storm.
+    fn should_start(&self, force: bool) -> bool {
+        !self.loading && (force || (self.data.is_none() && self.error.is_none()))
+    }
 }
 
 /// Which read a failed `Loadable` belongs to. The id is stable across view
@@ -201,6 +210,25 @@ pub struct Notice {
     pub text: String,
 }
 
+/// A clipboard writer that returns a real result. The controller owns one so a
+/// test can substitute a failing backend without a display server; the
+/// production implementation is the OS clipboard through `arboard`.
+trait ClipboardBackend {
+    fn write(&self, text: &str) -> Result<(), String>;
+}
+
+struct OperatingSystemClipboard;
+
+impl ClipboardBackend for OperatingSystemClipboard {
+    fn write(&self, text: &str) -> Result<(), String> {
+        let mut clipboard =
+            arboard::Clipboard::new().map_err(|error| format!("clipboard unavailable: {error}"))?;
+        clipboard
+            .set_text(text.to_owned())
+            .map_err(|error| format!("clipboard write failed: {error}"))
+    }
+}
+
 impl Notice {
     pub fn info(text: impl Into<String>) -> Self {
         Self {
@@ -297,6 +325,7 @@ impl ActiveJob {
 pub struct App {
     pub cli: UnityCli,
     pub jobs: JobManager,
+    clipboard: Box<dyn ClipboardBackend>,
     pub page: Page,
     pub cli_status: Loadable<CliStatus>,
     pub update: Loadable<CliUpdateInfo>,
@@ -488,6 +517,7 @@ impl App {
         let mut app = Self {
             cli: cli.clone(),
             jobs: JobManager::with_sink(cli.advisory_sink()),
+            clipboard: Box::new(OperatingSystemClipboard),
             page: Page::Overview,
             cli_status: Loadable::default(),
             update: Loadable::default(),
@@ -1789,31 +1819,32 @@ impl App {
 
     /// Starts missing Overview reads. `force` reloads data that is already
     /// present, but never starts a second copy of a read that is in flight.
+    /// A read that failed waits for Retry or Refresh.
     fn load_overview_data(&mut self, force: bool) -> Task<Message> {
         let mut tasks = Vec::new();
 
-        if (force || self.update.data.is_none()) && !self.update.loading {
+        if self.update.should_start(force) {
             self.update.begin();
             tasks.push(load_update(self.cli.clone()));
         }
-        if (force || self.auth.data.is_none()) && !self.auth.loading {
+        if self.auth.should_start(force) {
             self.auth.begin();
             tasks.push(load_auth(self.cli.clone()));
         }
-        if (force || self.license.data.is_none()) && !self.license.loading {
+        if self.license.should_start(force) {
             self.license.begin();
             tasks.push(load_license(self.cli.clone()));
         }
-        if (force || self.running.data.is_none()) && !self.running.loading {
+        if self.running.should_start(force) {
             self.running.begin();
             tasks.push(load_running(self.cli.clone()));
         }
         // The summary row counts installed Editors and registered projects.
-        if (force || self.editors.data.is_none()) && !self.editors.loading {
+        if self.editors.should_start(force) {
             self.editors.begin();
             tasks.push(load_editors(self.cli.clone()));
         }
-        if (force || self.projects.data.is_none()) && !self.projects.loading {
+        if self.projects.should_start(force) {
             self.projects.begin();
             tasks.push(load_projects(self.cli.clone()));
         }
@@ -1824,11 +1855,11 @@ impl App {
     fn load_editors_page(&mut self, force: bool) -> Task<Message> {
         let mut tasks = Vec::new();
 
-        if (force || self.editors.data.is_none()) && !self.editors.loading {
+        if self.editors.should_start(force) {
             self.editors.begin();
             tasks.push(load_editors(self.cli.clone()));
         }
-        if (force || self.releases.data.is_none()) && !self.releases.loading {
+        if self.releases.should_start(force) {
             self.releases.begin();
             tasks.push(load_releases(self.cli.clone()));
         }
@@ -1839,15 +1870,15 @@ impl App {
     fn load_projects_page(&mut self, force: bool) -> Task<Message> {
         let mut tasks = Vec::new();
 
-        if (force || self.projects.data.is_none()) && !self.projects.loading {
+        if self.projects.should_start(force) {
             self.projects.begin();
             tasks.push(load_projects(self.cli.clone()));
         }
-        if (force || self.editors.data.is_none()) && !self.editors.loading {
+        if self.editors.should_start(force) {
             self.editors.begin();
             tasks.push(load_editors(self.cli.clone()));
         }
-        if (force || self.running.data.is_none()) && !self.running.loading {
+        if self.running.should_start(force) {
             self.running.begin();
             tasks.push(load_running(self.cli.clone()));
         }
@@ -1874,24 +1905,23 @@ impl App {
     fn load_diagnostics_page(&mut self, force: bool) -> Task<Message> {
         let mut tasks = Vec::new();
 
-        if (force || self.doctor.data.is_none()) && !self.doctor.loading {
+        if self.doctor.should_start(force) {
             self.doctor.begin();
             tasks.push(load_doctor(self.cli.clone()));
         }
-        if (force || self.environment.data.is_none()) && !self.environment.loading {
+        if self.environment.should_start(force) {
             self.environment.begin();
             tasks.push(load_environment(self.cli.clone()));
         }
-        if (force || self.diagnose_proxy.data.is_none()) && !self.diagnose_proxy.loading {
+        if self.diagnose_proxy.should_start(force) {
             self.diagnose_proxy.begin();
             tasks.push(load_diagnose(self.cli.clone(), CliDiagnose::Proxy));
         }
-        if (force || self.diagnose_accelerator.data.is_none()) && !self.diagnose_accelerator.loading
-        {
+        if self.diagnose_accelerator.should_start(force) {
             self.diagnose_accelerator.begin();
             tasks.push(load_diagnose(self.cli.clone(), CliDiagnose::Accelerator));
         }
-        if (force || self.diagnose_update.data.is_none()) && !self.diagnose_update.loading {
+        if self.diagnose_update.should_start(force) {
             self.diagnose_update.begin();
             tasks.push(load_diagnose(self.cli.clone(), CliDiagnose::Update));
         }
@@ -2464,23 +2494,24 @@ impl App {
             .filter(|text| !text.is_empty())
     }
 
-    /// Writes a report to the clipboard. iced's clipboard action has no result
-    /// channel, so the only failures we can observe are an empty report and a
-    /// missing display server; both become an error notice instead of a panic.
+    /// Writes a report to the clipboard and reports the backend's real result.
+    /// A failed write never produces a success notice, and an empty report is
+    /// rejected before the clipboard is touched.
     fn copy_report(&mut self, text: String, success: impl Into<String>) -> Task<Message> {
         if text.trim().is_empty() {
             self.notice = Some(Notice::error("There is no report to copy yet."));
             return Task::none();
         }
-        if let Err(reason) = clipboard_backend() {
-            self.notice = Some(Notice::error(format!(
-                "Could not copy the report to the clipboard: {reason}"
-            )));
-            return Task::none();
-        }
 
-        self.notice = Some(Notice::success(success));
-        iced::clipboard::write(text)
+        match self.clipboard.write(&text) {
+            Ok(()) => self.notice = Some(Notice::success(success.into())),
+            Err(reason) => {
+                self.notice = Some(Notice::error(format!(
+                    "Could not copy the report to the clipboard: {reason}"
+                )));
+            }
+        }
+        Task::none()
     }
 
     fn settings_vm(&self) -> SettingsVm {
@@ -2856,9 +2887,9 @@ fn doctor_vm(read: &DoctorRead) -> DoctorVm {
         install_path: option_dash(report.install_path.as_deref()),
         log_directory: option_dash(report.log_directory.as_deref()),
         checks: report.checks.iter().map(doctor_check_vm).collect(),
-        auth: report.auth.as_ref().and_then(value_summary),
-        license: report.license.as_ref().and_then(value_summary),
-        raw: read.raw.clone(),
+        auth: report.auth.as_ref().and_then(redacted_value_summary),
+        license: report.license.as_ref().and_then(redacted_value_summary),
+        raw: sanitize_doctor_raw(&read.raw),
     }
 }
 
@@ -3003,8 +3034,89 @@ fn scalar_text(value: &Value) -> Option<String> {
     }
 }
 
+/// Removes the credential-bearing fields from a doctor raw document before it
+/// reaches the view model or the combined support report.
+///
+/// The CLI is not documented as redacting `unity doctor` the way it redacts
+/// `unity diagnose`, so known secret keys are replaced and every URL loses its
+/// user-info. Ordinary fields, checks, paths, and versions are kept.
+fn sanitize_doctor_raw(raw: &str) -> String {
+    match serde_json::from_str::<Value>(raw) {
+        Ok(mut value) => {
+            redact_doctor_value(&mut value, None);
+            serde_json::to_string_pretty(&value).unwrap_or_else(|_| redact_doctor_text(raw))
+        }
+        Err(_) => redact_doctor_text(raw),
+    }
+}
+
+fn redact_doctor_text(text: &str) -> String {
+    redact_proxy(text)
+}
+
+fn redact_doctor_value(value: &mut Value, key: Option<&str>) {
+    if key.is_some_and(is_sensitive_key) {
+        *value = Value::String("***".to_string());
+        return;
+    }
+
+    match value {
+        Value::Object(map) => {
+            for (key, value) in map.iter_mut() {
+                redact_doctor_value(value, Some(key));
+            }
+        }
+        Value::Array(items) => {
+            for item in items.iter_mut() {
+                redact_doctor_value(item, key);
+            }
+        }
+        Value::String(text) => {
+            let redacted = redact_proxy(text);
+            if redacted != *text {
+                *text = redacted;
+            }
+        }
+        _ => {}
+    }
+}
+
+fn is_sensitive_key(key: &str) -> bool {
+    let key = key
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .map(|character| character.to_ascii_lowercase())
+        .collect::<String>();
+
+    key == "key"
+        || [
+            "token",
+            "secret",
+            "password",
+            "passwd",
+            "passphrase",
+            "credential",
+            "authorization",
+            "cookie",
+            "session",
+            "serial",
+            "privatekey",
+            "licensekey",
+            "apikey",
+        ]
+        .iter()
+        .any(|needle| key.contains(needle))
+}
+
+fn redacted_value_summary(value: &Value) -> Option<String> {
+    let mut value = value.clone();
+    redact_doctor_value(&mut value, None);
+    value_summary(&value)
+}
+
 /// The CLI's `auth` / `license` sections have no stable schema this app can
 /// model yet, so their scalar fields are summarized without interpretation.
+/// The value is sanitized by [`redacted_value_summary`] before this runs.
 fn value_summary(value: &Value) -> Option<String> {
     match value {
         Value::Object(map) => {
@@ -3115,15 +3227,15 @@ fn push_doctor_report(out: &mut String, read: &DoctorRead) {
         }
     }
 
-    if let Some(auth) = report.auth.as_ref().and_then(value_summary) {
+    if let Some(auth) = report.auth.as_ref().and_then(redacted_value_summary) {
         out.push_str(&format!("\nAuth: {auth}\n"));
     }
-    if let Some(license) = report.license.as_ref().and_then(value_summary) {
+    if let Some(license) = report.license.as_ref().and_then(redacted_value_summary) {
         out.push_str(&format!("License: {license}\n"));
     }
 
     out.push_str("\nRaw report:\n");
-    out.push_str(read.raw.trim_end());
+    out.push_str(sanitize_doctor_raw(&read.raw).trim_end());
     out.push('\n');
 }
 
@@ -3160,19 +3272,6 @@ fn push_environment_report(out: &mut String, info: &EnvironmentInfo) {
         }
         None => out.push_str("Proxy: not reported\n"),
     }
-}
-
-/// A Linux process without a display server cannot own a clipboard. This is
-/// the only clipboard failure iced exposes before the write; the write itself
-/// logs and returns no error to the application.
-fn clipboard_backend() -> Result<(), String> {
-    #[cfg(target_os = "linux")]
-    {
-        if std::env::var_os("WAYLAND_DISPLAY").is_none() && std::env::var_os("DISPLAY").is_none() {
-            return Err("no display server is available".to_string());
-        }
-    }
-    Ok(())
 }
 
 fn editor_row_vm(editor: &Editor) -> EditorRowVm {
@@ -3796,6 +3895,28 @@ mod tests {
     }
 
     #[test]
+    fn navigating_back_does_not_retry_a_failed_read() {
+        let mut app = connected_app("1.0.0-beta.17");
+        app.page = Page::Overview;
+        app.auth.error = Some(UnityError::new("AUTH_ERROR", "Authorization was denied."));
+        app.note_read_failed(ReadKind::Auth);
+
+        // Returning to the page must not silently re-run a read that is
+        // waiting for an explicit Retry. A denied authorization would
+        // otherwise become a prompt/retry storm.
+        let _ = app.update(Message::Navigate(Page::Overview));
+        assert!(
+            !app.auth.loading,
+            "a failed read must wait for Retry or Refresh"
+        );
+        assert!(app.auth.error.is_some());
+
+        // Refresh is the explicit path that may retry the read.
+        let _ = app.update(Message::Refresh);
+        assert!(app.auth.loading, "Refresh must re-run the failed read");
+    }
+
+    #[test]
     fn retry_is_absent_when_the_controller_has_no_target() {
         let mut app = connected_app("1.0.0-beta.17");
         app.page = Page::Projects;
@@ -4270,6 +4391,108 @@ mod tests {
         ] {
             assert_eq!(kind, &ErrorActionKind::Retry(expected.to_string()));
         }
+    }
+
+    struct FailingClipboard;
+
+    impl ClipboardBackend for FailingClipboard {
+        fn write(&self, _text: &str) -> Result<(), String> {
+            Err("backend unavailable".to_string())
+        }
+    }
+
+    struct RecordingClipboard;
+
+    impl ClipboardBackend for RecordingClipboard {
+        fn write(&self, _text: &str) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn non_empty_copy_failure_is_reported_without_a_success_notice() {
+        let (mut app, _) = App::boot();
+        app.clipboard = Box::new(FailingClipboard);
+        app.doctor.data = Some(doctor_read());
+
+        let _task = app.update(Message::CopyDiagnosticsReport);
+
+        let notice = app.notice.as_ref().expect("notice");
+        assert_eq!(notice.kind, NoticeKind::Error);
+        assert!(notice.text.contains("backend unavailable"));
+        assert!(!notice.text.contains("copied to the clipboard"));
+    }
+
+    #[test]
+    fn non_empty_copy_reports_success_only_after_the_backend_accepts_it() {
+        let (mut app, _) = App::boot();
+        app.clipboard = Box::new(RecordingClipboard);
+        app.doctor.data = Some(doctor_read());
+
+        let _task = app.update(Message::CopyDiagnosticsReport);
+
+        let notice = app.notice.as_ref().expect("notice");
+        assert_eq!(notice.kind, NoticeKind::Success);
+        assert!(notice.text.contains("Diagnostics report copied"));
+    }
+
+    #[test]
+    fn credential_bearing_doctor_fields_are_masked_before_view_and_copy() {
+        let mut read = doctor_read();
+        read.report.auth = Some(serde_json::json!({
+            "loggedIn": true,
+            "accessToken": "token-123"
+        }));
+        read.report.license = Some(serde_json::json!({
+            "active": true,
+            "serial": "LIC-123",
+            "key": "KEY-456"
+        }));
+        read.raw = serde_json::to_string_pretty(&serde_json::json!({
+            "platform": "linux",
+            "proxy": {
+                "url": "http://user:secret@proxy.example:8080",
+                "source": "env"
+            },
+            "auth": { "accessToken": "token-123" },
+            "license": { "serial": "LIC-123", "key": "KEY-456" }
+        }))
+        .expect("raw doctor json");
+
+        let (mut app, _) = App::boot();
+        app.page = Page::Diagnostics;
+        app.doctor.data = Some(read);
+
+        let vm = app.view_model();
+        let PageVm::Diagnostics(diagnostics) = &vm.page else {
+            panic!("expected the Diagnostics page");
+        };
+        let doctor = diagnostics.doctor.data().expect("doctor data");
+
+        assert!(!doctor.raw.contains("user:secret"));
+        assert!(!doctor.raw.contains("token-123"));
+        assert!(!doctor.raw.contains("LIC-123"));
+        assert!(!doctor.raw.contains("KEY-456"));
+        assert!(doctor.raw.contains("http://***@proxy.example:8080"));
+        assert!(doctor.raw.contains("\"accessToken\": \"***\""));
+        assert!(doctor.raw.contains("\"serial\": \"***\""));
+        assert!(doctor.raw.contains("\"key\": \"***\""));
+
+        let auth = doctor.auth.as_deref().expect("auth summary");
+        assert!(auth.contains("Access token: ***"));
+        assert!(!auth.contains("token-123"));
+
+        let license = doctor.license.as_deref().expect("license summary");
+        assert!(license.contains("Serial: ***"));
+        assert!(!license.contains("LIC-123"));
+        assert!(!license.contains("KEY-456"));
+
+        let report = app.diagnostics_report_text();
+        assert!(!report.contains("user:secret"));
+        assert!(!report.contains("token-123"));
+        assert!(!report.contains("LIC-123"));
+        assert!(!report.contains("KEY-456"));
+        assert!(report.contains("http://***@proxy.example:8080"));
     }
 
     #[test]

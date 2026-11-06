@@ -86,7 +86,8 @@ update target.
 - **Diagnostics** — a read-only answer to "can this machine build?" from `unity doctor`,
   `unity env`, and the redacted `unity diagnose proxy|accelerator|update` reports. Doctor
   checks carry pass/warn/fail/info styling and human-readable labels derived from the check
-  id (the localization key is the fallback), and the raw report stays visible. Environment
+  id (the localization key is the fallback), and a support-safe raw report stays visible:
+  known credential fields are masked and proxy URLs lose their user-info. Environment
   paths and the resolved proxy (URL, source, auth source, no-proxy list) render together.
   Every section loads independently and retries alone; one Copy writes doctor + environment
   + proxy as plain text, and a clipboard failure is reported as a notice.
@@ -402,7 +403,11 @@ Resolution order for the binary:
 - Project upgrades require a second confirmation and warn that the project on disk can
   change. Commit or back up first.
 - No credentials are read, stored, or forwarded. Changelog Markdown is displayed as
-  plain text, never interpreted.
+  plain text, never interpreted. Diagnostics copies are support-safe: the doctor raw
+  report masks known secret fields and URL user-info, and `unity diagnose` text is the
+  CLI's own redacted report.
+- Clipboard writes use the OS clipboard and report its real result. A failed write is a
+  notice, never a false success.
 
 ## Known limitations (v1)
 

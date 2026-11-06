@@ -124,8 +124,10 @@ fixture when a new state needs review.
   version, install path, log directory, auth/license summaries, and the check
   list. Checks use pass/warn/fail/info/unknown styling, a humanized label from
   the check `id` (CLI message, then `messageKey`, then a generic label as
-  fallbacks), and a detail line built from the CLI's `params`. The raw report is
-  visible in a scrollable inset. Loading, error + Retry, empty, and loaded.
+  fallbacks), and a detail line built from the CLI's `params`. A support-safe
+  raw report is visible in a scrollable inset: known credential fields are
+  replaced with `***` and proxy URLs lose their user-info. Loading, error +
+  Retry, empty, and loaded.
 - Environment card (`unity env`): user data path, Editor install path, download
   cache, config path, CLI and Hub versions, plus the resolved proxy URL, source,
   auth source, and no-proxy list. A missing proxy section is stated explicitly.
@@ -134,9 +136,11 @@ fixture when a new state needs review.
   redacted report as preformatted, scrollable text with a per-report Copy.
   Loading, error + Retry, empty, and loaded states.
 - Copy report writes the combined plain-text doctor + environment + proxy
-  report. A failed section is named as unavailable rather than omitted. An empty
-  report or an unavailable clipboard backend becomes an error notice, never a
-  panic.
+  report. A failed section is named as unavailable rather than omitted. The
+  copied doctor document is the same sanitized raw report the card shows. An
+  empty report or a failed clipboard write (the OS clipboard reports a real
+  result) becomes an error notice; success is shown only after the write
+  succeeds.
 - No mutation controls appear on this screen.
 
 ### Changelog
@@ -197,7 +201,9 @@ drawing their own banners.
 
 - `doctor: LoadState<DoctorVm>` — `DoctorVm { platform, arch, runtime_version,
   node_version, cli_version, install_path, log_directory, checks, auth, license,
-  raw }`.
+  raw }`. `auth`, `license`, and `raw` are sanitized at the mapping boundary:
+  credential-bearing keys become `***` and URL user-info is redacted before the
+  document reaches the view model or the combined copy.
 - `environment: LoadState<EnvironmentVm>` — `EnvironmentVm { user_data_path,
   editor_install_path, download_cache_path, config_path, cli_version,
   hub_version, proxy: Option<ProxyVm> }`.
