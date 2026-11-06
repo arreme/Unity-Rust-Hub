@@ -191,7 +191,8 @@ fixture when a new state needs review.
   reclaimable total. A confirmation checkbox enumerates every build to delete
   before the primary danger button enables. `--force` appears only after a
   remove run failed because the running-Editor check could not complete.
-  Cancelling removes nothing.
+  While the removal job runs, the dialog shows a "Removing…" line and points at
+  the job card for the raw log and Cancel. Cancelling removes nothing.
 - Prune missing paths: a separate outlined block with an info notice stating
   that no files are deleted, its own candidate list, confirmation, and registry
   only button. It never implies `--remove`.
@@ -216,6 +217,13 @@ that name the count and total, confirmation labels that enumerate every
 candidate, `can_remove`, `can_remove_missing`, the failed-run `error`, and
 `job_running`.
 
+Counts, labels, and confirmations are derived only from
+`LoadState::Ready`. A loading or failed report keeps its previous data for
+display but renders no confirmation, missing section, or danger button; the
+controller also rejects confirmations and both remove actions until the report
+is Ready again. `job_running` renders an in-dialog "Removing…" line that points
+at the job card, and both removal buttons stay disabled.
+
 `ModalVm::VerifyEditor(VerifyEditorVm)` carries the build, the exact
 `unity editors verify` `command`, and `LoadState<VerifyResultVm>`;
 `VerifyResultVm { version, architecture, ok, checks, failed_count,
@@ -236,8 +244,11 @@ Verify is a read with its own `read:editor-verify` retry target that repeats
 the exact build.
 
 Gallery fixtures: `Editors · default cleared`, `Modal · prune candidates`,
-`Modal · prune confirm`, `Modal · prune remove missing`, `Modal · verify
-results`.
+`Modal · prune loading`, `Modal · prune rescanning`, `Modal · prune failed`,
+`Modal · prune empty`, `Modal · prune confirm`, `Modal · prune remove missing`,
+`Modal · prune running`, `Modal · prune force offer`, `Modal · verify results`,
+`Modal · verify loading`, `Modal · verify all passed`,
+`Modal · verify failed read`.
 
 ## Advisory contract
 

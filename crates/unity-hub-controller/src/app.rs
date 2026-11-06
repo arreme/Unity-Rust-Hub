@@ -1394,11 +1394,14 @@ impl App {
             Message::OpenPrune => self.open_prune(),
             Message::PruneScan => self.scan_prune(),
             Message::PruneConfirmed(value) => {
-                self.prune_confirmed = value;
+                // A confirmation is meaningful only for the Ready report the
+                // user is looking at. A stale tick from an earlier scan must not
+                // arm a removal that a newer report cannot describe.
+                self.prune_confirmed = value && self.prune_report_is_ready();
                 Task::none()
             }
             Message::PruneMissingConfirmed(value) => {
-                self.prune_missing_confirmed = value;
+                self.prune_missing_confirmed = value && self.prune_report_is_ready();
                 Task::none()
             }
             Message::PruneForceToggled(value) => {
@@ -1410,7 +1413,7 @@ impl App {
             Message::StartPruneRemove => {
                 if !matches!(self.modal, Modal::PruneEditors)
                     || !self.prune_confirmed
-                    || self.prune.loading
+                    || !self.prune_report_is_ready()
                 {
                     return Task::none();
                 }
@@ -1438,7 +1441,7 @@ impl App {
             Message::StartPruneRemoveMissing => {
                 if !matches!(self.modal, Modal::PruneEditors)
                     || !self.prune_missing_confirmed
-                    || self.prune.loading
+                    || !self.prune_report_is_ready()
                 {
                     return Task::none();
                 }
@@ -2775,6 +2778,13 @@ impl App {
         )
     }
 
+    /// True only for a successful, settled scan. The dialog and both removal
+    /// guards use this instead of `Loadable::data`, which keeps the previous
+    /// report after a failure.
+    fn prune_report_is_ready(&self) -> bool {
+        !self.prune.loading && self.prune.error.is_none() && self.prune.data.is_some()
+    }
+
     /// Opens the verify dialog for exactly the build the row named.
     ///
     /// A stale action whose build is no longer installed does nothing rather
@@ -3138,23 +3148,35 @@ impl App {
     /// so the dialog shows exactly what a button would run.
     fn prune_editors_vm(&self) -> PruneEditorsVm {
         let report = self.load_state(ReadKind::Prune, &self.prune, prune_report_vm);
-        let (unused_count, missing_count, reclaimable, unused_names, missing_names) =
-            match report.data() {
-                Some(report) => (
-                    report.unused.len(),
-                    report.missing.len(),
-                    report.reclaimable.clone(),
-                    candidate_names(&report.unused),
-                    candidate_names(&report.missing),
-                ),
-                None => (0, 0, String::new(), String::new(), String::new()),
-            };
-        let job_running = self
+        // Counts, labels, and confirmations must come from a successful Ready
+        // report only. `LoadState::data()` also returns `previous` for a failed
+        // or loading read, which would let a stale candidate list arm a command
+        // that removes whatever the CLI considers unused at run time.
+        let ready = match &report {
+            LoadState::Ready(report) => Some(report),
+            _ => None,
+        };
+        let (unused_count, missing_count, reclaimable, unused_names, missing_names) = match ready {
+            Some(report) => (
+                report.unused.len(),
+                report.missing.len(),
+                report.reclaimable.clone(),
+                candidate_names(&report.unused),
+                candidate_names(&report.missing),
+            ),
+            None => (0, 0, String::new(), String::new(), String::new()),
+        };
+        let any_job_running = self
             .active_job
             .as_ref()
             .map(ActiveJob::is_running)
             .unwrap_or(false);
-        let busy = job_running || self.prune.loading;
+        // Only a streamed prune job gets the "Removing…" callout; another job
+        // still blocks both buttons, but it is not this dialog's work.
+        let job_running = self.active_job.as_ref().is_some_and(|job| {
+            job.is_running() && matches!(job.kind.as_str(), "editor-prune" | "editor-prune-missing")
+        });
+        let busy = any_job_running || self.prune.loading || self.prune.error.is_some();
 
         let remove_label = if unused_count == 0 {
             "Remove unused Editors".to_string()
@@ -4809,6 +4831,79 @@ mod tests {
         let job = app.active_job.as_ref().expect("confirmed removal starts");
         assert_eq!(job.kind, "editor-prune");
         assert!(job.command.contains("--remove"));
+    }
+
+    #[test]
+    fn a_failed_or_in_flight_rescan_cannot_arm_or_start_removal() {
+        let mut app = connected_app("1.0.0-beta.17");
+        app.cli.set_override_path(Some(startable_cli()));
+        app.prune.data = Some(prune_report());
+        app.modal = Modal::PruneEditors;
+
+        // Tick the confirmation while a rescan is in flight: it must not arm.
+        app.prune.begin();
+        let _ = app.update(Message::PruneConfirmed(true));
+        assert!(!app.prune_confirmed);
+        let _ = app.update(Message::PruneMissingConfirmed(true));
+        assert!(!app.prune_missing_confirmed);
+
+        // A failed rescan keeps the previous report in `Loadable::data`, which
+        // must never be treated as the report the user can act on.
+        app.prune.failed(UnityError::new(
+            "NETWORK_UNREACHABLE",
+            "The prune report could not be read.",
+        ));
+        app.prune_confirmed = true;
+        let _ = app.update(Message::StartPruneRemove);
+        assert!(
+            app.active_job.is_none(),
+            "a failed report must not run --remove"
+        );
+        let _ = app.update(Message::PruneMissingConfirmed(true));
+        assert!(
+            !app.prune_missing_confirmed,
+            "a failed report cannot arm a confirmation"
+        );
+        let _ = app.update(Message::StartPruneRemoveMissing);
+        assert!(app.active_job.is_none());
+
+        let vm = app.view_model();
+        let Some(ModalVm::PruneEditors(prune)) = vm.modal else {
+            panic!("expected the prune dialog");
+        };
+        assert!(
+            prune.report.data().is_some(),
+            "the stale report is still present for display"
+        );
+        assert!(!prune.can_remove);
+        assert!(!prune.can_remove_missing);
+    }
+
+    #[test]
+    fn a_running_prune_job_is_visible_in_the_dialog_and_blocks_its_buttons() {
+        let mut app = connected_app("1.0.0-beta.17");
+        app.cli.set_override_path(Some(startable_cli()));
+        app.prune.data = Some(prune_report());
+        app.prune_confirmed = true;
+        app.modal = Modal::PruneEditors;
+        app.active_job = Some(ActiveJob {
+            id: "job-test".to_string(),
+            kind: "editor-prune".to_string(),
+            command: "unity editors prune --remove --yes".to_string(),
+            state: JobState::Running,
+            progress: 20.0,
+            message: Some("Removing 6000.3.27f2…".to_string()),
+            logs: VecDeque::new(),
+            error: None,
+        });
+
+        let vm = app.view_model();
+        let Some(ModalVm::PruneEditors(prune)) = vm.modal else {
+            panic!("expected the prune dialog");
+        };
+        assert!(prune.job_running);
+        assert!(!prune.can_remove);
+        assert!(!prune.can_remove_missing);
     }
 
     #[test]

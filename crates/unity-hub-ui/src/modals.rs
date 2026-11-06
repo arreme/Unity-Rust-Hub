@@ -377,17 +377,35 @@ fn prune_modal(vm: &PruneEditorsVm) -> Element<'_, UiAction> {
     let mut body = column![
         mono(vm.scan_command.as_str()),
         hint("Report only. Scanning removes nothing; every removal needs the confirmation below."),
-        prune_report_body(&vm.report),
     ]
     .spacing(16);
+
+    if vm.job_running {
+        body = body.push(notice(
+            Tone::Info,
+            icons::LOADER,
+            column![
+                text("Removing… the CLI is still running.")
+                    .size(font::BODY)
+                    .font(fonts::MEDIUM),
+                hint("The raw NDJSON log and Cancel are on the job card. Close this dialog to reach them; closing does not stop the job."),
+            ]
+            .spacing(6),
+        ));
+    }
+
+    body = body.push(prune_report_body(&vm.report));
 
     if let Some(error) = &vm.error {
         body = body.push(error_text(error));
     }
 
-    let report = vm.report.data();
-    let has_unused = report.is_some_and(|report| !report.unused.is_empty());
-    if has_unused {
+    let ready = match &vm.report {
+        LoadState::Ready(report) => Some(report),
+        _ => None,
+    };
+
+    if ready.is_some_and(|report| !report.unused.is_empty()) {
         body = body.push(checkbox(
             vm.confirm_label.clone(),
             vm.confirmed,
@@ -406,19 +424,21 @@ fn prune_modal(vm: &PruneEditorsVm) -> Element<'_, UiAction> {
         )));
     }
 
-    if let Some(report) = report {
-        if !report.missing.is_empty() {
-            body = body.push(missing_section(vm, report));
-        }
+    if let Some(report) = ready.filter(|report| !report.missing.is_empty()) {
+        body = body.push(missing_section(vm, report));
     }
 
-    let actions = row![
+    let mut actions = row![
         button("Cancel", ButtonKind::Ghost).on_press(UiAction::CloseModal),
         button("Refresh report", ButtonKind::Secondary).on_press(UiAction::PruneScan),
-        icon_button(icons::TRASH, vm.remove_label.clone(), ButtonKind::Danger)
-            .on_press_maybe(vm.can_remove.then_some(UiAction::StartPruneRemove)),
     ]
     .spacing(8);
+    if ready.is_some_and(|report| !report.unused.is_empty()) {
+        actions = actions.push(
+            icon_button(icons::TRASH, vm.remove_label.clone(), ButtonKind::Danger)
+                .on_press_maybe(vm.can_remove.then_some(UiAction::StartPruneRemove)),
+        );
+    }
 
     dialog_sized(
         WIDE_DIALOG_WIDTH,

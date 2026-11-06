@@ -123,6 +123,22 @@ pub fn all() -> Vec<Fixture> {
             view_model: prune_modal(),
         },
         Fixture {
+            name: "Modal · prune loading",
+            view_model: prune_modal_loading(),
+        },
+        Fixture {
+            name: "Modal · prune rescanning",
+            view_model: prune_modal_rescanning(),
+        },
+        Fixture {
+            name: "Modal · prune failed",
+            view_model: prune_modal_failed(),
+        },
+        Fixture {
+            name: "Modal · prune empty",
+            view_model: prune_modal_empty(),
+        },
+        Fixture {
             name: "Modal · prune confirm",
             view_model: prune_modal_confirmed(),
         },
@@ -131,8 +147,28 @@ pub fn all() -> Vec<Fixture> {
             view_model: prune_modal_missing(),
         },
         Fixture {
+            name: "Modal · prune running",
+            view_model: prune_modal_running(),
+        },
+        Fixture {
+            name: "Modal · prune force offer",
+            view_model: prune_modal_force_offer(),
+        },
+        Fixture {
             name: "Modal · verify results",
             view_model: verify_modal(),
+        },
+        Fixture {
+            name: "Modal · verify loading",
+            view_model: verify_modal_loading(),
+        },
+        Fixture {
+            name: "Modal · verify all passed",
+            view_model: verify_modal_all_passed(),
+        },
+        Fixture {
+            name: "Modal · verify failed read",
+            view_model: verify_modal_failed_read(),
         },
         Fixture {
             name: "Job · running",
@@ -492,10 +528,9 @@ fn prune_report_fixture() -> PruneReportVm {
     }
 }
 
-fn prune_modal() -> ViewModel {
-    let mut vm = editors();
-    vm.modal = Some(ModalVm::PruneEditors(PruneEditorsVm {
-        report: LoadState::Ready(prune_report_fixture()),
+fn prune_modal_baseline(report: LoadState<PruneReportVm>) -> PruneEditorsVm {
+    PruneEditorsVm {
+        report,
         confirmed: false,
         missing_confirmed: false,
         force: false,
@@ -511,76 +546,202 @@ fn prune_modal() -> ViewModel {
         can_remove_missing: false,
         error: None,
         job_running: false,
-    }));
+    }
+}
+
+fn prune_modal_with(
+    report: LoadState<PruneReportVm>,
+    configure: impl FnOnce(&mut PruneEditorsVm),
+) -> ViewModel {
+    let mut vm = editors();
+    let mut prune = prune_modal_baseline(report);
+    configure(&mut prune);
+    vm.modal = Some(ModalVm::PruneEditors(prune));
     vm
+}
+
+fn prune_modal() -> ViewModel {
+    prune_modal_with(LoadState::Ready(prune_report_fixture()), |_| {})
+}
+
+fn prune_modal_loading() -> ViewModel {
+    prune_modal_with(LoadState::Loading { previous: None }, |_| {})
+}
+
+fn prune_modal_rescanning() -> ViewModel {
+    prune_modal_with(
+        LoadState::Loading {
+            previous: Some(prune_report_fixture()),
+        },
+        |_| {},
+    )
+}
+
+fn prune_modal_failed() -> ViewModel {
+    prune_modal_with(
+        LoadState::Failed {
+            error: UiError {
+                code: "NETWORK_UNREACHABLE".to_string(),
+                message: "The prune report could not be read.".to_string(),
+                detail: Some("Retry when the connection is back.".to_string()),
+                action: None,
+            },
+            previous: Some(prune_report_fixture()),
+        },
+        |_| {},
+    )
+}
+
+fn prune_modal_empty() -> ViewModel {
+    prune_modal_with(
+        LoadState::Ready(PruneReportVm {
+            unused: Vec::new(),
+            missing: Vec::new(),
+            reclaimable: "0 B".to_string(),
+            removed: false,
+        }),
+        |_| {},
+    )
 }
 
 fn prune_modal_confirmed() -> ViewModel {
-    let mut vm = prune_modal();
-    if let Some(ModalVm::PruneEditors(prune)) = &mut vm.modal {
+    prune_modal_with(LoadState::Ready(prune_report_fixture()), |prune| {
         prune.confirmed = true;
         prune.force_available = true;
         prune.can_remove = true;
-    }
-    vm
+    })
 }
 
 fn prune_modal_missing() -> ViewModel {
-    let mut vm = prune_modal();
-    if let Some(ModalVm::PruneEditors(prune)) = &mut vm.modal {
+    prune_modal_with(LoadState::Ready(prune_report_fixture()), |prune| {
         prune.missing_confirmed = true;
         prune.can_remove_missing = true;
-    }
-    vm
+    })
 }
 
-fn verify_modal() -> ViewModel {
-    let mut vm = editors();
-    vm.modal = Some(ModalVm::VerifyEditor(VerifyEditorVm {
+fn prune_modal_running() -> ViewModel {
+    prune_modal_with(LoadState::Ready(prune_report_fixture()), |prune| {
+        prune.confirmed = true;
+        prune.job_running = true;
+        prune.can_remove = false;
+        prune.can_remove_missing = false;
+    })
+}
+
+fn prune_modal_force_offer() -> ViewModel {
+    prune_modal_with(LoadState::Ready(prune_report_fixture()), |prune| {
+        prune.confirmed = true;
+        prune.force_available = true;
+        prune.force = true;
+        prune.can_remove = true;
+        prune.remove_command = "unity editors prune --remove --yes --force --format ndjson --no-pager --no-banner --non-interactive".to_string();
+        prune.error = Some(UiError {
+            code: "EDITORS_PRUNE_EDITOR_CHECK_FAILED".to_string(),
+            message: "Could not detect running Editors.".to_string(),
+            detail: Some(
+                "Review the running Editors, then retry with --force only if you want to remove them anyway."
+                    .to_string(),
+            ),
+            action: None,
+        });
+    })
+}
+
+fn verify_modal_baseline(state: LoadState<VerifyResultVm>, show_raw: bool) -> VerifyEditorVm {
+    VerifyEditorVm {
         version: "6000.6.6f1".to_string(),
         architecture: "x86_64".to_string(),
         command: "unity editors verify 6000.6.6f1 --architecture x86_64 --format json --no-pager --no-banner --non-interactive".to_string(),
-        state: LoadState::Ready(VerifyResultVm {
+        state,
+        show_raw,
+    }
+}
+
+fn verify_modal_with(state: LoadState<VerifyResultVm>, show_raw: bool) -> ViewModel {
+    let mut vm = editors();
+    vm.modal = Some(ModalVm::VerifyEditor(verify_modal_baseline(
+        state, show_raw,
+    )));
+    vm
+}
+
+fn verify_failed_result() -> VerifyResultVm {
+    VerifyResultVm {
+        version: "6000.6.6f1".to_string(),
+        architecture: "x86_64".to_string(),
+        ok: false,
+        checks: vec![
+            VerifyCheckVm {
+                component: "Editor".to_string(),
+                kind: "Editor".to_string(),
+                status: CheckStatus::Pass,
+                path: Some("/home/ada/Unity/6000.6.6f1/Editor/Unity".to_string()),
+                repair_command: None,
+            },
+            VerifyCheckVm {
+                component: "Windows Mono".to_string(),
+                kind: "Module".to_string(),
+                status: CheckStatus::Warn,
+                path: Some("/home/ada/Unity/6000.6.6f1/Editor/Data/PlaybackEngines/WindowsStandaloneSupport".to_string()),
+                repair_command: None,
+            },
+            VerifyCheckVm {
+                component: "iOS".to_string(),
+                kind: "Module".to_string(),
+                status: CheckStatus::Fail,
+                path: Some("/home/ada/Unity/6000.6.6f1/Editor/Data/PlaybackEngines/iOSSupport".to_string()),
+                repair_command: Some("unity install-modules --editor-version 6000.6.6f1 --architecture x86_64 -m ios --yes".to_string()),
+            },
+            VerifyCheckVm {
+                component: "Linux IL2CPP".to_string(),
+                kind: "Module".to_string(),
+                status: CheckStatus::Unknown,
+                path: None,
+                repair_command: None,
+            },
+        ],
+        failed_count: 1,
+        repair_command: Some("unity install-modules --editor-version 6000.6.6f1 --architecture x86_64 -m ios --yes".to_string()),
+        raw: "{\n  \"success\": false,\n  \"command\": \"editors verify\",\n  \"data\": {\n    \"version\": \"6000.6.6f1\",\n    \"architecture\": \"x86_64\",\n    \"ok\": false,\n    \"components\": [\n      { \"component\": \"iOS\", \"status\": \"missing\" }\n    ]\n  },\n  \"errors\": [\n    { \"code\": \"EDITORS_VERIFY_FAILED\", \"message\": \"1 component is missing.\" }\n  ]\n}".to_string(),
+    }
+}
+
+fn verify_modal() -> ViewModel {
+    verify_modal_with(LoadState::Ready(verify_failed_result()), true)
+}
+
+fn verify_modal_loading() -> ViewModel {
+    verify_modal_with(LoadState::Loading { previous: None }, false)
+}
+
+fn verify_modal_all_passed() -> ViewModel {
+    verify_modal_with(
+        LoadState::Ready(VerifyResultVm {
             version: "6000.6.6f1".to_string(),
             architecture: "x86_64".to_string(),
-            ok: false,
-            checks: vec![
-                VerifyCheckVm {
-                    component: "Editor".to_string(),
-                    kind: "Editor".to_string(),
-                    status: CheckStatus::Pass,
-                    path: Some("/home/ada/Unity/6000.6.6f1/Editor/Unity".to_string()),
-                    repair_command: None,
-                },
-                VerifyCheckVm {
-                    component: "Windows Mono".to_string(),
-                    kind: "Module".to_string(),
-                    status: CheckStatus::Warn,
-                    path: Some("/home/ada/Unity/6000.6.6f1/Editor/Data/PlaybackEngines/WindowsStandaloneSupport".to_string()),
-                    repair_command: None,
-                },
-                VerifyCheckVm {
-                    component: "iOS".to_string(),
-                    kind: "Module".to_string(),
-                    status: CheckStatus::Fail,
-                    path: Some("/home/ada/Unity/6000.6.6f1/Editor/Data/PlaybackEngines/iOSSupport".to_string()),
-                    repair_command: Some("unity install-modules --editor-version 6000.6.6f1 --architecture x86_64 -m ios --yes".to_string()),
-                },
-                VerifyCheckVm {
-                    component: "Linux IL2CPP".to_string(),
-                    kind: "Module".to_string(),
-                    status: CheckStatus::Unknown,
-                    path: None,
-                    repair_command: None,
-                },
-            ],
-            failed_count: 1,
-            repair_command: Some("unity install-modules --editor-version 6000.6.6f1 --architecture x86_64 -m ios --yes".to_string()),
-            raw: "{\n  \"success\": false,\n  \"command\": \"editors verify\",\n  \"data\": {\n    \"version\": \"6000.6.6f1\",\n    \"architecture\": \"x86_64\",\n    \"ok\": false,\n    \"components\": [\n      { \"component\": \"iOS\", \"status\": \"missing\" }\n    ]\n  },\n  \"errors\": [\n    { \"code\": \"EDITORS_VERIFY_FAILED\", \"message\": \"1 component is missing.\" }\n  ]\n}".to_string(),
+            ok: true,
+            checks: Vec::new(),
+            failed_count: 0,
+            repair_command: None,
+            raw: "{\"success\":true,\"data\":{\"ok\":true,\"components\":[]}}".to_string(),
         }),
-        show_raw: true,
-    }));
-    vm
+        false,
+    )
+}
+
+fn verify_modal_failed_read() -> ViewModel {
+    verify_modal_with(
+        LoadState::Failed {
+            error: UiError {
+                code: "EDITOR_NOT_FOUND".to_string(),
+                message: "The Editor build is no longer installed.".to_string(),
+                detail: Some("Refresh the Editors list and choose an installed build.".to_string()),
+                action: None,
+            },
+            previous: None,
+        },
+        false,
+    )
 }
 
 fn projects() -> ViewModel {
