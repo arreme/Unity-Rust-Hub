@@ -494,11 +494,15 @@ Gallery fixtures: `Diagnostics`, `Diagnostics · not loaded`,
   `Conflict` are distinct tones and are never collapsed into success.
 - `SkillForceVm { explanation, command, scope }` exists only when a result has a
   `conflict` row. The explanation states that the CLI did not write that copy
-  before the `--force` button is drawn.
-- `refresh_label`, `refresh_hint`, and `refresh_command` describe the next
-  refresh click. The first click after opening the page is a `--dry-run`; after
-  a preview lands, the next click applies. `PreviewSkillRefresh` re-runs a
-  preview at any time.
+  before the `--force` button is drawn. `force_skill_last_run` repeats the check
+  and refuses a stray or replayed `--force` action when the current result has no
+  conflict row.
+- `refresh_label`, `refresh_previewed`, `refresh_hint`, and `refresh_command`
+  describe the next refresh click. The first click after opening the page is a
+  `--dry-run`; entering the page resets the cycle, and after a preview lands the
+  next click applies. `PreviewSkillRefresh` re-runs a preview at any time.
+- A supported-client row whose CLI id is empty renders no Install button: there
+  is no valid client token to send.
 - `project_context`, `local_available`, `local_disabled_reason` gate `--local`.
   The context is the process working directory when it (or an ancestor) holds
   `ProjectSettings/ProjectVersion.txt`; without it the checkbox is replaced by

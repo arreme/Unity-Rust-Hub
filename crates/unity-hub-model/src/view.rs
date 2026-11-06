@@ -554,6 +554,9 @@ pub struct SkillsVm {
     /// "Preview refresh (dry run)" until the first preview lands, then
     /// "Refresh now". The first refresh click is always a `--dry-run`.
     pub refresh_label: String,
+    /// True after a preview landed. The primary refresh button applies and
+    /// "Preview again" is offered; reset when the page is entered again.
+    pub refresh_previewed: bool,
     /// Explains the dry-run default and what the refresh command will do.
     pub refresh_hint: String,
     /// The exact `unity skill refresh` command the next click runs.

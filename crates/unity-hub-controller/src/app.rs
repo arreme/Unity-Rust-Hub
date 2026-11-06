@@ -3033,8 +3033,19 @@ impl App {
         Task::none()
     }
 
+    /// `--force` is offered only for a run whose current result has a
+    /// `conflict` row. Both the view model and the action handler use this
+    /// predicate, so a stale or replayed action cannot start an unexplained
+    /// overwrite of a copy the CLI did not write.
+    fn skill_force_available(&self) -> bool {
+        self.skill_result
+            .as_ref()
+            .is_some_and(|result| result.rows.iter().any(|row| row.outcome().is_conflict()))
+    }
+
     /// Repeats the last skill run with `--force`. Only reachable from the
-    /// `conflict` offer, which carries the explanation first.
+    /// `conflict` offer, which carries the explanation first; the handler also
+    /// refuses when the current result no longer has a conflict row.
     fn force_skill_last_run(&mut self) -> Task<Message> {
         let Some(run) = self.skill_last_run.clone() else {
             self.notice = Some(Notice::info(
@@ -3042,6 +3053,12 @@ impl App {
             ));
             return Task::none();
         };
+        if !self.skill_force_available() {
+            self.notice = Some(Notice::error(
+                "`--force` is only offered when the latest skill run reported a `conflict` row. Run an install or refresh again and review the rows first.",
+            ));
+            return Task::none();
+        }
         if self.job_running() {
             self.notice = Some(Notice::error("Another job is already running."));
             return Task::none();
@@ -3105,8 +3122,11 @@ impl App {
         Task::none()
     }
 
-    /// Stores a finished skill job's terminal rows. A failed job keeps the
-    /// previous rows and lets the job card own the error.
+    /// Stores a finished skill job's terminal rows.
+    ///
+    /// The starters clear the previous rows before they run, so a failed job
+    /// leaves no outcome card to mistake for the current run; the job card owns
+    /// the error. A successful job stores exactly the rows the CLI returned.
     fn note_skill_outcome(&mut self, kind: &str, state: JobState, result: Option<&Value>) {
         if state != JobState::Succeeded {
             return;
@@ -3184,6 +3204,7 @@ impl App {
             } else {
                 "Refresh now".to_string()
             },
+            refresh_previewed: self.skill_refresh_previewed,
             refresh_hint: if next_dry_run {
                 "The first refresh is a dry run: it changes nothing and labels every row would-*."
                     .to_string()
@@ -3219,10 +3240,7 @@ impl App {
 
     fn skill_run_vm(&self, result: &SkillResult) -> SkillRunVm {
         let rows: Vec<SkillOutcomeRowVm> = result.rows.iter().map(skill_outcome_row_vm).collect();
-        let force = rows
-            .iter()
-            .any(|row| row.outcome.is_conflict())
-            .then(|| self.skill_force_vm());
+        let force = self.skill_force_available().then(|| self.skill_force_vm());
         SkillRunVm {
             dry_run: result.dry_run,
             rows,
@@ -3262,8 +3280,8 @@ impl App {
                 };
                 let scope = match client {
                     Some(client) => format!("`{client}`"),
-                    None if *all => "the `--all` install".to_string(),
-                    None => "the install".to_string(),
+                    None if *all => "`--all` install".to_string(),
+                    None => "install".to_string(),
                 };
                 let command = self.command_preview(
                     self.cli.skill_install_spec(&options),
@@ -3280,7 +3298,7 @@ impl App {
                     }),
                     "unity skill refresh --force",
                 );
-                ("the refresh".to_string(), command)
+                ("refresh".to_string(), command)
             }
         };
 
@@ -3315,7 +3333,12 @@ impl App {
             Page::Overview => self.load_overview_data(false),
             Page::Editors => self.load_editors_page(false),
             Page::Projects => self.load_projects_page(false),
-            Page::Skills => self.load_skills_page(false),
+            Page::Skills => {
+                // Entering the page starts a fresh preview cycle, so the
+                // documented first-click dry run holds after navigation.
+                self.skill_refresh_previewed = false;
+                self.load_skills_page(false)
+            }
             Page::Diagnostics => self.load_diagnostics_page(false),
             Page::Changelog => self.load_changelog_page(false),
             _ => Task::none(),
@@ -8797,6 +8820,170 @@ mod tests {
             result.rows[1].skip_reason.as_deref(),
             Some("Outdated copy.")
         );
+    }
+
+    #[test]
+    fn the_start_refresh_message_starts_the_dry_run_argv_on_the_first_click() {
+        let mut app = connected_app("1.0.0-beta.17");
+        app.page = Page::Skills;
+        app.cli.set_override_path(Some(startable_cli()));
+
+        let _ = app.update(Message::StartSkillRefresh);
+        let job = app.active_job.as_ref().expect("the refresh job started");
+        assert_eq!(job.kind, "skill-refresh");
+        assert!(job.command.contains("skill refresh"));
+        assert!(job.command.contains("--yes"));
+        assert!(
+            job.command.contains("--dry-run"),
+            "the first refresh message must start the dry-run argv: {}",
+            job.command
+        );
+        assert!(!job.command.contains("--force"));
+        let _ = app.update(Message::CancelJob);
+
+        // After a preview, the same message applies instead of previewing.
+        app.skill_refresh_previewed = true;
+        app.active_job = None;
+        let _ = app.update(Message::StartSkillRefresh);
+        let job = app.active_job.as_ref().expect("the apply job started");
+        assert!(!job.command.contains("--dry-run"));
+        let _ = app.update(Message::CancelJob);
+    }
+
+    #[test]
+    fn entering_the_skills_page_resets_the_preview_cycle() {
+        let mut app = connected_app("1.0.0-beta.17");
+        app.page = Page::Overview;
+        app.skill_refresh_previewed = true;
+
+        let _ = app.update(Message::Navigate(Page::Skills));
+
+        assert_eq!(app.page, Page::Skills);
+        assert!(
+            !app.skill_refresh_previewed,
+            "the first refresh click after opening the page must be a dry run"
+        );
+    }
+
+    #[test]
+    fn start_skill_install_refuses_local_without_a_project_context() {
+        let mut app = connected_app("1.0.0-beta.17");
+        app.page = Page::Skills;
+        app.cli.set_override_path(Some(startable_cli()));
+        app.project_context = None;
+        // Simulate a stale or replayed form state: the controller must still
+        // refuse `--local` without a project context.
+        app.skill_install_local = true;
+
+        let _ = app.update(Message::InstallSkill("cursor".to_string()));
+
+        assert!(app.active_job.is_none());
+        let notice = app.notice.as_ref().expect("refusal notice");
+        assert!(notice.text.contains("--local"));
+        assert!(notice.text.contains("project"));
+    }
+
+    #[test]
+    fn force_skill_last_run_refuses_without_a_conflict_row() {
+        let mut app = connected_app("1.0.0-beta.17");
+        app.page = Page::Skills;
+        app.cli.set_override_path(Some(startable_cli()));
+        app.skill_last_run = Some(SkillRun {
+            scope: SkillScope::Install {
+                client: Some("vscode".to_string()),
+                all: false,
+                local: false,
+                skill: Some("unity-cli".to_string()),
+                yes: false,
+            },
+            dry_run: false,
+            force: false,
+            project_context: None,
+        });
+        app.skill_result = Some(SkillResult {
+            dry_run: false,
+            rows: vec![skill_row("refreshed", None)],
+        });
+
+        let _ = app.update(Message::ForceSkillLastRun);
+
+        assert!(
+            app.active_job.is_none(),
+            "a force run without a conflict row must not start"
+        );
+        let notice = app.notice.as_ref().expect("refusal notice");
+        assert!(notice.text.contains("conflict"));
+
+        // The same action is honoured once the result actually has a conflict.
+        app.skill_result = Some(SkillResult {
+            dry_run: false,
+            rows: vec![skill_row("conflict", Some("Not written by the CLI."))],
+        });
+        let _ = app.update(Message::ForceSkillLastRun);
+        let job = app.active_job.as_ref().expect("the forced job started");
+        assert!(job.command.contains("--force"));
+        let _ = app.update(Message::CancelJob);
+    }
+
+    #[test]
+    fn force_explanation_names_the_all_and_refresh_scopes_without_duplicating_the() {
+        let mut app = connected_app("1.0.0-beta.17");
+        app.page = Page::Skills;
+        app.skill_result = Some(SkillResult {
+            dry_run: false,
+            rows: vec![skill_row("conflict", Some("Not written by the CLI."))],
+        });
+        app.skill_last_run = Some(SkillRun {
+            scope: SkillScope::Install {
+                client: None,
+                all: true,
+                local: false,
+                skill: None,
+                yes: false,
+            },
+            dry_run: false,
+            force: false,
+            project_context: None,
+        });
+
+        let vm = app.view_model();
+        let PageVm::Skills(skills) = &vm.page else {
+            panic!("expected the Skills page");
+        };
+        let explanation = &skills
+            .result
+            .as_ref()
+            .expect("result")
+            .force
+            .as_ref()
+            .expect("force offer")
+            .explanation;
+        assert!(!explanation.contains("the the"), "{explanation}");
+        assert!(
+            explanation.contains("the `--all` install copy"),
+            "{explanation}"
+        );
+
+        app.skill_last_run = Some(SkillRun {
+            scope: SkillScope::Refresh { yes: true },
+            dry_run: false,
+            force: false,
+            project_context: None,
+        });
+        let vm = app.view_model();
+        let PageVm::Skills(skills) = &vm.page else {
+            panic!("expected the Skills page");
+        };
+        let explanation = &skills
+            .result
+            .as_ref()
+            .expect("result")
+            .force
+            .as_ref()
+            .expect("force offer")
+            .explanation;
+        assert!(!explanation.contains("the the"), "{explanation}");
+        assert!(explanation.contains("the refresh copy"), "{explanation}");
     }
 
     #[test]

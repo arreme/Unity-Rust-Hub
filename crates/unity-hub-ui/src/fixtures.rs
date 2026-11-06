@@ -1171,6 +1171,7 @@ fn skills_vm(
         install: skills_options(),
         result,
         refresh_label: "Preview refresh (dry run)".to_string(),
+        refresh_previewed: false,
         refresh_hint:
             "The first refresh is a dry run: it changes nothing and labels every row would-*."
                 .to_string(),
@@ -1234,6 +1235,7 @@ fn skills_empty() -> ViewModel {
                 false,
             ),
             skill_client("cursor", "Cursor", "/home/ada/.cursor/skills", false),
+            skill_client("", "Unknown client", "", false),
         ]);
         skills.installs = LoadState::Ready(Vec::new());
         skills.project_context = None;
@@ -1289,6 +1291,7 @@ fn skills_installed() -> ViewModel {
             force: None,
         });
         skills.refresh_label = "Refresh now".to_string();
+        skills.refresh_previewed = true;
         skills.refresh_hint =
             "The next refresh applies for real and reports one row per tracked install."
                 .to_string();

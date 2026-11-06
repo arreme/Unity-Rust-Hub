@@ -176,7 +176,7 @@ fn refresh_card(vm: &SkillsVm) -> Element<'_, UiAction> {
     };
     actions = actions.push(primary);
 
-    if vm.refresh_label != "Preview refresh (dry run)" && !vm.job_running {
+    if vm.refresh_previewed && !vm.job_running {
         actions = actions.push(
             button("Preview again", ButtonKind::Ghost).on_press(UiAction::PreviewSkillRefresh),
         );
@@ -297,7 +297,11 @@ fn client_row(client: &SkillClientVm, job_running: bool) -> Element<'_, UiAction
         label = label.push(mono(client.client.as_str()));
     }
 
-    let action: Element<'_, UiAction> = if job_running {
+    let action: Element<'_, UiAction> = if client.client.trim().is_empty() {
+        // The CLI listed a row without a client id, so there is no valid token
+        // to install into. Never draw a button that can only fail validation.
+        hint("No client id")
+    } else if job_running {
         hint("Running")
     } else {
         button("Install", ButtonKind::Secondary)
