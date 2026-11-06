@@ -8,8 +8,8 @@ use unity_hub_model::{
 
 use crate::components::{
     self, badge, button, caption, card, cell, checkbox, detail_column, divided, empty, error_text,
-    hint, icon_button, list_row, loading, mono, page_header, refresh_button, scroll, surface,
-    text_input, ButtonKind,
+    field_label, hint, icon_button, list_row, loading, mono, notice, page_header, refresh_button,
+    scroll, segmented, surface, text_input, ButtonKind,
 };
 use crate::fonts;
 use crate::icons::{self, icon};
@@ -69,18 +69,52 @@ fn editor_row(editor: &EditorRowVm) -> Element<'_, UiAction> {
     list_row(
         row![
             cell(version, FillPortion(3)),
-            cell(mono(editor.architecture.as_str()), FillPortion(2)),
-            cell(modules, FillPortion(5)),
-            button("Manage modules", ButtonKind::Secondary)
-                .on_press(UiAction::OpenEditorModules(
-                    editor.version.clone(),
-                    editor.architecture.clone(),
-                ))
-                .padding(components::COMPACT),
+            cell(
+                mono(if editor.architecture.trim().is_empty() {
+                    "host default"
+                } else {
+                    editor.architecture.as_str()
+                }),
+                FillPortion(2),
+            ),
+            cell(modules, FillPortion(4)),
+            cell(
+                row![
+                    button("Manage modules", ButtonKind::Secondary)
+                        .on_press(UiAction::OpenEditorModules(
+                            editor.version.clone(),
+                            editor.architecture.clone(),
+                        ))
+                        .padding(components::COMPACT),
+                    default_button(editor),
+                ]
+                .spacing(8)
+                .align_y(Center),
+                FillPortion(3),
+            ),
         ]
         .spacing(16)
         .align_y(Center),
     )
+}
+
+/// Sets or clears the stored default for the clicked build. A version with two
+/// builds still yields an unambiguous action because the row carries the build.
+fn default_button(editor: &EditorRowVm) -> Element<'_, UiAction> {
+    if editor.is_default {
+        button("Clear default", ButtonKind::Ghost)
+            .on_press(UiAction::ClearDefaultEditor)
+            .padding(components::COMPACT)
+            .into()
+    } else {
+        button("Set default", ButtonKind::Secondary)
+            .on_press(UiAction::SetDefaultEditor(
+                editor.version.clone(),
+                editor.architecture.clone(),
+            ))
+            .padding(components::COMPACT)
+            .into()
+    }
 }
 
 fn installed_card(installed: &LoadState<Vec<EditorRowVm>>) -> Element<'_, UiAction> {
@@ -113,24 +147,62 @@ fn installed_card(installed: &LoadState<Vec<EditorRowVm>>) -> Element<'_, UiActi
 fn install_card(install: &InstallEditorVm) -> Element<'_, UiAction> {
     let mut body = column![].spacing(16);
 
-    body = body.push(
-        column![
-            row![
-                text_input(
-                    "lts, latest, 6000.3, or an exact version",
-                    &install.version_input
+    let architecture_picker = segmented(
+        install
+            .architecture_options
+            .iter()
+            .map(|option| {
+                (
+                    option.label.clone(),
+                    option.selected,
+                    UiAction::InstallArchitectureChanged(option.architecture.clone()),
                 )
-                .on_input(UiAction::InstallVersionChanged)
-                .icon(icons::input_icon(icons::SEARCH, font::ICON_SMALL))
-                .width(Fill),
-                button("Load modules", ButtonKind::Secondary).on_press(UiAction::LoadModules),
+            })
+            .collect(),
+    );
+
+    body = body.push(
+        row![
+            column![
+                field_label("Editor version"),
+                row![
+                    text_input(
+                        "lts, latest, 6000.3, or an exact version",
+                        &install.version_input
+                    )
+                    .on_input(UiAction::InstallVersionChanged)
+                    .icon(icons::input_icon(icons::SEARCH, font::ICON_SMALL))
+                    .width(Fill),
+                    button("Load modules", ButtonKind::Secondary).on_press(UiAction::LoadModules),
+                ]
+                .spacing(8)
+                .align_y(Center),
+                hint("Aliases: lts, latest, or a stream such as 6000.3. Exact versions also work."),
             ]
             .spacing(8)
-            .align_y(Center),
-            hint("Aliases: lts, latest, or a stream such as 6000.3. Exact versions also work."),
+            .width(FillPortion(3)),
+            column![
+                field_label("Architecture"),
+                architecture_picker,
+                hint("Host default leaves --architecture out and lets the CLI choose this machine's build."),
+            ]
+            .spacing(8)
+            .width(FillPortion(2)),
         ]
-        .spacing(8),
+        .spacing(16)
+        .align_y(iced::Alignment::Start),
     );
+
+    if let Some(warning) = &install.second_build_warning {
+        body = body.push(notice(
+            Tone::Warning,
+            icons::TRIANGLE_ALERT,
+            text(warning.as_str())
+                .size(font::BODY)
+                .line_height(1.5)
+                .style(theme::muted_text),
+        ));
+    }
 
     if let Some(error) = install.modules.error() {
         body = body.push(error_text(error));
@@ -208,6 +280,10 @@ fn install_card(install: &InstallEditorVm) -> Element<'_, UiAction> {
             container(
                 row![
                     detail_column("Editor", preview.editor_version.as_str()),
+                    detail_column(
+                        "Architecture",
+                        preview.architecture.as_deref().unwrap_or("Host default")
+                    ),
                     detail_column("Download", preview.download_size.as_str()),
                     detail_column("Modules", preview.module_count.to_string()),
                 ]
@@ -263,17 +339,33 @@ fn release_row(release: &ReleaseRowVm) -> Element<'_, UiAction> {
         .into()
     } else {
         button("Use", ButtonKind::Secondary)
-            .on_press(UiAction::UseRelease(release.version.clone()))
+            .on_press(UiAction::UseRelease(
+                release.version.clone(),
+                release.architecture.clone(),
+            ))
             .padding([6.0, 14.0])
             .into()
     };
 
+    let version = {
+        let mut value = column![text(release.version.as_str())
+            .size(font::BODY_LARGE)
+            .font(fonts::MEDIUM)]
+        .spacing(2);
+        if !release.architecture.trim().is_empty() {
+            value = value.push(
+                text(release.architecture.as_str())
+                    .size(font::SMALL)
+                    .font(fonts::MONO)
+                    .style(theme::muted_text),
+            );
+        }
+        value.width(Fill)
+    };
+
     list_row(
         row![
-            text(release.version.as_str())
-                .size(font::BODY_LARGE)
-                .font(fonts::MEDIUM)
-                .width(Fill),
+            version,
             badge(release.stream.clone(), release.stream_tone),
             container(action).width(84).align_right(84),
         ]

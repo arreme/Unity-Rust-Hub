@@ -145,12 +145,25 @@ fn project_row(project: &ProjectRowVm) -> Element<'_, UiAction> {
             .into()
     };
 
+    let editor: Element<'_, UiAction> = {
+        let mut value = column![text(project.version.as_str())
+            .size(font::MONO)
+            .font(fonts::MONO)]
+        .spacing(2);
+        if !project.architecture.trim().is_empty() {
+            value = value.push(
+                text(project.architecture.as_str())
+                    .size(font::SMALL)
+                    .font(fonts::MONO)
+                    .style(theme::muted_text),
+            );
+        }
+        value.into()
+    };
+
     list_row(columns(
         name.into(),
-        text(project.version.as_str())
-            .size(font::MONO)
-            .font(fonts::MONO)
-            .into(),
+        editor,
         pipeline,
         target,
         text(project.modified.as_str())

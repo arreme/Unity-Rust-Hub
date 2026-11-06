@@ -65,22 +65,30 @@ update target.
 - **CLI lifecycle** — detect the executable, show version/channel/platform, check for
   updates, install the CLI with Unity's official per-platform script, self-update, and
   sign in to Unity with `unity auth login`.
-- **Editors** — installed versions with modules, Linux/macOS/Windows architecture,
-  default-Editor state, and the install location.
+- **Editors** — installed builds with modules, Linux/macOS/Windows architecture,
+  default-Editor state, and the install location. A row is one `(version, architecture)`
+  build, so an `arm64` and an `x86_64` Editor of the same version appear separately; each
+  row sets or clears the default for that build.
 - **Running Editors** — read-only status from `unity editors running`, enriched with
   `unity pipeline editors` phase, Pipeline version, update availability, Safe Mode, and a
   blocking dialog.
-- **Releases** — newest releases with LTS/beta/alpha and installed badges.
-- **Editor install** — pick a version or alias (`lts`, `latest`, `6000.3`, exact), load
-  the module catalog, preview the download with `--dry-run`, accept module terms
-  explicitly, then install with live NDJSON progress and a cancellable raw log. On Linux
-  the same card can install the headless Editor (`--headless`), which runs without a
-  display.
+- **Releases** — newest releases with LTS/beta/alpha, architecture, and installed badges
+  matched per build.
+- **Editor install** — pick a version or alias (`lts`, `latest`, `6000.3`, exact) and an
+  architecture (Host default, `x86_64`, or `arm64`), load the module catalog for that
+  build, preview the download with `--dry-run` (the resolved architecture is shown),
+  accept module terms explicitly, then install with live NDJSON progress and a cancellable
+  raw log. Host default leaves `--architecture` out, so single-build installs keep the
+  exact command they had. On Linux the same card can install the headless Editor
+  (`--headless`), which runs without a display. Installing a second build of a version is
+  allowed, with a warning that both stay on disk and projects pinned to one keep using it.
 - **Modules** — add modules to an installed Editor with `install-modules`, pinned to the
   architecture of the row you opened (`--architecture`) so an `arm64` and an `x86_64`
   build of the same version never get mixed up.
-- **Projects** — every project in the Hub registry, its Editor version, render pipeline,
-  build target, cloud/VCS badges, an Open action, and a guarded upgrade dialog.
+- **Projects** — every project in the Hub registry, its Editor version and architecture,
+  render pipeline, build target, cloud/VCS badges, an Open action, and a guarded upgrade
+  dialog. "Editor not installed" matches both version and architecture, and a target
+  version with two builds is explained rather than silently resolved.
 - **Changelog** — `unity changelog` rendered as sections with readable bullet points and
   a focused heuristic for **possible breaking changes**, plus a raw Markdown view.
 - **Diagnostics** — a read-only answer to "can this machine build?" from `unity doctor`,
@@ -333,6 +341,15 @@ The adapter is aligned to CLI beta.17:
 - `unity modules` and `unity install-modules` take the row's `--architecture`; CLI beta.17
   makes `install-modules` refuse a build it cannot find instead of silently using the
   installed one. The module dialog names the build it manages.
+- `unity install <version> --architecture x86_64|arm64` installs one build; the app omits
+  the flag when Host default is selected, so the resolved build comes from the CLI (and
+  `--dry-run` echoes it in the preview). `unity editors default <version> --architecture`
+  and `--unset` store or clear the default, and `unity editors verify <version>
+  --architecture` addresses one build. Rows and project badges use `(version,
+  architecture)`.
+- `unity projects upgrade --to <version>` cannot choose a build, so the upgrade dialog
+  lists versions only and names any target version with two installed builds instead of
+  picking one.
 - CLI beta.17 moves some command failures onto different exit codes (for example a failed
   `unity mcp configure` write is now `1`, and argument errors are `2`). The app passes CLI
   codes and messages through unchanged, and the changelog heuristic flags these contract

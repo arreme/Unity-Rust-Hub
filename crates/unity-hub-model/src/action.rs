@@ -37,6 +37,9 @@ pub enum UiAction {
     InstallCli,
     UpdateCli,
     InstallVersionChanged(String),
+    /// Selects the build to install. `None` is the host default and is left
+    /// out of the command.
+    InstallArchitectureChanged(Option<String>),
     LoadModules,
     ToggleModule(String, bool),
     SelectAllModules(bool),
@@ -44,10 +47,15 @@ pub enum UiAction {
     AcceptEulaToggled(bool),
     PreviewInstall,
     StartInstallEditor,
-    UseRelease(String),
+    UseRelease(String, String),
     /// Version and architecture identify one installed build, because the CLI
     /// can have an `arm64` and an `x86_64` Editor of the same version.
     OpenEditorModules(String, String),
+    /// Stores this build as the default Editor. The architecture is required
+    /// so a two-build version is never resolved by guesswork.
+    SetDefaultEditor(String, String),
+    /// Clears the stored default Editor.
+    ClearDefaultEditor,
     CloseModal,
     ToggleDialogModule(String, bool),
     DialogEulaToggled(bool),

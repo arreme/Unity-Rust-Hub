@@ -427,13 +427,18 @@ impl UnityCli {
     }
 
     /// Runs `unity install <version> --dry-run` and returns the raw preview.
+    ///
+    /// `architecture` is the build the card asked for. Leaving it `None` lets
+    /// the CLI resolve the host default, which keeps the previous command
+    /// (and the dry-run preview) unchanged for single-build users.
     pub fn dry_run_install(
         &self,
         version: &str,
+        architecture: Option<&str>,
         modules: &[String],
         headless: bool,
     ) -> Result<Value, UnityError> {
-        let mut parts = install_parts(version, modules, headless, false)?;
+        let mut parts = install_parts(version, architecture, modules, headless, false)?;
         parts.push("--dry-run".to_string());
         let executed = self.run_args(&parts, "json")?;
         Ok(executed.envelope.data.unwrap_or(Value::Null))
@@ -442,11 +447,12 @@ impl UnityCli {
     pub fn install_editor_spec(
         &self,
         version: &str,
+        architecture: Option<&str>,
         modules: &[String],
         headless: bool,
         accept_eula: bool,
     ) -> Result<CommandSpec, UnityError> {
-        let parts = install_parts(version, modules, headless, accept_eula)?;
+        let parts = install_parts(version, architecture, modules, headless, accept_eula)?;
         self.spec(&parts, "ndjson")
     }
 
@@ -459,6 +465,38 @@ impl UnityCli {
     ) -> Result<CommandSpec, UnityError> {
         let parts = install_modules_parts(version, architecture, modules, accept_eula)?;
         self.spec(&parts, "ndjson")
+    }
+
+    /// Builds `unity editors default <version> [--architecture]`.
+    ///
+    /// A version can have an `arm64` and an `x86_64` build installed side by
+    /// side. Passing the architecture of the row the user clicked keeps the
+    /// stored default on that build instead of letting the CLI pick one.
+    pub fn editor_default_spec(
+        &self,
+        version: &str,
+        architecture: Option<&str>,
+    ) -> Result<CommandSpec, UnityError> {
+        let parts = editor_default_parts(version, architecture)?;
+        self.spec(&parts, "ndjson")
+    }
+
+    /// Builds `unity editors default --unset`.
+    pub fn editor_default_unset_spec(&self) -> Result<CommandSpec, UnityError> {
+        self.spec(&editor_default_unset_parts(), "ndjson")
+    }
+
+    /// Builds `unity editors verify <version> [--architecture]`.
+    ///
+    /// Verify is a read: it reports each component's state and never changes
+    /// the install. The architecture disambiguates two builds of one version.
+    pub fn editors_verify_spec(
+        &self,
+        version: &str,
+        architecture: Option<&str>,
+    ) -> Result<CommandSpec, UnityError> {
+        let parts = editors_verify_parts(version, architecture)?;
+        self.spec(&parts, "json")
     }
 
     pub fn upgrade_project_spec(
@@ -987,6 +1025,7 @@ fn modules_parts(version: &str, architecture: Option<&str>) -> Result<Vec<String
 
 pub fn install_parts(
     version: &str,
+    architecture: Option<&str>,
     modules: &[String],
     headless: bool,
     accept_eula: bool,
@@ -998,6 +1037,10 @@ pub fn install_parts(
         ));
     }
     let mut parts = svec(&["install", version, "--yes"]);
+    // The CLI resolves the host build when `--architecture` is absent. Only
+    // name a build when the user actually chose one, so the single-build
+    // command stays exactly what earlier releases produced.
+    append_architecture(&mut parts, architecture)?;
     append_modules(&mut parts, modules)?;
     if headless {
         // The headless build leaves out modules it cannot use, such as iOS.
@@ -1006,6 +1049,30 @@ pub fn install_parts(
     if accept_eula {
         parts.push("--accept-eula".to_string());
     }
+    Ok(parts)
+}
+
+fn editor_default_parts(
+    version: &str,
+    architecture: Option<&str>,
+) -> Result<Vec<String>, UnityError> {
+    validate_editor_version(version)?;
+    let mut parts = svec(&["editors", "default", version]);
+    append_architecture(&mut parts, architecture)?;
+    Ok(parts)
+}
+
+fn editor_default_unset_parts() -> Vec<String> {
+    svec(&["editors", "default", "--unset"])
+}
+
+fn editors_verify_parts(
+    version: &str,
+    architecture: Option<&str>,
+) -> Result<Vec<String>, UnityError> {
+    validate_editor_version(version)?;
+    let mut parts = svec(&["editors", "verify", version]);
+    append_architecture(&mut parts, architecture)?;
     Ok(parts)
 }
 
@@ -1401,10 +1468,10 @@ mod tests {
     #[test]
     fn headless_installs_add_the_flag_only_when_requested() {
         let modules = vec!["linux-il2cpp".to_string()];
-        let regular = install_parts("6000.6.6f1", &modules, false, true).unwrap();
+        let regular = install_parts("6000.6.6f1", None, &modules, false, true).unwrap();
         assert!(!regular.contains(&"--headless".to_string()));
 
-        let headless = install_parts("6000.6.6f1", &modules, true, true);
+        let headless = install_parts("6000.6.6f1", None, &modules, true, true);
         if headless_editor_supported() {
             assert!(headless.unwrap().contains(&"--headless".to_string()));
         } else {
@@ -1415,8 +1482,93 @@ mod tests {
     }
 
     #[test]
+    fn install_omits_the_architecture_when_the_host_default_is_chosen() {
+        let parts = install_parts("6000.6.6f1", None, &[], false, false).unwrap();
+        assert_eq!(
+            parts,
+            svec(&["install", "6000.6.6f1", "--yes"]),
+            "a host-default install must stay byte-for-byte the old command"
+        );
+    }
+
+    #[test]
+    fn install_names_the_chosen_architecture_before_the_modules() {
+        let parts = install_parts(
+            "6000.6.6f1",
+            Some("arm64"),
+            &["linux-il2cpp".to_string()],
+            false,
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            parts,
+            svec(&[
+                "install",
+                "6000.6.6f1",
+                "--yes",
+                "--architecture",
+                "arm64",
+                "-m",
+                "linux-il2cpp",
+                "--accept-eula",
+            ])
+        );
+    }
+
+    #[test]
+    fn install_rejects_an_architecture_that_looks_like_a_flag() {
+        let error = install_parts("6000.6.6f1", Some("--force"), &[], false, false)
+            .expect_err("invalid architectures must never reach the command line");
+        assert_eq!(error.code, "INVALID_INPUT");
+    }
+
+    #[test]
+    fn install_architecture_can_be_left_blank_by_an_old_registry_row() {
+        let parts = install_parts("6000.6.6f1", Some("  "), &[], false, false).unwrap();
+        assert!(!parts.iter().any(|part| part == "--architecture"));
+    }
+
+    #[test]
+    fn editor_default_targets_one_build_and_unset_is_explicit() {
+        let set = editor_default_parts("6000.6.6f1", Some("x86_64")).unwrap();
+        assert_eq!(
+            set,
+            svec(&[
+                "editors",
+                "default",
+                "6000.6.6f1",
+                "--architecture",
+                "x86_64"
+            ])
+        );
+        // A host-default choice must not grow an arbitrary build.
+        assert_eq!(
+            editor_default_parts("6000.6.6f1", None).unwrap(),
+            svec(&["editors", "default", "6000.6.6f1"])
+        );
+        assert_eq!(
+            editor_default_unset_parts(),
+            svec(&["editors", "default", "--unset"])
+        );
+    }
+
+    #[test]
+    fn editors_verify_forwards_the_architecture() {
+        assert_eq!(
+            editors_verify_parts("6000.6.6f1", Some("arm64")).unwrap(),
+            svec(&["editors", "verify", "6000.6.6f1", "--architecture", "arm64"])
+        );
+        assert_eq!(
+            editors_verify_parts("6000.6.6f1", None).unwrap(),
+            svec(&["editors", "verify", "6000.6.6f1"])
+        );
+        assert!(editors_verify_parts("6000.6.6f1; rm -rf /", None).is_err());
+    }
+
+    #[test]
     fn dry_run_install_accepts_the_headless_flag() {
-        let parts = install_parts("6000.6.6f1", &[], true, false);
+        let parts = install_parts("6000.6.6f1", None, &[], true, false);
         if headless_editor_supported() {
             let parts = parts.unwrap();
             assert_eq!(parts[0], "install");

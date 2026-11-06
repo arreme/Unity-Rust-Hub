@@ -350,6 +350,10 @@ pub struct EditorRowVm {
 #[derive(Debug, Clone)]
 pub struct InstallEditorVm {
     pub version_input: String,
+    /// The build the user asked for. `None` means "host default", which keeps
+    /// `--architecture` out of the command exactly as before.
+    pub architecture: Option<String>,
+    pub architecture_options: Vec<ArchitectureOptionVm>,
     pub modules: LoadState<Vec<ModuleOptionVm>>,
     pub available_count: usize,
     /// Install the headless Editor (`--headless`), a CLI beta.17 option.
@@ -358,10 +362,24 @@ pub struct InstallEditorVm {
     pub headless_available: bool,
     pub accept_eula: bool,
     pub can_install: bool,
+    /// Set when the requested version already has a build installed and the
+    /// user is asking for another one. Both stay on disk; projects keep the
+    /// build they were created with.
+    pub second_build_warning: Option<String>,
     pub preview: Option<InstallPreviewVm>,
     pub preview_note: Option<String>,
     pub preview_error: Option<UiError>,
     pub preview_loading: bool,
+}
+
+/// One choice in the install card's architecture picker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArchitectureOptionVm {
+    /// `None` is the host default: the CLI resolves the build and no
+    /// `--architecture` token is sent.
+    pub architecture: Option<String>,
+    pub label: String,
+    pub selected: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -374,6 +392,8 @@ pub struct ModuleOptionVm {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstallPreviewVm {
     pub editor_version: String,
+    /// The build the CLI resolved, when it reports one.
+    pub architecture: Option<String>,
     pub download_size: String,
     pub module_count: usize,
 }
@@ -381,6 +401,7 @@ pub struct InstallPreviewVm {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReleaseRowVm {
     pub version: String,
+    pub architecture: String,
     pub stream: String,
     pub stream_tone: Tone,
     pub installed: bool,
@@ -402,6 +423,8 @@ pub struct ProjectRowVm {
     pub path: String,
     pub title: String,
     pub version: String,
+    /// The build the project was created with; older CLI rows can omit it.
+    pub architecture: String,
     pub pipeline: Option<BadgeVm>,
     pub build_target: String,
     pub short_path: String,
@@ -618,7 +641,13 @@ pub struct UpgradeProjectVm {
     pub project_title: String,
     pub project_path_short: String,
     pub current_version: String,
+    /// The project's build, when the CLI reports one.
+    pub current_architecture: String,
+    /// One entry per installed version. The CLI's upgrade command targets a
+    /// version, so two builds of a version cannot be offered separately.
     pub target_options: Vec<String>,
+    /// Explains a target version that has more than one installed build.
+    pub target_note: Option<String>,
     pub selected_target: Option<String>,
     pub confirmed: bool,
     pub can_upgrade: bool,

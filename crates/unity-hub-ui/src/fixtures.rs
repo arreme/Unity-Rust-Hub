@@ -4,12 +4,12 @@
 //! surface a designer can review without a Unity installation.
 
 use unity_hub_model::{
-    AccountCardVm, AdvisoryVm, AuthVm, BadgeVm, BreakingChangeVm, ChangelogDataVm,
-    ChangelogSectionVm, ChangelogVm, CheckStatus, CliCardVm, CliConnectionVm, CliDetailsVm,
-    DiagnoseReportVm, DiagnoseTopic, DiagnosticsVm, DoctorCheckVm, DoctorVm, EditorModulesVm,
-    EditorRowVm, EditorsVm, EnvironmentVm, ErrorActionKind, ErrorActionVm, InstallCliVm,
-    InstallEditorVm, JobLogVm, JobPhase, JobVm, LicenseRowVm, LicenseVm, LoadState, ModalVm,
-    ModuleOptionVm, NoticeVm, OverviewVm, Page, PageVm, ProjectRowVm, ProjectsVm, ProxyVm,
+    AccountCardVm, AdvisoryVm, ArchitectureOptionVm, AuthVm, BadgeVm, BreakingChangeVm,
+    ChangelogDataVm, ChangelogSectionVm, ChangelogVm, CheckStatus, CliCardVm, CliConnectionVm,
+    CliDetailsVm, DiagnoseReportVm, DiagnoseTopic, DiagnosticsVm, DoctorCheckVm, DoctorVm,
+    EditorModulesVm, EditorRowVm, EditorsVm, EnvironmentVm, ErrorActionKind, ErrorActionVm,
+    InstallCliVm, InstallEditorVm, JobLogVm, JobPhase, JobVm, LicenseRowVm, LicenseVm, LoadState,
+    ModalVm, ModuleOptionVm, NoticeVm, OverviewVm, Page, PageVm, ProjectRowVm, ProjectsVm, ProxyVm,
     ReleaseRowVm, RunningEditorVm, SectionKind, SettingsVm, ShellVm, TextScaleOptionVm, Tone,
     UiError, UpdateVm, UpgradeProjectVm, ViewModel,
 };
@@ -62,6 +62,10 @@ pub fn all() -> Vec<Fixture> {
             view_model: editors(),
         },
         Fixture {
+            name: "Editors · two builds of one version",
+            view_model: editors_two_builds(),
+        },
+        Fixture {
             name: "Projects",
             view_model: projects(),
         },
@@ -104,6 +108,10 @@ pub fn all() -> Vec<Fixture> {
         Fixture {
             name: "Modal · project upgrade",
             view_model: upgrade_modal(),
+        },
+        Fixture {
+            name: "Modal · project upgrade (two builds)",
+            view_model: upgrade_modal_two_builds(),
         },
         Fixture {
             name: "Job · running",
@@ -318,6 +326,8 @@ fn editors() -> ViewModel {
             ]),
             install: InstallEditorVm {
                 version_input: "lts".to_string(),
+                architecture: None,
+                architecture_options: architecture_options(None),
                 modules: LoadState::Ready(vec![
                     ModuleOptionVm {
                         id: "linux-il2cpp".to_string(),
@@ -335,6 +345,7 @@ fn editors() -> ViewModel {
                 headless_available: true,
                 accept_eula: false,
                 can_install: true,
+                second_build_warning: None,
                 preview: None,
                 preview_note: None,
                 preview_error: None,
@@ -343,12 +354,14 @@ fn editors() -> ViewModel {
             releases: LoadState::Ready(vec![
                 ReleaseRowVm {
                     version: "6000.3.0f1".to_string(),
+                    architecture: "x86_64".to_string(),
                     stream: "LTS".to_string(),
                     stream_tone: Tone::Success,
                     installed: false,
                 },
                 ReleaseRowVm {
                     version: "6000.2.0b1".to_string(),
+                    architecture: "x86_64".to_string(),
                     stream: "Beta".to_string(),
                     stream_tone: Tone::Warning,
                     installed: true,
@@ -356,6 +369,62 @@ fn editors() -> ViewModel {
             ]),
         }),
     )
+}
+
+fn architecture_options(selected: Option<&str>) -> Vec<ArchitectureOptionVm> {
+    [None, Some("x86_64"), Some("arm64")]
+        .into_iter()
+        .map(|architecture| ArchitectureOptionVm {
+            label: architecture.unwrap_or("Host default").to_string(),
+            selected: architecture == selected,
+            architecture: architecture.map(str::to_string),
+        })
+        .collect()
+}
+
+fn editors_two_builds() -> ViewModel {
+    let mut vm = editors();
+    if let PageVm::Editors(editors_vm) = &mut vm.page {
+        editors_vm.installed = LoadState::Ready(vec![
+            EditorRowVm {
+                version: "6000.1.1f1".to_string(),
+                architecture: "arm64".to_string(),
+                is_default: true,
+                modules: vec!["mac-il2cpp".to_string()],
+            },
+            EditorRowVm {
+                version: "6000.1.1f1".to_string(),
+                architecture: "x86_64".to_string(),
+                is_default: false,
+                modules: vec!["linux-il2cpp".to_string(), "linux-server".to_string()],
+            },
+        ]);
+        editors_vm.install = InstallEditorVm {
+            version_input: "6000.1.1f1".to_string(),
+            architecture: Some("x86_64".to_string()),
+            architecture_options: architecture_options(Some("x86_64")),
+            modules: LoadState::Ready(Vec::new()),
+            available_count: 0,
+            headless: false,
+            headless_available: true,
+            accept_eula: true,
+            can_install: true,
+            second_build_warning: Some(
+                "Unity 6000.1.1f1 is already installed for arm64. Installing the x86_64 build keeps both on disk, and projects pinned to the existing build keep using it."
+                    .to_string(),
+            ),
+            preview: Some(unity_hub_model::InstallPreviewVm {
+                editor_version: "6000.1.1f1".to_string(),
+                architecture: Some("x86_64".to_string()),
+                download_size: "6.4 GB".to_string(),
+                module_count: 0,
+            }),
+            preview_note: None,
+            preview_error: None,
+            preview_loading: false,
+        };
+    }
+    vm
 }
 
 fn projects() -> ViewModel {
@@ -370,6 +439,7 @@ fn projects() -> ViewModel {
                     path: "/home/ada/Games/Orbital".to_string(),
                     title: "Orbital".to_string(),
                     version: "6000.1.1f1".to_string(),
+                    architecture: "arm64".to_string(),
                     pipeline: Some(BadgeVm {
                         label: "URP".to_string(),
                         tone: Tone::Highlight,
@@ -392,6 +462,7 @@ fn projects() -> ViewModel {
                     path: "/home/ada/Tools/LevelKit".to_string(),
                     title: "LevelKit".to_string(),
                     version: "2022.3.62f1".to_string(),
+                    architecture: "x86_64".to_string(),
                     pipeline: None,
                     build_target: "—".to_string(),
                     short_path: "…/Tools/LevelKit".to_string(),
@@ -728,11 +799,24 @@ fn upgrade_modal() -> ViewModel {
         project_title: "Orbital".to_string(),
         project_path_short: "…/Games/Orbital".to_string(),
         current_version: "6000.1.1f1".to_string(),
+        current_architecture: "arm64".to_string(),
         target_options: vec!["6000.3.0f1".to_string()],
+        target_note: None,
         selected_target: Some("6000.3.0f1".to_string()),
         confirmed: false,
         can_upgrade: false,
     }));
+    vm
+}
+
+fn upgrade_modal_two_builds() -> ViewModel {
+    let mut vm = upgrade_modal();
+    if let Some(ModalVm::UpgradeProject(upgrade)) = &mut vm.modal {
+        upgrade.target_note = Some(
+            "6000.3.0f1 has arm64 and x86_64 builds installed. `unity projects upgrade` selects by version, not by build, so the CLI chooses which installed build opens the project; this dialog does not silently pick one. Review the builds on the Editors page before upgrading."
+                .to_string(),
+        );
+    }
     vm
 }
 

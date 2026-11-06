@@ -17,14 +17,14 @@ use unity_core::{
     UnityError,
 };
 use unity_hub_model::{
-    AccountCardVm, AdvisoryVm, AuthVm, BadgeVm, BreakingChangeVm, ChangelogDataVm,
-    ChangelogSectionVm, ChangelogVm, CheckStatus, CliCardVm, CliConnectionVm, CliDetailsVm,
-    DiagnoseReportVm, DiagnoseTopic, DiagnosticsVm, DoctorCheckVm, DoctorVm, EditorModulesVm,
-    EditorRowVm, EditorsVm, EnvironmentVm, ErrorActionKind, ErrorActionVm, InstallCliVm,
-    InstallEditorVm, InstallPreviewVm, JobLogVm, JobPhase, JobVm, LicenseRowVm, LicenseVm,
-    LoadState, ModalVm, ModuleOptionVm, NoticeVm, OverviewVm, Page, PageVm, ProjectRowVm,
-    ProjectsVm, ProxyVm, ReleaseRowVm, RunningEditorVm, SectionKind, SettingsVm, ShellVm,
-    TextScaleOptionVm, Tone, UiAction, UiError, UpdateVm, UpgradeProjectVm, ViewModel,
+    AccountCardVm, AdvisoryVm, ArchitectureOptionVm, AuthVm, BadgeVm, BreakingChangeVm,
+    ChangelogDataVm, ChangelogSectionVm, ChangelogVm, CheckStatus, CliCardVm, CliConnectionVm,
+    CliDetailsVm, DiagnoseReportVm, DiagnoseTopic, DiagnosticsVm, DoctorCheckVm, DoctorVm,
+    EditorModulesVm, EditorRowVm, EditorsVm, EnvironmentVm, ErrorActionKind, ErrorActionVm,
+    InstallCliVm, InstallEditorVm, InstallPreviewVm, JobLogVm, JobPhase, JobVm, LicenseRowVm,
+    LicenseVm, LoadState, ModalVm, ModuleOptionVm, NoticeVm, OverviewVm, Page, PageVm,
+    ProjectRowVm, ProjectsVm, ProxyVm, ReleaseRowVm, RunningEditorVm, SectionKind, SettingsVm,
+    ShellVm, TextScaleOptionVm, Tone, UiAction, UiError, UpdateVm, UpgradeProjectVm, ViewModel,
 };
 
 use crate::jobs::{JobManager, JobStarted, JobState, StreamKind};
@@ -144,13 +144,17 @@ impl ReadKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RetryRequest {
     Read(ReadKind),
-    Modules(String),
+    Modules {
+        version: String,
+        architecture: Option<String>,
+    },
     DialogModules {
         version: String,
         architecture: String,
     },
     PreviewInstall {
         version: String,
+        architecture: Option<String>,
         modules: Vec<String>,
         headless: bool,
     },
@@ -372,6 +376,8 @@ pub struct App {
     pub cli_channel: String,
     pub cli_consent: bool,
     pub install_version: String,
+    /// `None` keeps the host default and omits `--architecture`.
+    pub install_architecture: Option<String>,
     pub selected_modules: BTreeSet<String>,
     pub install_headless: bool,
     pub accept_eula: bool,
@@ -420,6 +426,7 @@ pub enum Message {
     InstallCli,
     UpdateCli,
     InstallVersionChanged(String),
+    InstallArchitectureChanged(Option<String>),
     LoadModules,
     ToggleModule(String, bool),
     SelectAllModules(bool),
@@ -427,8 +434,10 @@ pub enum Message {
     AcceptEulaToggled(bool),
     PreviewInstall,
     StartInstallEditor,
-    UseRelease(String),
+    UseRelease(String, String),
     OpenModules(String, String),
+    SetDefaultEditor(String, String),
+    ClearDefaultEditor,
     CloseModal,
     ToggleDialogModule(String, bool),
     DialogEulaToggled(bool),
@@ -493,6 +502,9 @@ impl From<UiAction> for Message {
             UiAction::InstallCli => Self::InstallCli,
             UiAction::UpdateCli => Self::UpdateCli,
             UiAction::InstallVersionChanged(version) => Self::InstallVersionChanged(version),
+            UiAction::InstallArchitectureChanged(architecture) => {
+                Self::InstallArchitectureChanged(architecture)
+            }
             UiAction::LoadModules => Self::LoadModules,
             UiAction::ToggleModule(id, value) => Self::ToggleModule(id, value),
             UiAction::SelectAllModules(value) => Self::SelectAllModules(value),
@@ -500,10 +512,14 @@ impl From<UiAction> for Message {
             UiAction::AcceptEulaToggled(value) => Self::AcceptEulaToggled(value),
             UiAction::PreviewInstall => Self::PreviewInstall,
             UiAction::StartInstallEditor => Self::StartInstallEditor,
-            UiAction::UseRelease(version) => Self::UseRelease(version),
+            UiAction::UseRelease(version, architecture) => Self::UseRelease(version, architecture),
             UiAction::OpenEditorModules(version, architecture) => {
                 Self::OpenModules(version, architecture)
             }
+            UiAction::SetDefaultEditor(version, architecture) => {
+                Self::SetDefaultEditor(version, architecture)
+            }
+            UiAction::ClearDefaultEditor => Self::ClearDefaultEditor,
             UiAction::CloseModal => Self::CloseModal,
             UiAction::ToggleDialogModule(id, value) => Self::ToggleDialogModule(id, value),
             UiAction::DialogEulaToggled(value) => Self::DialogEulaToggled(value),
@@ -564,6 +580,7 @@ impl App {
             cli_channel: "stable".to_string(),
             cli_consent: false,
             install_version: "lts".to_string(),
+            install_architecture: None,
             selected_modules: BTreeSet::new(),
             install_headless: false,
             accept_eula: false,
@@ -1037,6 +1054,24 @@ impl App {
                 self.install_version = version;
                 Task::none()
             }
+            Message::InstallArchitectureChanged(architecture) => {
+                let architecture = architecture
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty());
+                if self.install_architecture == architecture {
+                    return Task::none();
+                }
+                self.install_architecture = architecture;
+                // The catalog and the preview describe one build. Changing the
+                // build invalidates both instead of carrying selections over.
+                self.modules = Loadable::default();
+                self.selected_modules.clear();
+                self.preview = None;
+                self.preview_raw = None;
+                self.preview_error = None;
+                self.preview_loading = false;
+                Task::none()
+            }
             Message::LoadModules => {
                 self.modules.begin();
                 self.selected_modules.clear();
@@ -1044,14 +1079,18 @@ impl App {
                 self.preview_raw = None;
                 self.preview_error = None;
                 let version = self.install_version.trim().to_string();
+                let architecture = self.install_architecture.clone();
                 self.retry_targets.insert(
                     ReadKind::Modules.id().to_string(),
-                    RetryRequest::Modules(version.clone()),
+                    RetryRequest::Modules {
+                        version: version.clone(),
+                        architecture: architecture.clone(),
+                    },
                 );
                 Task::perform(
                     run_blocking({
                         let cli = self.cli.clone();
-                        move || cli.modules(&version, None)
+                        move || cli.modules(&version, architecture.as_deref())
                     }),
                     Message::ModulesLoaded,
                 )
@@ -1090,12 +1129,14 @@ impl App {
                 self.preview_loading = true;
                 self.preview_error = None;
                 let version = self.install_version.trim().to_string();
+                let architecture = self.install_architecture.clone();
                 let modules: Vec<String> = self.selected_modules.iter().cloned().collect();
                 let headless = self.install_headless;
                 self.retry_targets.insert(
                     ReadKind::PreviewInstall.id().to_string(),
                     RetryRequest::PreviewInstall {
                         version: version.clone(),
+                        architecture: architecture.clone(),
                         modules: modules.clone(),
                         headless,
                     },
@@ -1103,19 +1144,20 @@ impl App {
                 Task::perform(
                     run_blocking({
                         let cli = self.cli.clone();
-                        move || cli.dry_run_install(&version, &modules, headless)
+                        move || {
+                            cli.dry_run_install(
+                                &version,
+                                architecture.as_deref(),
+                                &modules,
+                                headless,
+                            )
+                        }
                     }),
                     Message::PreviewLoaded,
                 )
             }
             Message::StartInstallEditor => {
-                let modules: Vec<String> = self.selected_modules.iter().cloned().collect();
-                match self.cli.install_editor_spec(
-                    &self.install_version,
-                    &modules,
-                    self.install_headless,
-                    self.accept_eula,
-                ) {
+                match self.install_editor_spec() {
                     Ok(spec) => {
                         if self.start_job("editor-install", spec) {
                             self.modules.data = None;
@@ -1130,38 +1172,42 @@ impl App {
                 }
                 Task::none()
             }
-            Message::UseRelease(version) => {
+            Message::UseRelease(version, architecture) => {
                 self.install_version = version.clone();
+                let architecture =
+                    Some(architecture.trim().to_string()).filter(|value| !value.is_empty());
+                self.install_architecture = architecture.clone();
                 self.modules.begin();
                 self.selected_modules.clear();
+                self.preview = None;
+                self.preview_raw = None;
                 self.preview_error = None;
                 self.retry_targets.insert(
                     ReadKind::Modules.id().to_string(),
-                    RetryRequest::Modules(version.clone()),
+                    RetryRequest::Modules {
+                        version: version.clone(),
+                        architecture: architecture.clone(),
+                    },
                 );
                 Task::perform(
                     run_blocking({
                         let cli = self.cli.clone();
-                        move || cli.modules(&version, None)
+                        move || cli.modules(&version, architecture.as_deref())
                     }),
                     Message::ModulesLoaded,
                 )
             }
             Message::OpenModules(version, architecture) => {
-                let Some(editor) = self
-                    .editors
-                    .data
-                    .as_ref()
-                    .and_then(|editors| {
-                        editors
-                            .iter()
-                            .find(|editor| {
-                                editor.version == version && editor.architecture == architecture
-                            })
-                            .or_else(|| editors.iter().find(|editor| editor.version == version))
-                    })
-                    .cloned()
-                else {
+                // The row identity is `(version, architecture)`. A stale action
+                // must do nothing rather than fall back to another build.
+                let Some(editor) = self.editors.data.as_ref().and_then(|editors| {
+                    editors
+                        .iter()
+                        .find(|editor| {
+                            editor.version == version && editor.architecture == architecture
+                        })
+                        .cloned()
+                }) else {
                     return Task::none();
                 };
                 self.dialog_modules.begin();
@@ -1221,6 +1267,28 @@ impl App {
                             self.modal = Modal::None;
                             self.dialog_selected.clear();
                         }
+                    }
+                    Err(error) => {
+                        self.notice = Some(Notice::error(error_text(&error)));
+                    }
+                }
+                Task::none()
+            }
+            Message::SetDefaultEditor(version, architecture) => {
+                match self.editor_default_spec(&version, &architecture) {
+                    Ok(spec) => {
+                        self.start_job("editor-default", spec);
+                    }
+                    Err(error) => {
+                        self.notice = Some(Notice::error(error_text(&error)));
+                    }
+                }
+                Task::none()
+            }
+            Message::ClearDefaultEditor => {
+                match self.cli.editor_default_unset_spec() {
+                    Ok(spec) => {
+                        self.start_job("editor-default", spec);
                     }
                     Err(error) => {
                         self.notice = Some(Notice::error(error_text(&error)));
@@ -1678,12 +1746,15 @@ impl App {
                 // carry the request they were started with.
                 Task::none()
             }
-            RetryRequest::Modules(version) => {
+            RetryRequest::Modules {
+                version,
+                architecture,
+            } => {
                 self.modules.begin();
                 Task::perform(
                     run_blocking({
                         let cli = self.cli.clone();
-                        move || cli.modules(&version, None)
+                        move || cli.modules(&version, architecture.as_deref())
                     }),
                     Message::ModulesLoaded,
                 )
@@ -1703,6 +1774,7 @@ impl App {
             }
             RetryRequest::PreviewInstall {
                 version,
+                architecture,
                 modules,
                 headless,
             } => {
@@ -1711,7 +1783,14 @@ impl App {
                 Task::perform(
                     run_blocking({
                         let cli = self.cli.clone();
-                        move || cli.dry_run_install(&version, &modules, headless)
+                        move || {
+                            cli.dry_run_install(
+                                &version,
+                                architecture.as_deref(),
+                                &modules,
+                                headless,
+                            )
+                        }
                     }),
                     Message::PreviewLoaded,
                 )
@@ -1820,7 +1899,7 @@ impl App {
             "cli-install" | "cli-update" => {
                 Task::batch(vec![self.refresh_status(), self.load_overview_data(true)])
             }
-            "editor-install" | "module-install" => self.load_editors_page(true),
+            "editor-install" | "module-install" | "editor-default" => self.load_editors_page(true),
             "auth-login" => {
                 let mut tasks = Vec::new();
                 if !self.auth.loading {
@@ -2280,7 +2359,7 @@ impl App {
     }
 
     fn editors_vm(&self) -> EditorsVm {
-        let installed = self.installed_versions();
+        let installed = self.installed_builds();
 
         EditorsVm {
             installed: self.load_state(ReadKind::Editors, &self.editors, |editors| {
@@ -2292,10 +2371,15 @@ impl App {
                     .iter()
                     .map(|release| ReleaseRowVm {
                         version: release.version.clone(),
+                        architecture: release.architecture.clone(),
                         stream: release.stream.clone(),
                         stream_tone: stream_tone(&release.stream),
                         installed: release.installed
-                            || installed.contains(release.version.as_str()),
+                            || installed_build_matches(
+                                &installed,
+                                &release.version,
+                                &release.architecture,
+                            ),
                     })
                     .collect()
             }),
@@ -2332,6 +2416,15 @@ impl App {
                 .as_ref()
                 .map(|editor| editor.version.clone())
                 .unwrap_or_else(|| self.install_version.clone()),
+            // The CLI resolves the host default when no build was requested.
+            // An older CLI may leave the field empty; then show the requested
+            // build, and let the UI label `None` as the host default.
+            architecture: preview
+                .editor
+                .as_ref()
+                .map(|editor| editor.architecture.trim().to_string())
+                .filter(|architecture| !architecture.is_empty())
+                .or_else(|| self.install_architecture.clone()),
             download_size: format_bytes(
                 preview.total_download_size.max(
                     preview
@@ -2346,12 +2439,15 @@ impl App {
 
         InstallEditorVm {
             version_input: self.install_version.clone(),
+            architecture: self.install_architecture.clone(),
+            architecture_options: architecture_options(self.install_architecture.as_deref()),
             modules,
             available_count,
             headless: self.install_headless && unity_core::runner::headless_editor_supported(),
             headless_available: unity_core::runner::headless_editor_supported(),
             accept_eula: self.accept_eula,
             can_install: self.selected_modules.is_empty() || self.accept_eula,
+            second_build_warning: self.second_build_warning(),
             preview,
             preview_note: self
                 .preview_raw
@@ -2362,11 +2458,93 @@ impl App {
         }
     }
 
+    /// Explains that adding a build to a version that already has one keeps
+    /// both on disk. Single-build users who leave the host default selected
+    /// never see this: their command and card stay unchanged.
+    fn second_build_warning(&self) -> Option<String> {
+        let requested = self.install_architecture.as_deref()?;
+        let version = self.install_version.trim();
+        let builds: Vec<&str> = self
+            .editors
+            .data
+            .as_ref()?
+            .iter()
+            .filter(|editor| editor.version == version)
+            .map(|editor| editor.architecture.as_str())
+            .filter(|architecture| !architecture.trim().is_empty())
+            .collect();
+        if builds.is_empty() || builds.contains(&requested) {
+            return None;
+        }
+        Some(format!(
+            "Unity {version} is already installed for {}. Installing the {requested} build keeps both on disk, and projects pinned to the existing build keep using it.",
+            builds.join(" and ")
+        ))
+    }
+
+    fn installed_builds_for(&self, version: &str) -> Vec<String> {
+        self.editors
+            .data
+            .as_ref()
+            .map(|editors| {
+                editors
+                    .iter()
+                    .filter(|editor| editor.version == version)
+                    .map(|editor| {
+                        if editor.architecture.trim().is_empty() {
+                            "host default".to_string()
+                        } else {
+                            editor.architecture.clone()
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Builds the install command from the card's current fields. Kept as one
+    /// method so the handler and its tests always agree on the flags.
+    fn install_editor_spec(&self) -> Result<CommandSpec, UnityError> {
+        let modules: Vec<String> = self.selected_modules.iter().cloned().collect();
+        self.cli.install_editor_spec(
+            &self.install_version,
+            self.install_architecture.as_deref(),
+            &modules,
+            self.install_headless,
+            self.accept_eula,
+        )
+    }
+
+    /// Builds the command that stores a default Editor.
+    ///
+    /// A version with two installed builds cannot be stored by version alone:
+    /// the CLI would have to pick one. The app explains the choice instead of
+    /// sending a command that silently targets either build.
+    fn editor_default_spec(
+        &self,
+        version: &str,
+        architecture: &str,
+    ) -> Result<CommandSpec, UnityError> {
+        let architecture = architecture.trim();
+        if architecture.is_empty() {
+            let builds = self.installed_builds_for(version);
+            if builds.len() > 1 {
+                return Err(UnityError::invalid_input(format!(
+                    "Unity {version} has {} installed builds ({}). Choose Set default on the build row you want; the app will not guess which one to store.",
+                    builds.len(),
+                    builds.join(", ")
+                )));
+            }
+        }
+        let architecture = (!architecture.is_empty()).then_some(architecture);
+        self.cli.editor_default_spec(version, architecture)
+    }
+
     fn projects_vm(&self) -> ProjectsVm {
         let filtered = self.filtered_projects();
         let total_count = self.projects.data.as_ref().map(Vec::len).unwrap_or(0);
         let visible_count = filtered.len();
-        let installed = self.installed_versions();
+        let installed = self.installed_builds();
         let rows = || {
             filtered
                 .iter()
@@ -2621,24 +2799,26 @@ impl App {
                 }))
             }
             Modal::UpgradeProject(project) => {
-                let target_options = self
-                    .editors
-                    .data
-                    .as_ref()
-                    .map(|editors| {
-                        editors
-                            .iter()
-                            .filter(|editor| editor.version != project.version)
-                            .map(|editor| editor.version.clone())
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default();
+                let mut target_options: Vec<String> = Vec::new();
+                if let Some(editors) = self.editors.data.as_ref() {
+                    for editor in editors
+                        .iter()
+                        .filter(|editor| editor.version != project.version)
+                    {
+                        if !target_options.contains(&editor.version) {
+                            target_options.push(editor.version.clone());
+                        }
+                    }
+                }
+                let target_note = self.upgrade_target_note(&target_options);
 
                 Some(ModalVm::UpgradeProject(UpgradeProjectVm {
                     project_title: project.title.clone(),
                     project_path_short: short_path(&project.path, 60).into_owned(),
                     current_version: project.version.clone(),
+                    current_architecture: project.architecture.clone(),
                     target_options,
+                    target_note,
                     selected_target: self.upgrade_target.clone(),
                     confirmed: self.upgrade_confirmed,
                     can_upgrade: self.upgrade_confirmed && self.upgrade_target.is_some(),
@@ -2654,6 +2834,39 @@ impl App {
             .iter()
             .map(|editor| editor.version.clone())
             .find(|version| version != current)
+    }
+
+    /// Names target versions with more than one installed build.
+    ///
+    /// `unity projects upgrade --to <version>` cannot pick a build, so the
+    /// dialog offers versions only and says which ones the CLI resolves. That
+    /// avoids silently pretending the clicked build is the one that opens.
+    fn upgrade_target_note(&self, targets: &[String]) -> Option<String> {
+        let editors = self.editors.data.as_ref()?;
+        let mut ambiguous = Vec::new();
+        for target in targets {
+            let mut architectures: Vec<&str> = editors
+                .iter()
+                .filter(|editor| &editor.version == target)
+                .map(|editor| editor.architecture.as_str())
+                .filter(|architecture| !architecture.trim().is_empty())
+                .collect();
+            architectures.sort_unstable();
+            architectures.dedup();
+            if architectures.len() > 1 {
+                ambiguous.push(format!(
+                    "{target} has {} builds installed",
+                    architectures.join(" and ")
+                ));
+            }
+        }
+        if ambiguous.is_empty() {
+            return None;
+        }
+        Some(format!(
+            "{}. `unity projects upgrade` selects by version, not by build, so the CLI chooses which installed build opens the project; this dialog does not silently pick one. Review the builds on the Editors page before upgrading.",
+            ambiguous.join("; ")
+        ))
     }
 
     fn running_editor_for_project(&self, path: &str) -> Option<&RunningEditor> {
@@ -2699,14 +2912,18 @@ impl App {
             .collect()
     }
 
-    pub fn installed_versions(&self) -> HashSet<&str> {
+    /// Every installed build, keyed by `(version, architecture)`.
+    ///
+    /// This is the identity used by rows, project badges, and upgrade choices;
+    /// a version key alone cannot tell an `arm64` build from an `x86_64` one.
+    pub fn installed_builds(&self) -> HashSet<(&str, &str)> {
         self.editors
             .data
             .as_ref()
             .map(|editors| {
                 editors
                     .iter()
-                    .map(|editor| editor.version.as_str())
+                    .map(|editor| (editor.version.as_str(), editor.architecture.as_str()))
                     .collect()
             })
             .unwrap_or_default()
@@ -3327,7 +3544,21 @@ fn editor_row_vm(editor: &Editor) -> EditorRowVm {
     }
 }
 
-fn project_row_vm(project: &Project, installed: &HashSet<&str>) -> ProjectRowVm {
+/// The install card's build choices. `None` is deliberately first and is the
+/// boot default, so an existing single-build install keeps its old command.
+fn architecture_options(selected: Option<&str>) -> Vec<ArchitectureOptionVm> {
+    let selected = selected.map(str::trim).filter(|value| !value.is_empty());
+    [None, Some("x86_64"), Some("arm64")]
+        .into_iter()
+        .map(|architecture| ArchitectureOptionVm {
+            label: architecture.unwrap_or("Host default").to_string(),
+            selected: architecture == selected,
+            architecture: architecture.map(str::to_string),
+        })
+        .collect()
+}
+
+fn project_row_vm(project: &Project, installed: &HashSet<(&str, &str)>) -> ProjectRowVm {
     let mut badges = Vec::new();
     if project.cloud_enabled {
         badges.push(BadgeVm {
@@ -3341,7 +3572,9 @@ fn project_row_vm(project: &Project, installed: &HashSet<&str>) -> ProjectRowVm 
             tone: Tone::Neutral,
         });
     }
-    if !installed.is_empty() && !installed.contains(project.version.as_str()) {
+    if !installed.is_empty()
+        && !installed_build_matches(installed, &project.version, &project.architecture)
+    {
         badges.push(BadgeVm {
             label: "Editor not installed".to_string(),
             tone: Tone::Warning,
@@ -3364,6 +3597,7 @@ fn project_row_vm(project: &Project, installed: &HashSet<&str>) -> ProjectRowVm 
         path: project.path.clone(),
         title: project.title.clone(),
         version: project.version.clone(),
+        architecture: project.architecture.clone(),
         pipeline: project.render_pipeline.as_ref().map(|pipeline| BadgeVm {
             label: pipeline.clone(),
             tone: Tone::Highlight,
@@ -3375,6 +3609,24 @@ fn project_row_vm(project: &Project, installed: &HashSet<&str>) -> ProjectRowVm 
         short_path: short_path(&project.path, 42).into_owned(),
         modified: format_epoch_millis(project.last_modified),
         badges,
+    }
+}
+
+/// Whether an installed build satisfies a row that names a version and an
+/// architecture. A CLI that omits the architecture (older rows) falls back to
+/// a version-only match instead of showing a false "not installed" badge.
+fn installed_build_matches(
+    installed: &HashSet<(&str, &str)>,
+    version: &str,
+    architecture: &str,
+) -> bool {
+    let architecture = architecture.trim();
+    if architecture.is_empty() {
+        installed
+            .iter()
+            .any(|(installed_version, _)| *installed_version == version)
+    } else {
+        installed.contains(&(version, architecture))
     }
 }
 
@@ -3695,6 +3947,171 @@ mod tests {
         };
         assert_eq!(modules.editor_version, "6000.6.6f1");
         assert_eq!(modules.architecture, "arm64");
+    }
+
+    fn editor(version: &str, architecture: &str, is_default: bool) -> Editor {
+        Editor {
+            version: version.to_string(),
+            architecture: architecture.to_string(),
+            default: is_default,
+            ..Editor::default()
+        }
+    }
+
+    #[test]
+    fn two_builds_of_one_version_are_two_rows_and_target_the_clicked_build() {
+        let (mut app, _) = App::boot();
+        app.page = Page::Editors;
+        app.editors.data = Some(vec![
+            editor("6000.1.1f1", "arm64", true),
+            editor("6000.1.1f1", "x86_64", false),
+        ]);
+
+        let vm = app.view_model();
+        let PageVm::Editors(editors) = &vm.page else {
+            panic!("expected the Editors page");
+        };
+        let rows = editors.installed.data().expect("installed rows");
+        assert_eq!(rows.len(), 2, "a version must not collapse two builds");
+        assert_eq!(rows[0].version, rows[1].version);
+        assert_eq!(rows[0].architecture, "arm64");
+        assert_eq!(rows[1].architecture, "x86_64");
+        assert!(rows[0].is_default);
+        assert!(!rows[1].is_default);
+
+        let _task = app.update(Message::OpenModules(
+            "6000.1.1f1".to_string(),
+            "x86_64".to_string(),
+        ));
+        let Modal::EditorModules(opened) = &app.modal else {
+            panic!("expected the modules dialog");
+        };
+        assert_eq!(opened.architecture, "x86_64");
+
+        // A stale action that names a build the list no longer has must not
+        // fall back to another build of the same version.
+        let _task = app.update(Message::OpenModules(
+            "6000.1.1f1".to_string(),
+            "ppc64".to_string(),
+        ));
+        let Modal::EditorModules(opened) = &app.modal else {
+            panic!("expected the original modules dialog");
+        };
+        assert_eq!(opened.architecture, "x86_64");
+    }
+
+    #[test]
+    fn install_architecture_choice_reaches_the_install_command() {
+        let mut app = connected_app("1.0.0-beta.17");
+        app.cli.set_override_path(Some(temporary_cli()));
+        app.install_version = "6000.1.1f1".to_string();
+        let _ = app.update(Message::InstallArchitectureChanged(Some(
+            "arm64".to_string(),
+        )));
+
+        let spec = app.install_editor_spec().expect("install spec");
+        assert!(spec
+            .args
+            .windows(2)
+            .any(|pair| pair == ["--architecture", "arm64"]));
+
+        let _ = app.update(Message::InstallArchitectureChanged(None));
+        let spec = app
+            .install_editor_spec()
+            .expect("host-default install spec");
+        assert!(
+            !spec.args.iter().any(|arg| arg == "--architecture"),
+            "host default must keep the command unchanged"
+        );
+    }
+
+    #[test]
+    fn an_ambiguous_default_is_explained_instead_of_guessed() {
+        let (mut app, _) = App::boot();
+        app.editors.data = Some(vec![
+            editor("6000.1.1f1", "arm64", false),
+            editor("6000.1.1f1", "x86_64", false),
+        ]);
+
+        let _ = app.update(Message::SetDefaultEditor(
+            "6000.1.1f1".to_string(),
+            String::new(),
+        ));
+
+        assert!(app.active_job.is_none(), "no command may be started");
+        let notice = app
+            .view_model()
+            .shell
+            .notice
+            .expect("the ambiguity must be explained");
+        assert!(notice.text.contains("arm64"), "{}", notice.text);
+        assert!(notice.text.contains("x86_64"), "{}", notice.text);
+
+        // The same version with a named build is unambiguous and builds the
+        // command the row's action sends.
+        app.cli.set_override_path(Some(temporary_cli()));
+        let spec = app
+            .editor_default_spec("6000.1.1f1", "arm64")
+            .expect("the build-specific default");
+        assert!(spec
+            .args
+            .windows(2)
+            .any(|pair| pair == ["--architecture", "arm64"]));
+    }
+
+    #[test]
+    fn project_badges_and_upgrade_options_match_version_and_architecture() {
+        let (mut app, _) = App::boot();
+        app.page = Page::Projects;
+        app.editors.data = Some(vec![
+            editor("6000.1.1f1", "arm64", true),
+            editor("6000.3.0f1", "arm64", false),
+            editor("6000.3.0f1", "x86_64", false),
+        ]);
+        let projects = vec![
+            Project {
+                architecture: "arm64".to_string(),
+                ..project("Arm project", "/games/arm", "6000.1.1f1")
+            },
+            Project {
+                architecture: "x86_64".to_string(),
+                ..project("Intel project", "/games/intel", "6000.1.1f1")
+            },
+        ];
+        app.project_search_index = project_search_keys(&projects);
+        app.projects.data = Some(projects);
+
+        let vm = app.view_model();
+        let PageVm::Projects(projects) = &vm.page else {
+            panic!("expected the Projects page");
+        };
+        let rows = projects.projects.data().expect("project rows");
+        assert!(
+            !rows[0]
+                .badges
+                .iter()
+                .any(|badge| badge.label == "Editor not installed"),
+            "the arm64 build satisfies the arm64 project"
+        );
+        assert!(
+            rows[1]
+                .badges
+                .iter()
+                .any(|badge| badge.label == "Editor not installed"),
+            "an x86_64 project is not satisfied by the arm64 build"
+        );
+
+        let _ = app.update(Message::OpenUpgrade("/games/arm".to_string()));
+        let vm = app.view_model();
+        let Some(ModalVm::UpgradeProject(upgrade)) = vm.modal else {
+            panic!("expected the upgrade dialog");
+        };
+        assert_eq!(upgrade.target_options, vec!["6000.3.0f1".to_string()]);
+        let note = upgrade
+            .target_note
+            .expect("two target builds are explained");
+        assert!(note.contains("arm64"), "{note}");
+        assert!(note.contains("x86_64"), "{note}");
     }
 
     #[test]
@@ -4082,7 +4499,10 @@ mod tests {
         );
         app.retry_targets.insert(
             ReadKind::Modules.id().to_string(),
-            RetryRequest::Modules("6000.1.1f1".to_string()),
+            RetryRequest::Modules {
+                version: "6000.1.1f1".to_string(),
+                architecture: Some("arm64".to_string()),
+            },
         );
         // A later edit to the form must not change the read Retry repeats.
         app.install_version = "6000.9.9f1".to_string();
@@ -4106,7 +4526,10 @@ mod tests {
         );
         assert_eq!(
             app.retry_targets.get(ReadKind::Modules.id()),
-            Some(&RetryRequest::Modules("6000.1.1f1".to_string()))
+            Some(&RetryRequest::Modules {
+                version: "6000.1.1f1".to_string(),
+                architecture: Some("arm64".to_string()),
+            })
         );
     }
 
@@ -4118,6 +4541,7 @@ mod tests {
             ReadKind::PreviewInstall.id().to_string(),
             RetryRequest::PreviewInstall {
                 version: "lts".to_string(),
+                architecture: Some("arm64".to_string()),
                 modules: vec!["webgl".to_string()],
                 headless: false,
             },

@@ -98,18 +98,27 @@ fixture when a new state needs review.
 ### Editors
 
 - Installed Editors: loading, error, empty, one/many, default badge, long module
-  list.
-- Install a new Editor: version input, module catalog loading/error/empty/loaded,
-  select all/clear, headless option on Linux with the CLI's availability note,
-  EULA, preview loading/ready/raw fallback, install enabled and disabled.
-- Available releases: loading, error, empty, installed badge, use action,
-  stream tones.
+  list. One row is one installed build; two builds of the same version show as
+  two rows with their architecture. Each row offers Manage modules and Set
+  default (or Clear default when it is the stored default).
+- The architecture picker samples: Host default, `x86_64`, `arm64`. Host default
+  is the only preselection and keeps `--architecture` out of the command.
+- Install a new Editor: version input, architecture picker next to it, module
+  catalog loading/error/empty/loaded for the chosen build, select all/clear,
+  headless option on Linux with the CLI's availability note, EULA, preview
+  loading/ready/raw fallback with the resolved architecture, second-build
+  warning, install enabled and disabled.
+- Available releases: loading, error, empty, installed badge (matched on
+  version and architecture), use action that selects the build, stream tones.
 
 ### Projects
 
 - Search field and count.
 - Loading, error, no projects registered, no matching projects, populated table.
+- Each row names its Editor version and architecture (when the CLI reports one).
 - Badges: Unity Cloud, VCS, favorite, Editor not installed, local project.
+  "Editor not installed" matches both version and architecture; an older row
+  with no architecture falls back to a version match.
 - Pipeline badge or empty, long title, long path, modified date.
 - Row actions: Open, Change version.
 
@@ -166,8 +175,10 @@ fixture when a new state needs review.
 - Editor modules: installed module list for one build (version + architecture),
   available module loading/error/empty/loaded, selection count, EULA,
   disabled/enabled install.
-- Project upgrade: current version/path, target picker, no target installed
-  warning, confirmation, disabled/enabled upgrade.
+- Project upgrade: current version/path with its architecture, target version
+  picker (one entry per installed version, because the CLI upgrades by version),
+  a note naming any target version with two installed builds, no target
+  installed warning, confirmation, disabled/enabled upgrade.
 
 ## Advisory contract
 

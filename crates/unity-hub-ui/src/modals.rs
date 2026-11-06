@@ -229,12 +229,25 @@ fn module_checkbox(module: &ModuleOptionVm) -> Element<'static, UiAction> {
     .into()
 }
 
-fn version_cell<'a>(label: &'a str, version: String, end: bool) -> Element<'a, UiAction> {
-    let content = column![
+fn version_cell<'a>(
+    label: &'a str,
+    version: String,
+    architecture: Option<String>,
+    end: bool,
+) -> Element<'a, UiAction> {
+    let mut content = column![
         caption(label),
         text(version).size(font::BODY_LARGE + 1.0).font(fonts::MONO),
     ]
     .spacing(4);
+    if let Some(architecture) = architecture.filter(|value| !value.trim().is_empty()) {
+        content = content.push(
+            text(architecture)
+                .size(font::SMALL)
+                .font(fonts::MONO)
+                .style(theme::muted_text),
+        );
+    }
 
     if end {
         container(content.align_x(iced::Alignment::End))
@@ -264,15 +277,33 @@ fn upgrade_modal(vm: &UpgradeProjectVm) -> Element<'_, UiAction> {
         )
     };
 
+    let target_note: Element<'_, UiAction> = match &vm.target_note {
+        Some(note) => notice(
+            Tone::Info,
+            icons::INFO,
+            text(note.as_str())
+                .size(font::BODY)
+                .line_height(1.55)
+                .style(theme::muted_text),
+        ),
+        None => space().height(0).into(),
+    };
+
     let strip = container(
         row![
-            version_cell("Current", vm.current_version.clone(), false),
+            version_cell(
+                "Current",
+                vm.current_version.clone(),
+                Some(vm.current_architecture.clone()),
+                false,
+            ),
             icon(icons::ARROW_RIGHT, font::ICON).style(theme::faint_text),
             version_cell(
                 "Target",
                 vm.selected_target
                     .clone()
                     .unwrap_or_else(|| "—".to_string()),
+                None,
                 true,
             ),
         ]
@@ -287,6 +318,7 @@ fn upgrade_modal(vm: &UpgradeProjectVm) -> Element<'_, UiAction> {
         strip,
         column![
             labelled("Target Editor version", picker),
+            target_note,
             mono(vm.project_path_short.as_str()),
         ]
         .spacing(8),
