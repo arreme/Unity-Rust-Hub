@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::{BTreeSet, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -217,13 +218,33 @@ trait ClipboardBackend {
     fn write(&self, text: &str) -> Result<(), String>;
 }
 
-struct OperatingSystemClipboard;
+struct OperatingSystemClipboard {
+    /// The clipboard owner must outlive the write. On X11, dropping it destroys
+    /// the selection window after only a best-effort handover to a clipboard
+    /// manager; a session without one would show a success notice and paste
+    /// nothing. Lazily create one and reuse it for the app's lifetime.
+    clipboard: RefCell<Option<arboard::Clipboard>>,
+}
+
+impl OperatingSystemClipboard {
+    fn new() -> Self {
+        Self {
+            clipboard: RefCell::new(None),
+        }
+    }
+}
 
 impl ClipboardBackend for OperatingSystemClipboard {
     fn write(&self, text: &str) -> Result<(), String> {
-        let mut clipboard =
-            arboard::Clipboard::new().map_err(|error| format!("clipboard unavailable: {error}"))?;
-        clipboard
+        let mut slot = self.clipboard.borrow_mut();
+        if slot.is_none() {
+            *slot = Some(
+                arboard::Clipboard::new()
+                    .map_err(|error| format!("clipboard unavailable: {error}"))?,
+            );
+        }
+        slot.as_mut()
+            .expect("the clipboard was just initialized")
             .set_text(text.to_owned())
             .map_err(|error| format!("clipboard write failed: {error}"))
     }
@@ -517,7 +538,7 @@ impl App {
         let mut app = Self {
             cli: cli.clone(),
             jobs: JobManager::with_sink(cli.advisory_sink()),
-            clipboard: Box::new(OperatingSystemClipboard),
+            clipboard: Box::new(OperatingSystemClipboard::new()),
             page: Page::Overview,
             cli_status: Loadable::default(),
             update: Loadable::default(),
@@ -3051,7 +3072,7 @@ fn sanitize_doctor_raw(raw: &str) -> String {
 }
 
 fn redact_doctor_text(text: &str) -> String {
-    redact_proxy(text)
+    redact_url_credentials(text)
 }
 
 fn redact_doctor_value(value: &mut Value, key: Option<&str>) {
@@ -3072,13 +3093,36 @@ fn redact_doctor_value(value: &mut Value, key: Option<&str>) {
             }
         }
         Value::String(text) => {
-            let redacted = redact_proxy(text);
+            let redacted = redact_url_credentials(text);
             if redacted != *text {
                 *text = redacted;
             }
         }
         _ => {}
     }
+}
+
+/// `redact_proxy` trims its input, which is right for a proxy hint but would
+/// silently alter unrelated whitespace in the doctor document. Keep the
+/// original surrounding whitespace and only mask the URL's user-info.
+fn redact_url_credentials(text: &str) -> String {
+    let start = text.len() - text.trim_start().len();
+    let end = text.trim_end().len();
+    if start >= end {
+        return text.to_string();
+    }
+
+    let value = &text[start..end];
+    let redacted = redact_proxy(value);
+    if redacted == value {
+        return text.to_string();
+    }
+
+    let mut result = String::with_capacity(text.len());
+    result.push_str(&text[..start]);
+    result.push_str(&redacted);
+    result.push_str(&text[end..]);
+    result
 }
 
 fn is_sensitive_key(key: &str) -> bool {
@@ -4421,6 +4465,38 @@ mod tests {
         assert_eq!(notice.kind, NoticeKind::Error);
         assert!(notice.text.contains("backend unavailable"));
         assert!(!notice.text.contains("copied to the clipboard"));
+    }
+
+    struct CountingClipboard(std::rc::Rc<std::cell::Cell<usize>>);
+
+    impl ClipboardBackend for CountingClipboard {
+        fn write(&self, _text: &str) -> Result<(), String> {
+            self.0.set(self.0.get() + 1);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn copying_twice_reuses_the_app_owned_clipboard_backend() {
+        let writes = std::rc::Rc::new(std::cell::Cell::new(0));
+        let (mut app, _) = App::boot();
+        app.clipboard = Box::new(CountingClipboard(writes.clone()));
+        app.doctor.data = Some(doctor_read());
+
+        let _first = app.update(Message::CopyDiagnosticsReport);
+        let _second = app.update(Message::CopyDiagnosticsReport);
+
+        assert_eq!(writes.get(), 2);
+    }
+
+    #[test]
+    fn doctor_sanitization_preserves_unrelated_whitespace() {
+        let raw = r#"{"logDirectory":"  /tmp/logs  ","proxy":{"url":"  http://user:secret@proxy.example:8080  "}}"#;
+        let sanitized = sanitize_doctor_raw(raw);
+
+        assert!(sanitized.contains("\"  /tmp/logs  \""));
+        assert!(sanitized.contains("\"  http://***@proxy.example:8080  \""));
+        assert!(!sanitized.contains("user:secret"));
     }
 
     #[test]

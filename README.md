@@ -406,8 +406,9 @@ Resolution order for the binary:
   plain text, never interpreted. Diagnostics copies are support-safe: the doctor raw
   report masks known secret fields and URL user-info, and `unity diagnose` text is the
   CLI's own redacted report.
-- Clipboard writes use the OS clipboard and report its real result. A failed write is a
-  notice, never a false success.
+- Diagnostics clipboard writes use the OS clipboard and report its real result. A failed
+  write is a notice, never a false success. Other copy actions still use the iced
+  clipboard and are not part of this guarantee.
 
 ## Known limitations (v1)
 
