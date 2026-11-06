@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 
 use crate::advisory::{advisories_from_envelope, AdvisorySink, CliAdvisory};
+use crate::docs::{docs_page_from_data, DocsLookup, DocsPage, DocsScope};
 use crate::envelope::{parse_data, parse_envelope, parse_items, ValueEnvelope};
 use crate::errors::{code_for_exit_code, message_for_exit_code, UnityError};
 use crate::models::{
@@ -14,10 +15,11 @@ use crate::models::{
     EnvironmentInfo, InstallPath, LicenseStatus, Module, PipelineEditors, Project, PruneReport,
     RawChangelog, Release, RunningEditor, RunningEditors, VerifyReport,
 };
+use crate::surface;
 use crate::versions::{
-    validate_architecture, validate_cli_version, validate_download_directory,
-    validate_editor_version, validate_module_id, validate_project_path, validate_release_stream,
-    validate_update_channel,
+    validate_architecture, validate_cli_version, validate_docs_package, validate_docs_topic,
+    validate_download_directory, validate_editor_version, validate_module_id,
+    validate_project_path, validate_release_stream, validate_update_channel,
 };
 
 /// The standard opt-out signal. The CLI's analytics/update callback adds a
@@ -122,11 +124,11 @@ impl UnityCli {
         let mut args = parts.to_vec();
         args.extend(
             [
-                "--format",
+                surface::flag::FORMAT,
                 format,
-                "--no-pager",
-                "--no-banner",
-                "--non-interactive",
+                surface::flag::NO_PAGER,
+                surface::flag::NO_BANNER,
+                surface::flag::NON_INTERACTIVE,
             ]
             .into_iter()
             .map(str::to_string),
@@ -208,7 +210,7 @@ impl UnityCli {
     }
 
     pub fn version(&self) -> Result<CliVersion, UnityError> {
-        let executed = self.run_args(&svec(&["version"]), "json")?;
+        let executed = self.run_args(&svec(&[surface::command::VERSION]), "json")?;
         parse_data(executed.envelope)
     }
 
@@ -245,13 +247,17 @@ impl UnityCli {
     }
 
     pub fn install_path(&self) -> Result<String, UnityError> {
-        let executed = self.run_args(&svec(&["install-path"]), "json")?;
+        let executed = self.run_args(&svec(&[surface::command::INSTALL_PATH]), "json")?;
         let value: InstallPath = parse_data(executed.envelope)?;
         Ok(value.path)
     }
 
     pub fn editors_installed(&self) -> Result<Vec<Editor>, UnityError> {
-        let parts = svec(&["editors", "--installed", "--long"]);
+        let parts = svec(&[
+            surface::command::EDITORS,
+            surface::flag::INSTALLED,
+            surface::flag::LONG,
+        ]);
         let executed = self.run_args(&parts, "json")?;
         parse_items(executed.envelope.data, &[])
     }
@@ -267,7 +273,7 @@ impl UnityCli {
     }
 
     fn editors_running_base(&self) -> Result<RunningEditors, UnityError> {
-        let parts = svec(&["editors", "running"]);
+        let parts = svec(&[surface::command::EDITORS, surface::subcommand::RUNNING]);
         let executed = self.run_args(&parts, "json")?;
         let Some(data) = executed.envelope.data else {
             return Ok(RunningEditors::default());
@@ -286,7 +292,10 @@ impl UnityCli {
     }
 
     pub fn pipeline_editors(&self) -> Result<PipelineEditors, UnityError> {
-        let executed = self.run_args(&svec(&["pipeline", "editors"]), "json")?;
+        let executed = self.run_args(
+            &svec(&[surface::command::PIPELINE, surface::subcommand::EDITORS]),
+            "json",
+        )?;
         pipeline_editors_from_data(executed.envelope.data)
     }
 
@@ -318,7 +327,11 @@ impl UnityCli {
 
     pub fn editor_info(&self, version: &str) -> Result<EditorInfo, UnityError> {
         validate_editor_version(version)?;
-        let parts = svec(&["editors", "info", version]);
+        let parts = svec(&[
+            surface::command::EDITORS,
+            surface::subcommand::INFO,
+            version,
+        ]);
         let executed = self.run_args(&parts, "json")?;
         parse_data(executed.envelope)
     }
@@ -337,17 +350,50 @@ impl UnityCli {
     }
 
     pub fn changelog(&self, target: Option<&str>) -> Result<RawChangelog, UnityError> {
-        let mut parts = svec(&["changelog"]);
+        let mut parts = svec(&[surface::command::CHANGELOG]);
         if let Some(target) = target.filter(|value| !value.trim().is_empty()) {
             validate_cli_version(target)?;
-            parts.extend(svec(&["--target", target]));
+            parts.extend(svec(&[surface::flag::TARGET, target]));
         }
         let executed = self.run_args(&parts, "json")?;
         parse_data(executed.envelope)
     }
 
+    /// Builds `unity docs <topic> --url [scope] --format json`.
+    ///
+    /// `--url` is always present: the app never lets the CLI open a browser.
+    /// The scope flag is `--manual`, `--cli`, `--hub`, `--cloud`, or
+    /// `--package <name>`. No scope flag means the script reference.
+    pub fn docs_spec(&self, lookup: &DocsLookup) -> Result<CommandSpec, UnityError> {
+        let topic = validate_docs_topic(&lookup.topic)?;
+        let mut parts = svec(&[surface::command::DOCS, &topic, surface::flag::URL]);
+        match &lookup.scope {
+            DocsScope::Package(package) => {
+                let Some(package) = validate_docs_package(package)? else {
+                    return Err(UnityError::invalid_input(
+                        "Enter a Unity package name for the package docs scope.",
+                    ));
+                };
+                parts.extend([surface::flag::PACKAGE.to_string(), package]);
+            }
+            scope => parts.extend(scope.args()),
+        }
+        self.spec(&parts, "json")
+    }
+
+    /// Resolves one documentation page. The CLI answers with the URL it would
+    /// have opened; this method only parses and validates it.
+    pub fn docs(&self, lookup: &DocsLookup) -> Result<DocsPage, UnityError> {
+        let spec = self.docs_spec(lookup)?;
+        let executed = self.execute(&spec)?;
+        docs_page_from_data(executed.envelope.data, &lookup.topic)
+    }
+
     pub fn auth_status(&self) -> Result<AuthStatus, UnityError> {
-        let spec = self.spec(&svec(&["auth", "status"]), "json")?;
+        let spec = self.spec(
+            &svec(&[surface::command::AUTH, surface::subcommand::STATUS]),
+            "json",
+        )?;
         match self.execute_envelope(&spec) {
             Ok(executed) if executed.envelope.data.is_some() => parse_data(executed.envelope),
             Ok(executed) if !executed.envelope.success => Err(envelope_error(
@@ -368,13 +414,16 @@ impl UnityCli {
     }
 
     pub fn license_status(&self) -> Result<LicenseStatus, UnityError> {
-        let executed = self.run_args(&svec(&["license", "status"]), "json")?;
+        let executed = self.run_args(
+            &svec(&[surface::command::LICENSE, surface::subcommand::STATUS]),
+            "json",
+        )?;
         parse_data(executed.envelope)
     }
 
     /// Builds the `unity doctor` read invocation. It takes no user input.
     pub fn doctor_spec(&self) -> Result<CommandSpec, UnityError> {
-        self.spec(&svec(&["doctor"]), "json")
+        self.spec(&svec(&[surface::command::DOCTOR]), "json")
     }
 
     /// Reads the CLI's own system diagnostics.
@@ -392,7 +441,7 @@ impl UnityCli {
 
     /// Builds the `unity env` read invocation. It takes no user input.
     pub fn environment_spec(&self) -> Result<CommandSpec, UnityError> {
-        self.spec(&svec(&["env"]), "json")
+        self.spec(&svec(&[surface::command::ENV]), "json")
     }
 
     /// Reads the CLI's resolved environment paths and proxy.
@@ -407,7 +456,7 @@ impl UnityCli {
     /// format except JSON, so this asks for the human report and does not use
     /// the JSON envelope flags.
     pub fn diagnose_spec(&self, topic: DiagnoseTopic) -> Result<CommandSpec, UnityError> {
-        self.spec(&svec(&["diagnose", topic.arg()]), "human")
+        self.spec(&svec(&[surface::command::DIAGNOSE, topic.arg()]), "human")
     }
 
     /// Reads one redacted diagnose report as preformatted text.
@@ -469,7 +518,7 @@ impl UnityCli {
         headless: bool,
     ) -> Result<Value, UnityError> {
         let mut parts = install_parts(version, architecture, modules, headless, false)?;
-        parts.push("--dry-run".to_string());
+        parts.push(surface::flag::DRY_RUN.to_string());
         let executed = self.run_args(&parts, "json")?;
         Ok(executed.envelope.data.unwrap_or(Value::Null))
     }
@@ -634,7 +683,14 @@ impl UnityCli {
         // No --wait: that would keep this job alive until the Editor exits.
         // The upgrade command itself reports when the version change is done,
         // which is the unit of work this screen owns.
-        let parts = svec(&["projects", "upgrade", &project, "--to", version, "--yes"]);
+        let parts = svec(&[
+            surface::command::PROJECTS,
+            surface::subcommand::UPGRADE,
+            &project,
+            surface::flag::TO,
+            version,
+            surface::flag::YES,
+        ]);
         self.spec(&parts, "ndjson")
     }
 
@@ -1217,15 +1273,15 @@ fn releases_parts(
             "Release limit must be between 1 and 200.",
         ));
     }
-    let mut parts = svec(&["releases"]);
+    let mut parts = svec(&[surface::command::RELEASES]);
     if let Some(stream) = stream.filter(|value| !value.trim().is_empty()) {
         validate_release_stream(stream)?;
-        parts.extend(svec(&["--stream", stream]));
+        parts.extend(svec(&[surface::flag::STREAM, stream]));
     }
     parts.extend(svec(&[
-        "--limit",
+        surface::flag::LIMIT,
         &limit.to_string(),
-        "--offset",
+        surface::flag::OFFSET,
         &offset.to_string(),
     ]));
     Ok(parts)
@@ -1233,7 +1289,7 @@ fn releases_parts(
 
 fn modules_parts(version: &str, architecture: Option<&str>) -> Result<Vec<String>, UnityError> {
     validate_editor_version(version)?;
-    let mut parts = svec(&["modules", version]);
+    let mut parts = svec(&[surface::command::MODULES, version]);
     append_architecture(&mut parts, architecture)?;
     Ok(parts)
 }
@@ -1293,7 +1349,7 @@ pub fn install_parts_with(
         ));
     }
 
-    let mut parts = svec(&["install", version, "--yes"]);
+    let mut parts = svec(&[surface::command::INSTALL, version, surface::flag::YES]);
     // The CLI resolves the host build when `--architecture` is absent. Only
     // name a build when the user actually chose one, so the single-build
     // command stays exactly what earlier releases produced.
@@ -1301,27 +1357,27 @@ pub fn install_parts_with(
     append_modules(&mut parts, modules)?;
     if headless {
         // The headless build leaves out modules it cannot use, such as iOS.
-        parts.push("--headless".to_string());
+        parts.push(surface::flag::HEADLESS.to_string());
     }
     if accept_eula {
-        parts.push("--accept-eula".to_string());
+        parts.push(surface::flag::ACCEPT_EULA.to_string());
     }
     if options.resume {
-        parts.push("--resume".to_string());
+        parts.push(surface::flag::RESUME.to_string());
     }
     if options.download_only {
-        parts.push("--download-only".to_string());
+        parts.push(surface::flag::DOWNLOAD_ONLY.to_string());
     }
     if options.no_wait {
         // The CLI reference says `--no-wait` wins when both are given
         // (editors-install.md:324). The GUI already clears the timeout, and
         // the adapter does the same so the argv never carries both.
-        parts.push("--no-wait".to_string());
+        parts.push(surface::flag::NO_WAIT.to_string());
     } else if let Some(timeout) = options.timeout_secs {
-        parts.extend(["--timeout".to_string(), timeout.to_string()]);
+        parts.extend([surface::flag::TIMEOUT.to_string(), timeout.to_string()]);
     }
     if options.set_default {
-        parts.push("--set-default".to_string());
+        parts.push(surface::flag::SET_DEFAULT.to_string());
     }
     Ok(parts)
 }
@@ -1331,13 +1387,21 @@ fn editor_default_parts(
     architecture: Option<&str>,
 ) -> Result<Vec<String>, UnityError> {
     validate_editor_version(version)?;
-    let mut parts = svec(&["editors", "default", version]);
+    let mut parts = svec(&[
+        surface::command::EDITORS,
+        surface::subcommand::DEFAULT,
+        version,
+    ]);
     append_architecture(&mut parts, architecture)?;
     Ok(parts)
 }
 
 fn editor_default_unset_parts() -> Vec<String> {
-    svec(&["editors", "default", "--unset"])
+    svec(&[
+        surface::command::EDITORS,
+        surface::subcommand::DEFAULT,
+        surface::flag::UNSET,
+    ])
 }
 
 fn editors_verify_parts(
@@ -1345,7 +1409,11 @@ fn editors_verify_parts(
     architecture: Option<&str>,
 ) -> Result<Vec<String>, UnityError> {
     validate_editor_version(version)?;
-    let mut parts = svec(&["editors", "verify", version]);
+    let mut parts = svec(&[
+        surface::command::EDITORS,
+        surface::subcommand::VERIFY,
+        version,
+    ]);
     append_architecture(&mut parts, architecture)?;
     Ok(parts)
 }
@@ -1353,18 +1421,18 @@ fn editors_verify_parts(
 /// Builds the `unity editors prune` argv. Every field is a boolean controlled
 /// by the app, so no user token can reach this command line.
 fn editors_prune_parts(remove: bool, yes: bool, force: bool, remove_missing: bool) -> Vec<String> {
-    let mut parts = svec(&["editors", "prune"]);
+    let mut parts = svec(&[surface::command::EDITORS, surface::subcommand::PRUNE]);
     if remove {
-        parts.push("--remove".to_string());
+        parts.push(surface::flag::REMOVE.to_string());
     }
     if remove_missing {
-        parts.push("--remove-missing".to_string());
+        parts.push(surface::flag::REMOVE_MISSING.to_string());
     }
     if yes {
-        parts.push("--yes".to_string());
+        parts.push(surface::flag::YES.to_string());
     }
     if force {
-        parts.push("--force".to_string());
+        parts.push(surface::flag::FORCE.to_string());
     }
     parts
 }
@@ -1378,13 +1446,13 @@ pub fn headless_editor_supported() -> bool {
 }
 
 fn projects_parts() -> Vec<String> {
-    svec(&["projects", "--all"])
+    svec(&[surface::command::PROJECTS, surface::flag::ALL])
 }
 
 fn open_project_parts(path: &str) -> Result<Vec<String>, UnityError> {
     let project = validate_project_path(path)?;
     let project = project.to_string_lossy().to_string();
-    Ok(svec(&["open", &project]))
+    Ok(svec(&[surface::command::OPEN, &project]))
 }
 
 #[cfg(test)]
@@ -1416,7 +1484,12 @@ fn install_modules_parts_with(
             "Select at least one module to install.",
         ));
     }
-    let mut parts = svec(&["install-modules", "--editor-version", version, "--yes"]);
+    let mut parts = svec(&[
+        surface::command::INSTALL_MODULES,
+        surface::flag::EDITOR_VERSION,
+        version,
+        surface::flag::YES,
+    ]);
     // CLI beta.17 makes `install-modules` respect `--architecture` when one
     // build of the version is installed, and fail when the named build is not.
     // Passing the architecture of the row the user opened keeps the module
@@ -1424,22 +1497,22 @@ fn install_modules_parts_with(
     append_architecture(&mut parts, architecture)?;
     append_modules(&mut parts, modules)?;
     if accept_eula {
-        parts.push("--accept-eula".to_string());
+        parts.push(surface::flag::ACCEPT_EULA.to_string());
     }
     if let Some(retries) = options.retries {
-        parts.extend(["--retries".to_string(), retries.to_string()]);
+        parts.extend([surface::flag::RETRIES.to_string(), retries.to_string()]);
     }
     if let Some(directory) = &options.download_directory {
         let directory = validate_download_directory(directory)?.unwrap_or_default();
         if !directory.is_empty() {
-            parts.extend(["--download-directory".to_string(), directory]);
+            parts.extend([surface::flag::DOWNLOAD_DIRECTORY.to_string(), directory]);
         }
     }
     Ok(parts)
 }
 
 fn self_update_check_parts(channel: Option<&str>) -> Result<Vec<String>, UnityError> {
-    let mut parts = svec(&["self-update", "--check"]);
+    let mut parts = svec(&[surface::command::SELF_UPDATE, surface::flag::CHECK]);
     append_update_channel(&mut parts, channel)?;
     Ok(parts)
 }
@@ -1448,7 +1521,7 @@ fn self_update_changelog_parts(
     target: Option<&str>,
     channel: Option<&str>,
 ) -> Result<Vec<String>, UnityError> {
-    let mut parts = svec(&["self-update", "--changelog"]);
+    let mut parts = svec(&[surface::command::SELF_UPDATE, surface::flag::CHANGELOG]);
     append_update_target(&mut parts, target)?;
     append_update_channel(&mut parts, channel)?;
     Ok(parts)
@@ -1458,7 +1531,7 @@ fn self_update_preview_parts(
     target: Option<&str>,
     channel: Option<&str>,
 ) -> Result<Vec<String>, UnityError> {
-    let mut parts = svec(&["self-update", "--dry-run"]);
+    let mut parts = svec(&[surface::command::SELF_UPDATE, surface::flag::DRY_RUN]);
     append_update_target(&mut parts, target)?;
     append_update_channel(&mut parts, channel)?;
     Ok(parts)
@@ -1468,21 +1541,21 @@ fn self_update_apply_parts(
     target: Option<&str>,
     channel: Option<&str>,
 ) -> Result<Vec<String>, UnityError> {
-    let mut parts = svec(&["self-update", "--yes"]);
+    let mut parts = svec(&[surface::command::SELF_UPDATE, surface::flag::YES]);
     append_update_target(&mut parts, target)?;
     append_update_channel(&mut parts, channel)?;
     Ok(parts)
 }
 
 fn self_update_rollback_parts(version: Option<&str>) -> Result<Vec<String>, UnityError> {
-    let mut parts = svec(&["self-update", "--rollback"]);
+    let mut parts = svec(&[surface::command::SELF_UPDATE, surface::flag::ROLLBACK]);
     if let Some(version) = version.map(str::trim).filter(|value| !value.is_empty()) {
         validate_cli_version(version)?;
         parts.push(version.to_string());
     }
     // The GUI owns the confirmation; the child must never prompt. The only
     // self-update flags in this argv are `--rollback` and the optional version.
-    parts.push("--yes".to_string());
+    parts.push(surface::flag::YES.to_string());
     Ok(parts)
 }
 
@@ -1491,7 +1564,7 @@ fn append_update_target(parts: &mut Vec<String>, target: Option<&str>) -> Result
         return Ok(());
     };
     validate_cli_version(target)?;
-    parts.extend(["--target".to_string(), target.to_string()]);
+    parts.extend([surface::flag::TARGET.to_string(), target.to_string()]);
     Ok(())
 }
 
@@ -1499,7 +1572,7 @@ fn append_update_channel(parts: &mut Vec<String>, channel: Option<&str>) -> Resu
     let Some(channel) = validate_update_channel(channel.unwrap_or_default())? else {
         return Ok(());
     };
-    parts.extend(["--channel".to_string(), channel]);
+    parts.extend([surface::flag::CHANNEL.to_string(), channel]);
     Ok(())
 }
 
@@ -1512,7 +1585,7 @@ fn auth_status_from_error(error: &UnityError) -> Option<AuthStatus> {
 }
 
 fn auth_login_parts() -> Vec<String> {
-    svec(&["auth", "login"])
+    svec(&[surface::command::AUTH, surface::subcommand::LOGIN])
 }
 
 fn append_architecture(
@@ -1525,14 +1598,14 @@ fn append_architecture(
     let Some(architecture) = validate_architecture(architecture)? else {
         return Ok(());
     };
-    parts.extend(["--architecture".to_string(), architecture]);
+    parts.extend([surface::flag::ARCHITECTURE.to_string(), architecture]);
     Ok(())
 }
 
 fn append_modules(parts: &mut Vec<String>, modules: &[String]) -> Result<(), UnityError> {
     for module in modules {
         validate_module_id(module)?;
-        parts.push("-m".to_string());
+        parts.push(surface::flag::MODULE.to_string());
         parts.push(module.clone());
     }
     Ok(())
@@ -2350,6 +2423,69 @@ mod tests {
             .env
             .iter()
             .any(|(key, value)| key == DO_NOT_TRACK_ENV && value == "1"));
+    }
+
+    #[test]
+    fn docs_argv_always_asks_for_a_url_and_maps_scope_flags() {
+        let path =
+            std::env::temp_dir().join(format!("unity-rust-hub-docs-test-{}", std::process::id()));
+        std::fs::write(&path, b"test").unwrap();
+        let cli = UnityCli::new();
+        cli.set_override_path(Some(path.clone()));
+
+        let spec = cli
+            .docs_spec(&DocsLookup::new("MonoBehaviour.Start"))
+            .unwrap();
+        assert_eq!(
+            spec.args,
+            svec(&[
+                "docs",
+                "MonoBehaviour.Start",
+                "--url",
+                "--format",
+                "json",
+                "--no-pager",
+                "--no-banner",
+                "--non-interactive",
+            ])
+        );
+
+        let spec = cli
+            .docs_spec(&DocsLookup::new("install-modules").with_scope(DocsScope::Cli))
+            .unwrap();
+        assert_eq!(
+            spec.args,
+            svec(&[
+                "docs",
+                "install-modules",
+                "--url",
+                "--cli",
+                "--format",
+                "json",
+                "--no-pager",
+                "--no-banner",
+                "--non-interactive",
+            ])
+        );
+
+        let spec = cli
+            .docs_spec(
+                &DocsLookup::new("com.unity.textmeshpro")
+                    .with_scope(DocsScope::Package("com.unity.textmeshpro".to_string())),
+            )
+            .unwrap();
+        assert!(spec.args.windows(2).any(|pair| {
+            pair == [
+                surface::flag::PACKAGE.to_string(),
+                "com.unity.textmeshpro".to_string(),
+            ]
+        }));
+
+        assert!(cli.docs_spec(&DocsLookup::new("--format")).is_err());
+        assert!(cli
+            .docs_spec(&DocsLookup::new("Start").with_scope(DocsScope::Package(String::new())))
+            .is_err());
+        std::fs::remove_file(path).ok();
     }
 
     #[cfg(unix)]

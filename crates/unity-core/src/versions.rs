@@ -160,6 +160,54 @@ pub fn validate_retry_count(input: &str) -> Result<Option<u32>, UnityError> {
     Ok(Some(retries))
 }
 
+fn docs_topic() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"^[A-Za-z0-9][A-Za-z0-9 ._-]*$").expect("valid regex"))
+}
+
+/// Validates a `unity docs <topic>` token.
+///
+/// A topic is either a command path (`install-modules`, `pipeline editors`) or
+/// a class-like identifier (`MonoBehaviour.Start`). Whitespace is collapsed;
+/// flags, placeholders, and shell metacharacters never reach argv.
+pub fn validate_docs_topic(input: &str) -> Result<String, UnityError> {
+    let value = input.split_whitespace().collect::<Vec<_>>().join(" ");
+    if value.is_empty() {
+        return Err(UnityError::invalid_input(
+            "The changelog entry names no documentation topic.",
+        ));
+    }
+    if value.chars().count() > 200 {
+        return Err(UnityError::invalid_input(
+            "The documentation topic is too long to look up.",
+        ));
+    }
+    if !docs_topic().is_match(&value) {
+        return Err(UnityError::invalid_input(format!(
+            "`{value}` is not a documentation topic. Use a command such as `install-modules` or a class such as `MonoBehaviour.Start`."
+        )));
+    }
+    Ok(value)
+}
+
+fn docs_package() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"^[A-Za-z0-9][A-Za-z0-9._-]*$").expect("valid regex"))
+}
+
+pub fn validate_docs_package(input: &str) -> Result<Option<String>, UnityError> {
+    let value = input.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    if value.chars().count() > 214 || !docs_package().is_match(value) {
+        return Err(UnityError::invalid_input(format!(
+            "`{value}` is not a Unity package name."
+        )));
+    }
+    Ok(Some(value.to_string()))
+}
+
 /// Validates `-d` / `--download-directory`.
 ///
 /// The CLI creates the folder, so it does not need to exist. It must not look
@@ -311,6 +359,38 @@ mod tests {
         }
         for value in ["--accept-eula", "android;id", "$(id)", ""] {
             assert!(validate_module_id(value).is_err(), "{value} should fail");
+        }
+    }
+
+    #[test]
+    fn validates_docs_topics_and_packages() {
+        assert_eq!(
+            validate_docs_topic("  MonoBehaviour.Start ").unwrap(),
+            "MonoBehaviour.Start"
+        );
+        assert_eq!(
+            validate_docs_topic("pipeline   editors").unwrap(),
+            "pipeline editors"
+        );
+        for value in ["", "--cli", "$(id)", "Start; rm -rf /", "<topic>"] {
+            assert!(
+                validate_docs_topic(value).is_err(),
+                "{value} must be refused"
+            );
+        }
+
+        assert_eq!(
+            validate_docs_package("com.unity.textmeshpro")
+                .unwrap()
+                .as_deref(),
+            Some("com.unity.textmeshpro")
+        );
+        assert_eq!(validate_docs_package(" ").unwrap(), None);
+        for value in ["--package", "com.unity;rm", "../escape"] {
+            assert!(
+                validate_docs_package(value).is_err(),
+                "{value} must be refused"
+            );
         }
     }
 }

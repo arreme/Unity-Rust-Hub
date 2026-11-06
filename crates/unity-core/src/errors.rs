@@ -87,22 +87,22 @@ pub fn code_for_exit_code(code: i32) -> &'static str {
     match code {
         0 => "SUCCESS",
         1 => "ERROR",
-        2 => "BAD_ARGS",
+        2 => crate::surface::error_code::BAD_ARGS,
         3 => "AUTH_ERROR",
         4 => "NEEDS_CONFIG",
         6 => "COMMAND_FAILED",
         7 => "NETWORK_UNREACHABLE",
         8 => "TESTS_FAILED",
-        9 => "INSTALL_LOCKED",
+        9 => crate::surface::error_code::INSTALL_LOCKED,
         10 => "READY_TIMEOUT",
         11 => "NOT_FOUND",
-        12 => "EDITOR_UNREACHABLE",
+        12 => crate::surface::error_code::EDITOR_UNREACHABLE,
         13 => "REMOTE_COMMAND_FAILED",
         14 => "TIMEOUT",
         15 => "RUN_FAILED",
         16 => "JOB_SUSPENDED",
         17 => "UNAVAILABLE",
-        18 => "AWAITING_INPUT",
+        18 => crate::surface::error_code::AWAITING_INPUT,
         130 => "INTERRUPTED",
         141 => "OUTPUT_CLOSED",
         143 => "TERMINATED",
@@ -212,7 +212,9 @@ fn cli_remediation(error: &UnityError) -> Option<ErrorRemediation> {
 
 fn code_remediation(code: &str, proxy: Option<&str>) -> Option<ErrorRemediation> {
     let remediation = match code {
-        "AUTH_ERROR" | "NOT_SIGNED_IN" | "SESSION_EXPIRED" => ErrorRemediation::new(
+        crate::surface::error_code::AUTH_ERROR
+            | crate::surface::error_code::NOT_SIGNED_IN
+            | crate::surface::error_code::SESSION_EXPIRED => ErrorRemediation::new(
             RemediationKind::SignIn,
             "Sign in",
             Some(
@@ -220,12 +222,13 @@ fn code_remediation(code: &str, proxy: Option<&str>) -> Option<ErrorRemediation>
                     .to_string(),
             ),
         ),
-        "NETWORK_UNREACHABLE" | "VCS_PROVIDER_UNREACHABLE" => ErrorRemediation::new(
+        crate::surface::error_code::NETWORK_UNREACHABLE
+            | crate::surface::error_code::VCS_PROVIDER_UNREACHABLE => ErrorRemediation::new(
             RemediationKind::Retry,
             "Retry",
             Some(network_hint(proxy)),
         ),
-        "INSTALL_LOCKED" => ErrorRemediation::new(
+        crate::surface::error_code::INSTALL_LOCKED => ErrorRemediation::new(
             RemediationKind::Retry,
             "Retry",
             Some(
@@ -233,12 +236,12 @@ fn code_remediation(code: &str, proxy: Option<&str>) -> Option<ErrorRemediation>
                     .to_string(),
             ),
         ),
-        "RELEASE_NOT_FOUND" => ErrorRemediation::new(
+        crate::surface::error_code::RELEASE_NOT_FOUND => ErrorRemediation::new(
             RemediationKind::PickVersion,
             "Pick another version",
             Some("Choose a release the CLI lists on the Editors screen.".to_string()),
         ),
-        "EDITOR_UNREACHABLE" => ErrorRemediation::new(
+        crate::surface::error_code::EDITOR_UNREACHABLE => ErrorRemediation::new(
             RemediationKind::OpenEditor,
             "Open a project",
             Some(
@@ -246,7 +249,8 @@ fn code_remediation(code: &str, proxy: Option<&str>) -> Option<ErrorRemediation>
                     .to_string(),
             ),
         ),
-        "TIMEOUT" | "EDITOR_TIMEOUT" => ErrorRemediation::new(
+        crate::surface::error_code::TIMEOUT
+            | crate::surface::error_code::EDITOR_TIMEOUT => ErrorRemediation::new(
             RemediationKind::Retry,
             "Retry",
             Some(
@@ -254,7 +258,8 @@ fn code_remediation(code: &str, proxy: Option<&str>) -> Option<ErrorRemediation>
                     .to_string(),
             ),
         ),
-        "UNAVAILABLE" | "STATUS_SAFE_MODE" => ErrorRemediation::new(
+        crate::surface::error_code::UNAVAILABLE
+            | crate::surface::error_code::STATUS_SAFE_MODE => ErrorRemediation::new(
             RemediationKind::ShowBusy,
             "Show status",
             Some(
@@ -262,7 +267,7 @@ fn code_remediation(code: &str, proxy: Option<&str>) -> Option<ErrorRemediation>
                     .to_string(),
             ),
         ),
-        "AWAITING_INPUT" => ErrorRemediation::new(
+        crate::surface::error_code::AWAITING_INPUT => ErrorRemediation::new(
             RemediationKind::AnswerDialog,
             "Show the dialog",
             Some(
@@ -270,7 +275,7 @@ fn code_remediation(code: &str, proxy: Option<&str>) -> Option<ErrorRemediation>
                     .to_string(),
             ),
         ),
-        "VCS_TOKEN_REQUIRED" => ErrorRemediation::new(
+        crate::surface::error_code::VCS_TOKEN_REQUIRED => ErrorRemediation::new(
             RemediationKind::EnterToken,
             "Enter a token",
             Some(
@@ -278,7 +283,7 @@ fn code_remediation(code: &str, proxy: Option<&str>) -> Option<ErrorRemediation>
                     .to_string(),
             ),
         ),
-        "GIT_START_FAILED" => ErrorRemediation::new(
+        crate::surface::error_code::GIT_START_FAILED => ErrorRemediation::new(
             RemediationKind::InstallGit,
             "Install git",
             Some(
@@ -286,7 +291,7 @@ fn code_remediation(code: &str, proxy: Option<&str>) -> Option<ErrorRemediation>
                     .to_string(),
             ),
         ),
-        "LOCAL_STORE_UNWRITABLE" => ErrorRemediation::new(
+        crate::surface::error_code::LOCAL_STORE_UNWRITABLE => ErrorRemediation::new(
             RemediationKind::FixPermissions,
             "Fix permissions",
             Some(
@@ -294,7 +299,7 @@ fn code_remediation(code: &str, proxy: Option<&str>) -> Option<ErrorRemediation>
                     .to_string(),
             ),
         ),
-        "LINK_VCS_DELETE_REMOTE_REQUIRES_YES" => ErrorRemediation::new(
+        crate::surface::error_code::LINK_VCS_DELETE_REMOTE_REQUIRES_YES => ErrorRemediation::new(
             RemediationKind::Confirm,
             "Confirm explicitly",
             Some(
@@ -302,7 +307,7 @@ fn code_remediation(code: &str, proxy: Option<&str>) -> Option<ErrorRemediation>
                     .to_string(),
             ),
         ),
-        "INSTALL_HEADLESS_UNAVAILABLE" => ErrorRemediation::new(
+        crate::surface::error_code::INSTALL_HEADLESS_UNAVAILABLE => ErrorRemediation::new(
             RemediationKind::PickVersion,
             "Pick another version",
             Some(
@@ -310,7 +315,7 @@ fn code_remediation(code: &str, proxy: Option<&str>) -> Option<ErrorRemediation>
                     .to_string(),
             ),
         ),
-        "BAD_ARGS" => ErrorRemediation::new(
+        crate::surface::error_code::BAD_ARGS => ErrorRemediation::new(
             RemediationKind::ShowCommand,
             "Show the command",
             Some(
@@ -328,15 +333,15 @@ fn exit_remediation(code: i32, proxy: Option<&str>) -> Option<ErrorRemediation> 
     // Exit codes are the last resort, but they still describe the CLI's
     // documented retry semantics.
     match code {
-        2 => code_remediation("BAD_ARGS", proxy),
-        3 => code_remediation("AUTH_ERROR", proxy),
-        7 => code_remediation("NETWORK_UNREACHABLE", proxy),
-        9 => code_remediation("INSTALL_LOCKED", proxy),
-        11 => code_remediation("RELEASE_NOT_FOUND", proxy),
-        12 => code_remediation("EDITOR_UNREACHABLE", proxy),
-        14 => code_remediation("TIMEOUT", proxy),
-        17 => code_remediation("UNAVAILABLE", proxy),
-        18 => code_remediation("AWAITING_INPUT", proxy),
+        2 => code_remediation(crate::surface::error_code::BAD_ARGS, proxy),
+        3 => code_remediation(crate::surface::error_code::AUTH_ERROR, proxy),
+        7 => code_remediation(crate::surface::error_code::NETWORK_UNREACHABLE, proxy),
+        9 => code_remediation(crate::surface::error_code::INSTALL_LOCKED, proxy),
+        11 => code_remediation(crate::surface::error_code::RELEASE_NOT_FOUND, proxy),
+        12 => code_remediation(crate::surface::error_code::EDITOR_UNREACHABLE, proxy),
+        14 => code_remediation(crate::surface::error_code::TIMEOUT, proxy),
+        17 => code_remediation(crate::surface::error_code::UNAVAILABLE, proxy),
+        18 => code_remediation(crate::surface::error_code::AWAITING_INPUT, proxy),
         _ => None,
     }
 }

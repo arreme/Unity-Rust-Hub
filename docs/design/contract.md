@@ -186,8 +186,17 @@ fixture when a new state needs review.
 
 - Not loaded, loading, error, no data.
 - Header with version/source/entry count.
-- No breaking changes panel; breaking changes list with section/reason badges.
-- Section cards for Removed/Changed/Added/Fixed/Security/Other.
+- Filter bar: "Affects this app (N)" off by default; the count is exactly the
+  entries the filter keeps. Docs scope picker (Automatic, script reference,
+  manual, CLI, Hub, Cloud, package) with a package-name field for the package
+  scope.
+- No breaking changes panel; breaking changes list with section/reason badges
+  (unchanged generic heuristic).
+- Section cards for Removed/Changed/Added/Fixed/Security/Other. When the filter
+  is on, only impactful entries render and an empty filter shows a quiet notice.
+- Per-entry docs line: lookup action, "Finding docs…", resolved URL with an
+  Open docs action (search results carry a Search badge), "No docs page found",
+  and a quiet failure message. The entry text always stays visible.
 - Long section with truncation note.
 - Raw Markdown toggle: idle, loading, loaded, error.
 
@@ -229,6 +238,52 @@ fixture when a new state needs review.
 - Verify results: one row per checked component with pass/warn/fail/unknown
   badges, the exact failing path, a per-component repair command, the CLI
   verdict summary, and a raw-log toggle whenever the verify failed.
+
+## Changelog docs and app-impact contract
+
+`ChangelogSectionVm.entries` is `Vec<ChangelogEntryVm>`:
+
+- `ChangelogEntryVm { text, app_impact, docs: EntryDocsVm }`.
+- `EntryDocsVm` is `Unavailable`, `Idle { topic, scope }`,
+  `Loading { topic }`, `Ready { topic, url, search }`,
+  `Missing { topic }`, or `Failed { topic, message }`. Every non-`Unavailable`
+  state keeps the entry text rendered; `Missing` says "No docs page found" and
+  `Failed` is a quiet inline line.
+- `ChangelogDataVm::app_impact_count` is computed from the same
+  `ChangelogEntryVm::app_impact` flags the cards filter on, so the checkbox
+  count and the visible list cannot disagree.
+- `ChangelogVm` adds `app_impact_only: bool` (default false),
+  `docs_scope: DocsScopeVm` (default `Automatic`), `docs_package: String`, and
+  `docs_scope_note: Option<String>`.
+
+Actions: `ToggleChangelogImpact(bool)`, `ChangelogDocsScopeChanged(DocsScopeVm)`,
+`ChangelogDocsPackageChanged(String)`,
+`LookupChangelogDocs { topic, scope }`, and `OpenExternalUrl(String)`.
+
+The adapter side is `unity-core::changelog` plus `unity-core::docs`:
+
+- Entry parsing keeps the raw Markdown just long enough to extract backticked
+  candidates. A `unity <command> [<subcommand>]` sequence wins; otherwise a
+  class-like identifier (`MonoBehaviour.Start`) is the topic. Flags and
+  `<placeholders>` are stripped.
+- `unity-core::surface` is the single command/flag/error-code registry. Command
+  builders take their tokens from it, and `app_impact` is true only when an
+  entry names one of those commands, a flag the app passes, or a mapped
+  error/exit code. Do not add a second list in the controller or UI.
+- `UnityCli::docs_spec` always passes `--url`, so the CLI never opens a
+  browser. `--manual`, `--cli`, `--hub`, `--cloud`, and `--package <name>` are
+  optional scopes; no scope means the script reference. A search URL is a
+  normal `Ready` result with `search: true`.
+- Resolved URLs are cached for the session by topic + loaded changelog version
+  + resolved scope. A `DOCS_NOT_FOUND` answer maps to `Missing`; any other error
+  maps to `Failed`. Lookups run on the serialized reader worker and never block
+  a frame.
+- `OpenExternalUrl` is handled only by the controller, validates HTTP(S), and
+  uses a platform opener (`cmd /C start`, `open`, or `xdg-open`/`gio`/
+  `sensible-browser`). No lookup ever launches a browser.
+
+Gallery fixtures: `Changelog`, `Changelog · filter on`,
+`Changelog · docs action`, and `Changelog · docs failure`.
 
 ## Editor maintenance contract
 

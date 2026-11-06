@@ -1,4 +1,4 @@
-use crate::{DiagnoseTopic, ErrorActionVm, Page};
+use crate::{DiagnoseTopic, DocsScopeVm, ErrorActionVm, Page};
 
 /// Everything a screen is allowed to ask the application to do.
 ///
@@ -116,6 +116,20 @@ pub enum UiAction {
     ChangelogTargetChanged(String),
     LoadChangelog,
     ToggleRawChangelog,
+    /// Filters the release notes to entries touching this app's CLI surface.
+    ToggleChangelogImpact(bool),
+    /// Changes the advanced docs collection for entry lookups.
+    ChangelogDocsScopeChanged(DocsScopeVm),
+    /// Types the package name used by the package docs scope.
+    ChangelogDocsPackageChanged(String),
+    /// Resolves one entry's docs topic with `unity docs --url`.
+    LookupChangelogDocs {
+        topic: String,
+        scope: DocsScopeVm,
+    },
+    /// Hands a resolved docs URL to the OS opener. The UI only emits this on
+    /// a click; the app never launches a browser from a lookup.
+    OpenExternalUrl(String),
     CliPathChanged(String),
     SaveCliPath,
     ClearCliPath,

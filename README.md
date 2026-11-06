@@ -115,8 +115,15 @@ update target.
   render pipeline, build target, cloud/VCS badges, an Open action, and a guarded upgrade
   dialog. "Editor not installed" matches both version and architecture, and a target
   version with two builds is explained rather than silently resolved.
-- **Changelog** — `unity changelog` rendered as sections with readable bullet points and
-  a focused heuristic for **possible breaking changes**, plus a raw Markdown view.
+- **Changelog** — `unity changelog` rendered as sections with readable bullet points, a
+  focused heuristic for **possible breaking changes**, and a raw Markdown view. Every
+  entry's backticked command or class is a docs candidate: **Docs** resolves
+  `unity docs <topic> --url` (script reference by default; manual, CLI, Hub, Cloud, or a
+  package via the advanced scope picker) and **Open docs** hands the resolved URL to your
+  browser only when you click. Ambiguous names open the CLI's search page, and a miss
+  keeps the entry readable with "No docs page found". An **Affects this app** toggle lists
+  only entries that mention a command, flag, error code or exit code this app actually
+  uses; its count comes from the same filtered entries.
 - **Diagnostics** — a read-only answer to "can this machine build?" from `unity doctor`,
   `unity env`, and the redacted `unity diagnose proxy|accelerator|update` reports.
   `unity doctor` runs only when you click **Run doctor**, because its credential
@@ -164,7 +171,7 @@ update target.
 
 ```
 crates/unity-core/          Pure CLI adapter: command specs, envelope parsing, DTOs,
-                            errors, validation, changelog parsing/provider, bootstrap.
+                            errors, validation, changelog parsing/docs lookup, bootstrap.
 crates/unity-hub-model/     Stable presentation contract: view models, UiAction,
                             LoadState, semantic tones. No dependencies.
 crates/unity-hub-controller/ State, messages, update loop, jobs, settings, and
@@ -448,9 +455,11 @@ Resolution order for the binary:
 - Project upgrades require a second confirmation and warn that the project on disk can
   change. Commit or back up first.
 - No credentials are read, stored, or forwarded. Changelog Markdown is displayed as
-  plain text, never interpreted. Diagnostics copies are support-safe: the doctor raw
-  report masks known secret fields and URL user-info, and `unity diagnose` text is the
-  CLI's own redacted report.
+  plain text, never interpreted. Docs lookups always use `unity docs --url`; the app
+  never lets the CLI open a browser, and the resolved HTTP(S) link reaches the OS opener
+  only from an explicit **Open docs** click. Diagnostics copies are support-safe: the
+  doctor raw report masks known secret fields and URL user-info, and `unity diagnose`
+  text is the CLI's own redacted report.
 - Diagnostics clipboard writes use the OS clipboard and report its real result. A failed
   write is a notice, never a false success. Other copy actions still use the iced
   clipboard and are not part of this guarantee.
@@ -461,6 +470,8 @@ Resolution order for the binary:
 - No running-Editor control beyond a read-only list; the Pipeline package is not required.
 - Project upgrades are restricted to installed Editors.
 - Changelog breaking flags are heuristics over English release notes, not a guarantee.
+- Docs links depend on the CLI's documentation index; a lookup that cannot resolve a
+  page leaves the entry readable with a quiet message.
 - Jobs are not persisted across app restarts; closing the window cancels them.
 - Only one job may run at a time.
 - Linux is the most exercised platform. macOS/Windows builds run in CI, but the runtime

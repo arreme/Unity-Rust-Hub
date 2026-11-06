@@ -646,6 +646,17 @@ pub struct ChangelogVm {
     pub versions: Vec<String>,
     pub selected_target: Option<String>,
     pub show_raw: bool,
+    /// The app-impact filter, off by default. When on, section cards show only
+    /// entries whose `app_impact` is true.
+    pub app_impact_only: bool,
+    /// The advanced docs scope picker. `Automatic` uses the entry's own
+    /// preference (CLI docs for command candidates, script reference for
+    /// class-like ones).
+    pub docs_scope: DocsScopeVm,
+    /// The package name for `DocsScopeVm::Package`; empty until typed.
+    pub docs_package: String,
+    /// A quiet explanation when the package scope cannot be used yet.
+    pub docs_scope_note: Option<String>,
     pub state: LoadState<ChangelogDataVm>,
     pub raw: LoadState<String>,
 }
@@ -656,6 +667,10 @@ pub struct ChangelogDataVm {
     pub source: String,
     pub source_detail: String,
     pub entry_count: usize,
+    /// Number of entries the filter keeps. It is computed from the same
+    /// signals the section cards filter on, so the toggle label and the
+    /// visible list cannot disagree.
+    pub app_impact_count: usize,
     pub breaking_changes: Vec<BreakingChangeVm>,
     pub sections: Vec<ChangelogSectionVm>,
 }
@@ -671,7 +686,89 @@ pub struct BreakingChangeVm {
 pub struct ChangelogSectionVm {
     pub title: String,
     pub kind: SectionKind,
-    pub entries: Vec<String>,
+    pub entries: Vec<ChangelogEntryVm>,
+}
+
+/// One release-note entry in the view contract.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChangelogEntryVm {
+    pub text: String,
+    /// Mentions a command the adapter runs, a flag it passes, or an error/exit
+    /// code it maps.
+    pub app_impact: bool,
+    pub docs: EntryDocsVm,
+}
+
+/// Per-entry docs status. A lookup never blocks the entry: every state keeps
+/// the text visible and the failure states are quiet inline lines.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EntryDocsVm {
+    /// No backticked candidate, or the selected scope needs a package name.
+    Unavailable,
+    /// A candidate exists and the lookup has not started.
+    Idle {
+        topic: String,
+        scope: DocsScopeVm,
+    },
+    Loading {
+        topic: String,
+    },
+    /// A resolved URL. `search` means the CLI fell back to a search page for an
+    /// ambiguous name.
+    Ready {
+        topic: String,
+        url: String,
+        search: bool,
+    },
+    /// The CLI answered successfully but resolved no page.
+    Missing {
+        topic: String,
+    },
+    /// The lookup failed. `message` is the CLI's own message, kept short.
+    Failed {
+        topic: String,
+        message: String,
+    },
+}
+
+/// The advanced docs collection picker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DocsScopeVm {
+    /// Prefer CLI docs for command candidates and the script reference for
+    /// class-like ones.
+    Automatic,
+    ScriptReference,
+    Manual,
+    Cli,
+    Hub,
+    Cloud,
+    Package,
+}
+
+impl DocsScopeVm {
+    pub const ALL: [DocsScopeVm; 7] = [
+        DocsScopeVm::Automatic,
+        DocsScopeVm::ScriptReference,
+        DocsScopeVm::Manual,
+        DocsScopeVm::Cli,
+        DocsScopeVm::Hub,
+        DocsScopeVm::Cloud,
+        DocsScopeVm::Package,
+    ];
+}
+
+impl fmt::Display for DocsScopeVm {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Automatic => "Automatic (per entry)",
+            Self::ScriptReference => "Script reference",
+            Self::Manual => "Manual",
+            Self::Cli => "CLI reference",
+            Self::Hub => "Hub",
+            Self::Cloud => "Cloud",
+            Self::Package => "Unity package",
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

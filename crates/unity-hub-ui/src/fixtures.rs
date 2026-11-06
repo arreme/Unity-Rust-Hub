@@ -5,13 +5,14 @@
 
 use unity_hub_model::{
     AccountCardVm, AdvisoryVm, ArchitectureOptionVm, AuthVm, BadgeVm, BreakingChangeVm,
-    ChangelogDataVm, ChangelogSectionVm, ChangelogVm, CheckStatus, CliCardVm, CliChangelogVm,
-    CliConnectionVm, CliDetailsVm, CliUpdateFlowVm, DiagnoseReportVm, DiagnoseTopic, DiagnosticsVm,
-    DoctorCheckVm, DoctorVm, EditorModulesVm, EditorRowVm, EditorsVm, EnvironmentVm,
-    ErrorActionKind, ErrorActionVm, InstallAdvancedVm, InstallCliVm, InstallEditorVm, JobLogVm,
-    JobPhase, JobVm, LicenseRowVm, LicenseVm, LoadState, ModalVm, ModuleOptionVm, NoticeVm,
-    OverviewVm, Page, PageVm, ProjectRowVm, ProjectsVm, ProxyVm, PruneCandidateVm, PruneEditorsVm,
-    PruneReportVm, ReleaseRowVm, RollbackCliVm, RunningEditorVm, SectionKind, SettingsVm, ShellVm,
+    ChangelogDataVm, ChangelogEntryVm, ChangelogSectionVm, ChangelogVm, CheckStatus, CliCardVm,
+    CliChangelogVm, CliConnectionVm, CliDetailsVm, CliUpdateFlowVm, DiagnoseReportVm,
+    DiagnoseTopic, DiagnosticsVm, DocsScopeVm, DoctorCheckVm, DoctorVm, EditorModulesVm,
+    EditorRowVm, EditorsVm, EntryDocsVm, EnvironmentVm, ErrorActionKind, ErrorActionVm,
+    InstallAdvancedVm, InstallCliVm, InstallEditorVm, JobLogVm, JobPhase, JobVm, LicenseRowVm,
+    LicenseVm, LoadState, ModalVm, ModuleOptionVm, NoticeVm, OverviewVm, Page, PageVm,
+    ProjectRowVm, ProjectsVm, ProxyVm, PruneCandidateVm, PruneEditorsVm, PruneReportVm,
+    ReleaseRowVm, RollbackCliVm, RunningEditorVm, SectionKind, SettingsVm, ShellVm,
     TextScaleOptionVm, Tone, UiError, UpdateVm, UpgradeProjectVm, VerifyCheckVm, VerifyEditorVm,
     VerifyResultVm, ViewModel,
 };
@@ -118,6 +119,18 @@ pub fn all() -> Vec<Fixture> {
         Fixture {
             name: "Changelog",
             view_model: changelog(),
+        },
+        Fixture {
+            name: "Changelog · filter on",
+            view_model: changelog_filtered(),
+        },
+        Fixture {
+            name: "Changelog · docs action",
+            view_model: changelog_docs_action(),
+        },
+        Fixture {
+            name: "Changelog · docs failure",
+            view_model: changelog_docs_failure(),
         },
         Fixture {
             name: "Settings",
@@ -1213,36 +1226,129 @@ fn changelog() -> ViewModel {
             versions: vec!["1.0.0-beta.16".to_string(), "1.0.0-beta.17".to_string()],
             selected_target: Some("1.0.0-beta.17".to_string()),
             show_raw: false,
-            state: LoadState::Ready(ChangelogDataVm {
-                version: "1.0.0-beta.17".to_string(),
-                source: "unity-changelog".to_string(),
-                source_detail: "Unity CLI 1.0.0-beta.17 release notes".to_string(),
-                entry_count: 12,
-                breaking_changes: vec![BreakingChangeVm {
-                    text: "The list subcommands were removed.".to_string(),
-                    section: "Removed".to_string(),
-                    reason: "removed".to_string(),
-                }],
-                sections: vec![
-                    ChangelogSectionVm {
-                        title: "Added".to_string(),
-                        kind: SectionKind::Added,
-                        entries: vec![
-                            "`unity projects open` now reports the launched Editor.".to_string(),
-                            "NDJSON progress includes module download totals.".to_string(),
-                        ],
-                    },
-                    ChangelogSectionVm {
-                        title: "Changed".to_string(),
-                        kind: SectionKind::Changed,
-                        entries: vec!["`--non-interactive` is now the default for machine output."
-                            .to_string()],
-                    },
-                ],
-            }),
+            app_impact_only: false,
+            docs_scope: DocsScopeVm::Automatic,
+            docs_package: String::new(),
+            docs_scope_note: None,
+            state: LoadState::Ready(changelog_data()),
             raw: LoadState::Idle,
         }),
     )
+}
+
+fn changelog_data() -> ChangelogDataVm {
+    ChangelogDataVm {
+        version: "1.0.0-beta.17".to_string(),
+        source: "unity-changelog".to_string(),
+        source_detail: "Unity CLI 1.0.0-beta.17 release notes".to_string(),
+        entry_count: 5,
+        app_impact_count: 3,
+        breaking_changes: vec![BreakingChangeVm {
+            text: "The list subcommands were removed.".to_string(),
+            section: "Removed".to_string(),
+            reason: "removed".to_string(),
+        }],
+        sections: vec![
+            ChangelogSectionVm {
+                title: "Added".to_string(),
+                kind: SectionKind::Added,
+                entries: vec![
+                    changelog_entry(
+                        "`unity install-modules --architecture` now selects the build the row names.",
+                        true,
+                        EntryDocsVm::Idle {
+                            topic: "install-modules".to_string(),
+                            scope: DocsScopeVm::Cli,
+                        },
+                    ),
+                    changelog_entry(
+                        "NDJSON progress includes module download totals.",
+                        false,
+                        EntryDocsVm::Unavailable,
+                    ),
+                    changelog_entry(
+                        "`unity docs Start` opens the common class page for a bare name.",
+                        true,
+                        EntryDocsVm::Ready {
+                            topic: "MonoBehaviour.Start".to_string(),
+                            url: "https://docs.unity3d.com/6000.3/Documentation/ScriptReference/MonoBehaviour.Start.html".to_string(),
+                            search: false,
+                        },
+                    ),
+                ],
+            },
+            ChangelogSectionVm {
+                title: "Changed".to_string(),
+                kind: SectionKind::Changed,
+                entries: vec![
+                    changelog_entry(
+                        "`--non-interactive` is now the default for machine output.",
+                        true,
+                        EntryDocsVm::Unavailable,
+                    ),
+                    changelog_entry(
+                        "`MonoBehaviour.Start` is documented with a clearer example.",
+                        false,
+                        EntryDocsVm::Idle {
+                            topic: "MonoBehaviour.Start".to_string(),
+                            scope: DocsScopeVm::ScriptReference,
+                        },
+                    ),
+                ],
+            },
+        ],
+    }
+}
+
+fn changelog_entry(text: &str, app_impact: bool, docs: EntryDocsVm) -> ChangelogEntryVm {
+    ChangelogEntryVm {
+        text: text.to_string(),
+        app_impact,
+        docs,
+    }
+}
+
+fn changelog_filtered() -> ViewModel {
+    let mut vm = changelog();
+    if let PageVm::Changelog(changelog) = &mut vm.page {
+        changelog.app_impact_only = true;
+    }
+    vm
+}
+
+fn changelog_docs_action() -> ViewModel {
+    let mut vm = changelog();
+    if let PageVm::Changelog(changelog) = &mut vm.page {
+        if let LoadState::Ready(data) = &mut changelog.state {
+            data.sections[0].entries[0].docs = EntryDocsVm::Idle {
+                topic: "install-modules".to_string(),
+                scope: DocsScopeVm::Cli,
+            };
+            data.sections[0].entries[2].docs = EntryDocsVm::Ready {
+                topic: "MonoBehaviour.Start".to_string(),
+                url: "https://docs.unity3d.com/6000.3/Documentation/ScriptReference/MonoBehaviour.Start.html"
+                    .to_string(),
+                search: true,
+            };
+        }
+    }
+    vm
+}
+
+fn changelog_docs_failure() -> ViewModel {
+    let mut vm = changelog();
+    if let PageVm::Changelog(changelog) = &mut vm.page {
+        if let LoadState::Ready(data) = &mut changelog.state {
+            data.sections[0].entries[0].docs = EntryDocsVm::Failed {
+                topic: "install-modules".to_string(),
+                message: "The Unity CLI could not reach the documentation index.".to_string(),
+            };
+            data.sections[0].entries[2].docs = EntryDocsVm::Missing {
+                topic: "MonoBehaviour.Start".to_string(),
+            };
+        }
+    }
+    vm
 }
 
 fn settings() -> ViewModel {

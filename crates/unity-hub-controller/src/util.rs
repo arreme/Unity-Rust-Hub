@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 use std::future::Future;
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::process::{Command, Stdio};
 use std::sync::{mpsc, OnceLock};
 
 use chrono::{DateTime, Utc};
@@ -122,6 +123,93 @@ pub fn error_text(error: &UnityError) -> String {
     }
 }
 
+/// One OS-opener invocation. Kept separate from spawning so tests can assert
+/// the shape without launching anything.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenerCommand {
+    pub program: &'static str,
+    pub args: Vec<String>,
+}
+
+/// Only HTTP(S) links may reach the OS opener. A docs lookup returns URLs from
+/// the CLI, and a future CLI or a corrupted answer must not turn into
+/// `file://` or an application scheme the user did not click intentionally.
+fn is_openable_url(url: &str) -> bool {
+    let lower = url.to_ascii_lowercase();
+    (lower.starts_with("https://") || lower.starts_with("http://"))
+        && !url.chars().any(char::is_control)
+}
+
+/// The ordered candidates for opening `url`. Linux tries the desktop opener
+/// first and then two standard fallbacks; Windows and macOS have one each.
+pub fn opener_commands(url: &str) -> Result<Vec<OpenerCommand>, String> {
+    if !is_openable_url(url) {
+        return Err("Only http(s) links can be opened.".to_string());
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        return Ok(vec![OpenerCommand {
+            program: "cmd",
+            args: vec![
+                "/C".to_string(),
+                "start".to_string(),
+                String::new(),
+                url.to_string(),
+            ],
+        }]);
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        return Ok(vec![OpenerCommand {
+            program: "open",
+            args: vec![url.to_string()],
+        }]);
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        Ok(vec![
+            OpenerCommand {
+                program: "xdg-open",
+                args: vec![url.to_string()],
+            },
+            OpenerCommand {
+                program: "gio",
+                args: vec!["open".to_string(), url.to_string()],
+            },
+            OpenerCommand {
+                program: "sensible-browser",
+                args: vec![url.to_string()],
+            },
+        ])
+    }
+}
+
+/// Opens a resolved docs URL in the user's browser. The app never calls this
+/// during a lookup; it runs only from an explicit click.
+pub fn open_external_url(url: &str) -> Result<(), String> {
+    let candidates = opener_commands(url)?;
+    let mut last_error = None;
+    for candidate in candidates {
+        match Command::new(candidate.program)
+            .args(&candidate.args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            Ok(_) => return Ok(()),
+            Err(error) => last_error = Some(format!("{}: {error}", candidate.program)),
+        }
+    }
+    Err(format!(
+        "No system opener could open the link ({}).",
+        last_error.unwrap_or_else(|| "no opener configured".to_string())
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -152,5 +240,38 @@ mod tests {
         }
 
         assert_eq!(max_active.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn opener_accepts_http_links_and_refuses_other_schemes() {
+        for url in [
+            "https://docs.unity3d.com/6000.3/Documentation/ScriptReference/Start.html",
+            "http://example.com/docs",
+        ] {
+            assert!(opener_commands(url).is_ok(), "{url} should be openable");
+        }
+        for url in ["file:///etc/passwd", "javascript:alert(1)", "not a url", ""] {
+            assert!(
+                opener_commands(url).is_err(),
+                "{url} must never reach the OS opener"
+            );
+        }
+    }
+
+    #[test]
+    fn opener_candidate_is_platform_shaped() {
+        let commands = opener_commands("https://docs.unity3d.com/").unwrap();
+        assert!(!commands.is_empty());
+        assert!(commands.iter().all(|command| !command.args.is_empty()));
+
+        #[cfg(target_os = "windows")]
+        assert_eq!(commands[0].program, "cmd");
+        #[cfg(target_os = "macos")]
+        assert_eq!(commands[0].program, "open");
+        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+        {
+            assert_eq!(commands[0].program, "xdg-open");
+            assert!(commands.iter().any(|command| command.program == "gio"));
+        }
     }
 }

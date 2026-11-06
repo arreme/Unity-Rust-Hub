@@ -7,12 +7,79 @@ use serde::{Deserialize, Serialize};
 use crate::errors::UnityError;
 use crate::models::RawChangelog;
 use crate::runner::UnityCli;
+use crate::surface;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ChangelogSection {
     pub title: String,
-    pub entries: Vec<String>,
+    pub entries: Vec<ChangelogEntry>,
+}
+
+/// The documentation collection an entry's best candidate belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum DocsTopicKind {
+    /// A class-like identifier such as `MonoBehaviour.Start`.
+    #[default]
+    ScriptReference,
+    /// A CLI command path such as `install-modules` or `pipeline editors`.
+    Cli,
+}
+
+/// One release-note entry: the readable text plus what the app can do with it.
+///
+/// `app_impact` is true when the entry mentions a command the adapter runs, a
+/// flag it passes, or an error/exit code it maps. `docs_topic` is the preferred
+/// backticked candidate: a command sequence wins over a class-like identifier,
+/// and flags/placeholders are never topics.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangelogEntry {
+    pub text: String,
+    pub app_impact: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub docs_topic: Option<String>,
+    pub docs_kind: DocsTopicKind,
+    /// The raw Markdown, retained only so wrapped and fenced continuations can
+    /// be reclassified; it is not part of the view contract.
+    #[serde(skip)]
+    raw: String,
+}
+
+impl ChangelogEntry {
+    /// Builds one entry from raw Markdown, as the parser does. Public so the
+    /// controller can build deterministic fixtures without reimplementing the
+    /// classifier.
+    pub fn new(raw: &str) -> Self {
+        let mut entry = Self::default();
+        entry.append(raw);
+        entry
+    }
+
+    /// Appends one wrapped bullet or fenced line and recomputes the signals
+    /// over the whole entry.
+    fn append(&mut self, raw: &str) {
+        let cleaned = clean_inline(raw);
+        if !cleaned.is_empty() {
+            if !self.text.is_empty() {
+                self.text.push(' ');
+            }
+            self.text.push_str(&cleaned);
+        }
+        if !self.raw.is_empty() {
+            self.raw.push(' ');
+        }
+        self.raw.push_str(raw);
+        self.reclassify();
+    }
+
+    fn reclassify(&mut self) {
+        let signals = classify_entry(&self.raw);
+        self.app_impact = signals.app_impact;
+        self.docs_topic = signals.docs_topic;
+        self.docs_kind = signals.docs_kind;
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -449,10 +516,9 @@ pub fn parse_changelog(markdown: &str) -> ParsedChangelog {
         }
         if in_fence {
             if let (Some(section), Some(entry)) = (current_section, current_entry) {
-                if let Some(text) = parsed.sections[section].entries.get_mut(entry) {
+                if let Some(entry) = parsed.sections[section].entries.get_mut(entry) {
                     if !trimmed.is_empty() {
-                        text.push(' ');
-                        text.push_str(trimmed);
+                        entry.append(trimmed);
                     }
                 }
             }
@@ -509,9 +575,8 @@ pub fn parse_changelog(markdown: &str) -> ParsedChangelog {
 
         // Continuation of a wrapped bullet.
         if let (Some(section), Some(entry)) = (current_section, current_entry) {
-            if let Some(text) = parsed.sections[section].entries.get_mut(entry) {
-                text.push(' ');
-                text.push_str(&clean_inline(trimmed));
+            if let Some(entry) = parsed.sections[section].entries.get_mut(entry) {
+                entry.append(trimmed);
             }
         }
     }
@@ -537,11 +602,11 @@ fn push_entry(
             parsed.sections.len() - 1
         }
     };
-    let text = clean_inline(raw.trim());
-    if text.is_empty() {
+    let entry = ChangelogEntry::new(raw.trim());
+    if entry.text.is_empty() {
         return;
     }
-    parsed.sections[section].entries.push(text);
+    parsed.sections[section].entries.push(entry);
     *current_entry = Some(parsed.sections[section].entries.len() - 1);
 }
 
@@ -554,7 +619,7 @@ fn find_breaking_changes(sections: &[ChangelogSection]) -> Vec<BreakingChange> {
         let is_fix_or_security =
             section_lower.contains("fixed") || section_lower.contains("security");
         for entry in &section.entries {
-            let text_lower = entry.to_ascii_lowercase();
+            let text_lower = entry.text.to_ascii_lowercase();
             // "The exit code stays the same" is not a contract change, even
             // though it names an exit code. Explicit breaking wording still
             // counts on its own.
@@ -590,7 +655,7 @@ fn find_breaking_changes(sections: &[ChangelogSection]) -> Vec<BreakingChange> {
                 continue;
             }
             changes.push(BreakingChange {
-                text: entry.clone(),
+                text: entry.text.clone(),
                 reason: reason.to_string(),
                 section: section.title.clone(),
             });
@@ -608,6 +673,164 @@ fn clean_inline(value: &str) -> String {
         .replace('`', "")
         .trim()
         .to_string()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct EntrySignals {
+    app_impact: bool,
+    docs_topic: Option<String>,
+    docs_kind: DocsTopicKind,
+}
+
+fn backtick_span() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"`([^`\n]+)`").expect("valid regex"))
+}
+
+fn prose_command() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"(?i)\bunity\s+([a-z][a-z0-9-]*)\b").expect("valid regex"))
+}
+
+fn flag_token() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r#"(?:^|[^A-Za-z0-9_-])(-{1,2}[A-Za-z][A-Za-z0-9-]*)"#).expect("valid regex")
+    })
+}
+
+fn error_code_token() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\b").expect("valid regex"))
+}
+
+fn exit_code_token() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"(?i)\bexit(?:s|ed)?\s+(?:with\s+)?(?:code\s+)?`?(\d+)`?").expect("valid regex")
+    })
+}
+
+/// Classifies one entry from its raw Markdown.
+///
+/// Backticked spans provide the docs candidates. A `unity <command>
+/// [<subcommand>]` sequence wins over a class-like identifier; flags and
+/// argument placeholders are stripped. Candidate commands and flags are
+/// matched against [`crate::surface`], so the filter vocabulary is the
+/// adapter's, not a hand-copy in the UI.
+fn classify_entry(raw: &str) -> EntrySignals {
+    let mut signals = EntrySignals::default();
+    let mut cli_topic = None;
+    let mut class_topic = None;
+
+    for capture in backtick_span().captures_iter(raw) {
+        let Some(span) = capture.get(1) else {
+            continue;
+        };
+        let tokens = span_tokens(span.as_str());
+        if cli_topic.is_none() {
+            if let Some(path) = surface::command_path(&tokens) {
+                cli_topic = Some(path);
+            }
+        }
+        if class_topic.is_none() {
+            for token in &tokens {
+                if let Some(identifier) = class_identifier(token) {
+                    class_topic = Some(identifier);
+                    break;
+                }
+            }
+        }
+    }
+
+    if let Some(topic) = cli_topic {
+        signals.docs_topic = Some(topic);
+        signals.docs_kind = DocsTopicKind::Cli;
+    } else if let Some(topic) = class_topic {
+        signals.docs_topic = Some(topic);
+        signals.docs_kind = DocsTopicKind::ScriptReference;
+    }
+
+    let backticked_command = signals.docs_kind == DocsTopicKind::Cli
+        || backtick_span().captures_iter(raw).any(|capture| {
+            capture
+                .get(1)
+                .map(|span| surface::command_path(&span_tokens(span.as_str())).is_some())
+                .unwrap_or(false)
+        });
+    signals.app_impact = backticked_command
+        || mentions_used_command(raw)
+        || mentions_used_flag(raw)
+        || mentions_mapped_error(raw);
+    signals
+}
+
+fn span_tokens(span: &str) -> Vec<&str> {
+    span.split_whitespace()
+        .map(trim_token)
+        .filter(|token| !token.is_empty())
+        .collect()
+}
+
+fn trim_token(token: &str) -> &str {
+    token.trim_matches(|character: char| {
+        matches!(
+            character,
+            ',' | ';' | ':' | '(' | ')' | '[' | ']' | '"' | '\'' | '!' | '?'
+        )
+    })
+}
+
+fn class_identifier(token: &str) -> Option<String> {
+    let token = trim_token(token);
+    if token.starts_with('-') || token.contains('/') {
+        return None;
+    }
+    let parts = token.split('.').collect::<Vec<_>>();
+    if parts.len() < 2 {
+        return None;
+    }
+    for part in &parts {
+        let mut characters = part.chars();
+        let first = characters.next()?;
+        if !first.is_ascii_uppercase()
+            || !characters.all(|character| character.is_ascii_alphanumeric() || character == '_')
+        {
+            return None;
+        }
+    }
+    Some(token.to_string())
+}
+
+fn mentions_used_command(raw: &str) -> bool {
+    prose_command().captures_iter(raw).any(|capture| {
+        capture
+            .get(1)
+            .is_some_and(|command| surface::is_command(command.as_str()))
+    })
+}
+
+fn mentions_used_flag(raw: &str) -> bool {
+    flag_token().captures_iter(raw).any(|capture| {
+        capture
+            .get(1)
+            .is_some_and(|flag| surface::is_flag(flag.as_str()))
+    })
+}
+
+fn mentions_mapped_error(raw: &str) -> bool {
+    if error_code_token()
+        .find_iter(raw)
+        .any(|code| surface::is_error_code(code.as_str()))
+    {
+        return true;
+    }
+    exit_code_token().captures_iter(raw).any(|capture| {
+        capture
+            .get(1)
+            .and_then(|code| code.as_str().parse::<i32>().ok())
+            .is_some_and(surface::is_mapped_exit_code)
+    })
 }
 
 #[cfg(test)]
@@ -796,8 +1019,93 @@ mod tests {
         let added = &parsed.sections[0];
         assert_eq!(added.title, "Added");
         assert_eq!(added.entries.len(), 2);
-        assert!(added.entries[1].contains("second line"));
-        assert!(added.entries[0].contains("unity config path"));
+        assert!(added.entries[1].text.contains("second line"));
+        assert!(added.entries[0].text.contains("unity config path"));
+    }
+
+    #[test]
+    fn extraction_prefers_command_sequences_then_classes() {
+        let command = classify_entry("- `unity install-modules --architecture arm64` now ...");
+        assert_eq!(command.docs_topic.as_deref(), Some("install-modules"));
+        assert_eq!(command.docs_kind, DocsTopicKind::Cli);
+        assert!(command.app_impact);
+
+        let subcommand = classify_entry("- `unity pipeline editors` lists ...");
+        assert_eq!(subcommand.docs_topic.as_deref(), Some("pipeline editors"));
+        assert_eq!(subcommand.docs_kind, DocsTopicKind::Cli);
+
+        let class = classify_entry("- `MonoBehaviour.Start` runs before ...");
+        assert_eq!(class.docs_topic.as_deref(), Some("MonoBehaviour.Start"));
+        assert_eq!(class.docs_kind, DocsTopicKind::ScriptReference);
+        assert!(!class.app_impact, "a class name alone is not app impact");
+
+        let both = classify_entry(
+            "- `unity install-modules` and `MonoBehaviour.Start` are both mentioned.",
+        );
+        assert_eq!(both.docs_topic.as_deref(), Some("install-modules"));
+        assert_eq!(both.docs_kind, DocsTopicKind::Cli);
+
+        let flags_and_placeholders = classify_entry("- `unity install <version> --architecture`");
+        assert_eq!(
+            flags_and_placeholders.docs_topic.as_deref(),
+            Some("install")
+        );
+    }
+
+    #[test]
+    fn app_impact_uses_commands_flags_and_mapped_codes_only() {
+        for relevant in [
+            "- `unity docs Start` opens the class page.",
+            "- `unity install-modules --architecture arm64` now respects it.",
+            "- `--format json` carries the new field.",
+            "- It now exits 7 (`VCS_PROVIDER_UNREACHABLE`).",
+            "- It exits 2 instead of 1.",
+        ] {
+            assert!(
+                classify_entry(relevant).app_impact,
+                "{relevant} should affect this app"
+            );
+        }
+
+        for irrelevant in [
+            "- `unity test` now reports faster.",
+            "- `--quiet` no longer blanks a table.",
+            "- It exits 6 instead of 1.",
+            "- `MonoBehaviour.Start` runs before the first frame.",
+        ] {
+            assert!(
+                !classify_entry(irrelevant).app_impact,
+                "{irrelevant} should not affect this app"
+            );
+        }
+    }
+
+    #[test]
+    fn parsed_entries_carry_filter_signals_and_readable_text() {
+        let parsed = parse_changelog(
+            "### Added\n\n- `unity install-modules --architecture` now selects a build.\n- A regular note.\n- `--quiet` is unchanged.\n\n### Changed\n\n- `MonoBehaviour.Start` is documented.\n",
+        );
+        let entries = parsed
+            .sections
+            .iter()
+            .flat_map(|section| section.entries.iter())
+            .collect::<Vec<_>>();
+        assert_eq!(entries.len(), 4);
+        assert!(entries[0].app_impact);
+        assert_eq!(entries[0].docs_topic.as_deref(), Some("install-modules"));
+        assert!(!entries[1].app_impact);
+        assert!(entries[1].docs_topic.is_none());
+        assert!(!entries[2].app_impact);
+        assert!(!entries[3].app_impact);
+        assert_eq!(
+            entries[3].docs_topic.as_deref(),
+            Some("MonoBehaviour.Start")
+        );
+        assert_eq!(entries.iter().filter(|entry| entry.app_impact).count(), 1);
+        assert!(entries[0].text.contains("now selects a build"));
+        assert!(entries[0]
+            .text
+            .contains("unity install-modules --architecture"));
     }
 
     #[test]

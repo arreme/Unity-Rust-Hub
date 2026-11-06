@@ -1,12 +1,15 @@
 use std::cell::RefCell;
-use std::collections::{BTreeSet, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::time::Duration;
 
 use iced::{Subscription, Task};
 use serde_json::{Map, Value};
 use unity_core::bootstrap;
-use unity_core::changelog::{ChangelogRequest, ChangelogView, CliChangelogProvider};
+use unity_core::changelog::{
+    ChangelogEntry, ChangelogRequest, ChangelogView, CliChangelogProvider, DocsTopicKind,
+};
+use unity_core::docs::{DocsLookup, DocsPage, DocsScope, DOCS_NOT_FOUND};
 use unity_core::errors::{redact_proxy, remediation_for, RemediationKind};
 use unity_core::models::{
     AuthStatus, CliStatus, CliUpdateInfo, DoctorCheck, Editor, EnvironmentInfo, EnvironmentProxy,
@@ -19,21 +22,23 @@ use unity_core::{
 };
 use unity_hub_model::{
     AccountCardVm, AdvisoryVm, ArchitectureOptionVm, AuthVm, BadgeVm, BreakingChangeVm,
-    ChangelogDataVm, ChangelogSectionVm, ChangelogVm, CheckStatus, CliCardVm, CliChangelogVm,
-    CliConnectionVm, CliDetailsVm, CliUpdateFlowVm, DiagnoseReportVm, DiagnoseTopic, DiagnosticsVm,
-    DoctorCheckVm, DoctorVm, EditorModulesVm, EditorRowVm, EditorsVm, EnvironmentVm,
-    ErrorActionKind, ErrorActionVm, InstallAdvancedVm, InstallCliVm, InstallEditorVm,
-    InstallPreviewVm, JobLogVm, JobPhase, JobVm, LicenseRowVm, LicenseVm, LoadState, ModalVm,
-    ModuleOptionVm, NoticeVm, OverviewVm, Page, PageVm, ProjectRowVm, ProjectsVm, ProxyVm,
-    PruneCandidateVm, PruneEditorsVm, PruneReportVm, ReleaseRowVm, ResumeInstallVm, RollbackCliVm,
-    RunningEditorVm, SectionKind, SettingsVm, ShellVm, TextScaleOptionVm, Tone, UiAction, UiError,
-    UpdateVm, UpgradeProjectVm, VerifyCheckVm, VerifyEditorVm, VerifyResultVm, ViewModel,
+    ChangelogDataVm, ChangelogEntryVm, ChangelogSectionVm, ChangelogVm, CheckStatus, CliCardVm,
+    CliChangelogVm, CliConnectionVm, CliDetailsVm, CliUpdateFlowVm, DiagnoseReportVm,
+    DiagnoseTopic, DiagnosticsVm, DocsScopeVm, DoctorCheckVm, DoctorVm, EditorModulesVm,
+    EditorRowVm, EditorsVm, EntryDocsVm, EnvironmentVm, ErrorActionKind, ErrorActionVm,
+    InstallAdvancedVm, InstallCliVm, InstallEditorVm, InstallPreviewVm, JobLogVm, JobPhase, JobVm,
+    LicenseRowVm, LicenseVm, LoadState, ModalVm, ModuleOptionVm, NoticeVm, OverviewVm, Page,
+    PageVm, ProjectRowVm, ProjectsVm, ProxyVm, PruneCandidateVm, PruneEditorsVm, PruneReportVm,
+    ReleaseRowVm, ResumeInstallVm, RollbackCliVm, RunningEditorVm, SectionKind, SettingsVm,
+    ShellVm, TextScaleOptionVm, Tone, UiAction, UiError, UpdateVm, UpgradeProjectVm, VerifyCheckVm,
+    VerifyEditorVm, VerifyResultVm, ViewModel,
 };
 
 use crate::jobs::{JobManager, JobStarted, JobState, StreamKind};
 use crate::settings::{self, AppSettings, TextSize};
 use crate::util::{
-    error_text, format_bytes, format_epoch_millis, format_iso, run_blocking, short_path,
+    error_text, format_bytes, format_epoch_millis, format_iso, open_external_url, run_blocking,
+    short_path,
 };
 
 #[derive(Debug, Clone)]
@@ -397,6 +402,16 @@ pub struct ResumeOffer {
     pub reason: String,
 }
 
+/// Session cache key for a docs lookup: topic, loaded changelog version, and
+/// the resolved scope. The package name is part of `DocsScope::Package`, so
+/// two package lookups never share an answer.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct DocsKey {
+    topic: String,
+    version: String,
+    scope: DocsScope,
+}
+
 pub struct App {
     pub cli: UnityCli,
     pub jobs: JobManager,
@@ -439,6 +454,17 @@ pub struct App {
     pub changelog_target: Option<String>,
     pub show_raw_changelog: bool,
     pub raw_changelog: Loadable<String>,
+    /// Off by default; the checkbox label counts the entries it keeps.
+    pub changelog_app_impact_only: bool,
+    /// The advanced docs collection. `Automatic` follows each entry's kind.
+    pub changelog_docs_scope: DocsScopeVm,
+    pub changelog_docs_package: String,
+    /// Session cache for resolved docs URLs, keyed by topic + version + scope.
+    docs_cache: HashMap<DocsKey, DocsPage>,
+    /// Failed lookups stay beside the entry as a quiet inline message. A miss
+    /// (`DOCS_NOT_FOUND`) is kept separately through its code.
+    docs_errors: HashMap<DocsKey, UnityError>,
+    docs_loading: HashSet<DocsKey>,
     pub doctor: Loadable<DoctorRead>,
     pub environment: Loadable<EnvironmentInfo>,
     pub diagnose_proxy: Loadable<String>,
@@ -569,6 +595,14 @@ pub enum Message {
     ChangelogTargetChanged(String),
     LoadChangelog,
     ToggleRawChangelog,
+    ToggleChangelogImpact(bool),
+    ChangelogDocsScopeChanged(DocsScopeVm),
+    ChangelogDocsPackageChanged(String),
+    LookupChangelogDocs {
+        topic: String,
+        scope: DocsScopeVm,
+    },
+    OpenExternalUrl(String),
     CliPathChanged(String),
     SaveCliPath,
     ClearCliPath,
@@ -586,6 +620,12 @@ pub enum Message {
     DialogModulesLoaded(Result<Vec<Module>, UnityError>),
     PreviewLoaded(Result<Value, UnityError>),
     ChangelogLoaded(Result<ChangelogView, UnityError>),
+    DocsLoaded {
+        topic: String,
+        version: String,
+        scope: DocsScope,
+        result: Result<DocsPage, UnityError>,
+    },
     RawChangelogLoaded(Result<String, UnityError>),
     CliChangelogLoaded(Result<unity_core::models::RawChangelog, UnityError>),
     CliDryRunLoaded(Result<Value, UnityError>),
@@ -688,6 +728,15 @@ impl From<UiAction> for Message {
             UiAction::ChangelogTargetChanged(target) => Self::ChangelogTargetChanged(target),
             UiAction::LoadChangelog => Self::LoadChangelog,
             UiAction::ToggleRawChangelog => Self::ToggleRawChangelog,
+            UiAction::ToggleChangelogImpact(value) => Self::ToggleChangelogImpact(value),
+            UiAction::ChangelogDocsScopeChanged(scope) => Self::ChangelogDocsScopeChanged(scope),
+            UiAction::ChangelogDocsPackageChanged(package) => {
+                Self::ChangelogDocsPackageChanged(package)
+            }
+            UiAction::LookupChangelogDocs { topic, scope } => {
+                Self::LookupChangelogDocs { topic, scope }
+            }
+            UiAction::OpenExternalUrl(url) => Self::OpenExternalUrl(url),
             UiAction::CliPathChanged(value) => Self::CliPathChanged(value),
             UiAction::SaveCliPath => Self::SaveCliPath,
             UiAction::ClearCliPath => Self::ClearCliPath,
@@ -742,6 +791,12 @@ impl App {
             changelog_target: None,
             show_raw_changelog: false,
             raw_changelog: Loadable::default(),
+            changelog_app_impact_only: false,
+            changelog_docs_scope: DocsScopeVm::Automatic,
+            changelog_docs_package: String::new(),
+            docs_cache: HashMap::new(),
+            docs_errors: HashMap::new(),
+            docs_loading: HashSet::new(),
             doctor: Loadable::default(),
             environment: Loadable::default(),
             diagnose_proxy: Loadable::default(),
@@ -1067,6 +1122,29 @@ impl App {
                     Err(error) => {
                         self.changelog.failed(error);
                         self.note_read_failed(ReadKind::Changelog);
+                    }
+                }
+                Task::none()
+            }
+            Message::DocsLoaded {
+                topic,
+                version,
+                scope,
+                result,
+            } => {
+                let key = DocsKey {
+                    topic,
+                    version,
+                    scope,
+                };
+                self.docs_loading.remove(&key);
+                match result {
+                    Ok(page) => {
+                        self.docs_errors.remove(&key);
+                        self.docs_cache.insert(key, page);
+                    }
+                    Err(error) => {
+                        self.docs_errors.insert(key, error);
                     }
                 }
                 Task::none()
@@ -1953,6 +2031,34 @@ impl App {
                     run_blocking(move || cli.changelog(target.as_deref()).map(|raw| raw.changelog)),
                     Message::RawChangelogLoaded,
                 )
+            }
+            Message::ToggleChangelogImpact(value) => {
+                self.changelog_app_impact_only = value;
+                Task::none()
+            }
+            Message::ChangelogDocsScopeChanged(scope) => {
+                self.changelog_docs_scope = scope;
+                Task::none()
+            }
+            Message::ChangelogDocsPackageChanged(package) => {
+                self.changelog_docs_package = package;
+                Task::none()
+            }
+            Message::LookupChangelogDocs { topic, scope } => {
+                self.lookup_changelog_docs(topic, scope)
+            }
+            Message::OpenExternalUrl(url) => {
+                match open_external_url(&url) {
+                    Ok(()) => {
+                        self.notice = Some(Notice::info("Documentation opened in your browser."));
+                    }
+                    Err(error) => {
+                        self.notice = Some(Notice::error(format!(
+                            "The documentation page could not be opened. {error}"
+                        )));
+                    }
+                }
+                Task::none()
             }
             Message::CliPathChanged(value) => {
                 self.cli_path_input = value;
@@ -3586,12 +3692,22 @@ impl App {
             versions: self.changelog_versions(),
             selected_target: self.changelog_target.clone(),
             show_raw: self.show_raw_changelog,
+            app_impact_only: self.changelog_app_impact_only,
+            docs_scope: self.changelog_docs_scope,
+            docs_package: self.changelog_docs_package.clone(),
+            docs_scope_note: self.docs_scope_note(),
             state: self.load_state(ReadKind::Changelog, &self.changelog, |view| {
                 ChangelogDataVm {
                     version: view.version.clone(),
                     source: view.source.clone(),
                     source_detail: view.source_detail.clone(),
                     entry_count: view.entry_count,
+                    app_impact_count: view
+                        .sections
+                        .iter()
+                        .flat_map(|section| section.entries.iter())
+                        .filter(|entry| entry.app_impact)
+                        .count(),
                     breaking_changes: view
                         .breaking_changes
                         .iter()
@@ -3607,7 +3723,15 @@ impl App {
                         .map(|section| ChangelogSectionVm {
                             title: section.title.clone(),
                             kind: section_kind(&section.title),
-                            entries: section.entries.clone(),
+                            entries: section
+                                .entries
+                                .iter()
+                                .map(|entry| ChangelogEntryVm {
+                                    text: entry.text.clone(),
+                                    app_impact: entry.app_impact,
+                                    docs: self.entry_docs_vm(entry, &view.version),
+                                })
+                                .collect(),
                         })
                         .collect(),
                 }
@@ -3616,6 +3740,145 @@ impl App {
                 markdown.clone()
             }),
         }
+    }
+
+    fn docs_scope_note(&self) -> Option<String> {
+        if self.changelog_docs_scope == DocsScopeVm::Package
+            && self.changelog_docs_package.trim().is_empty()
+        {
+            return Some(
+                "Enter a package name (for example `com.unity.textmeshpro`) before looking up package docs."
+                    .to_string(),
+            );
+        }
+        None
+    }
+
+    /// Resolves the page scope for one entry. `Automatic` follows the entry's
+    /// own candidate: command sequences open CLI docs, class-like identifiers
+    /// open the script reference.
+    fn docs_scope_for(&self, kind: DocsTopicKind) -> DocsScopeVm {
+        match self.changelog_docs_scope {
+            DocsScopeVm::Automatic => match kind {
+                DocsTopicKind::Cli => DocsScopeVm::Cli,
+                DocsTopicKind::ScriptReference => DocsScopeVm::ScriptReference,
+            },
+            scope => scope,
+        }
+    }
+
+    fn resolve_docs_scope(&self, scope: DocsScopeVm) -> Option<DocsScope> {
+        match scope {
+            DocsScopeVm::Automatic => Some(DocsScope::ScriptReference),
+            DocsScopeVm::ScriptReference => Some(DocsScope::ScriptReference),
+            DocsScopeVm::Manual => Some(DocsScope::Manual),
+            DocsScopeVm::Cli => Some(DocsScope::Cli),
+            DocsScopeVm::Hub => Some(DocsScope::Hub),
+            DocsScopeVm::Cloud => Some(DocsScope::Cloud),
+            DocsScopeVm::Package => {
+                let package = self.changelog_docs_package.trim();
+                if package.is_empty() {
+                    None
+                } else {
+                    Some(DocsScope::Package(package.to_string()))
+                }
+            }
+        }
+    }
+
+    /// The per-entry docs state. A cache hit or a failure is rendered directly;
+    /// nothing here starts work, so building a frame never blocks rendering.
+    fn entry_docs_vm(&self, entry: &ChangelogEntry, version: &str) -> EntryDocsVm {
+        let Some(topic) = entry.docs_topic.as_deref() else {
+            return EntryDocsVm::Unavailable;
+        };
+        let scope_vm = self.docs_scope_for(entry.docs_kind);
+        let Some(scope) = self.resolve_docs_scope(scope_vm) else {
+            return EntryDocsVm::Unavailable;
+        };
+        let key = DocsKey {
+            topic: topic.to_string(),
+            version: version.to_string(),
+            scope,
+        };
+
+        if let Some(page) = self.docs_cache.get(&key) {
+            return EntryDocsVm::Ready {
+                topic: page.topic.clone(),
+                url: page.url.clone(),
+                search: page.search,
+            };
+        }
+        if let Some(error) = self.docs_errors.get(&key) {
+            if error.code == DOCS_NOT_FOUND {
+                return EntryDocsVm::Missing {
+                    topic: topic.to_string(),
+                };
+            }
+            return EntryDocsVm::Failed {
+                topic: topic.to_string(),
+                message: error.message.clone(),
+            };
+        }
+        if self.docs_loading.contains(&key) {
+            return EntryDocsVm::Loading {
+                topic: topic.to_string(),
+            };
+        }
+        EntryDocsVm::Idle {
+            topic: topic.to_string(),
+            scope: scope_vm,
+        }
+    }
+
+    fn docs_key(&self, topic: &str, scope: DocsScopeVm) -> Option<DocsKey> {
+        let scope = self.resolve_docs_scope(scope)?;
+        Some(DocsKey {
+            topic: topic.to_string(),
+            version: self.docs_version(),
+            scope,
+        })
+    }
+
+    fn docs_version(&self) -> String {
+        self.changelog
+            .data
+            .as_ref()
+            .map(|view| view.version.clone())
+            .or_else(|| self.changelog_target.clone())
+            .unwrap_or_else(|| self.cli_version_key())
+    }
+
+    /// Starts one session-cached `unity docs --url` read on the serialized
+    /// reader worker. The entry stays readable while it runs; the result is
+    /// keyed by topic + version + scope so a cache hit never runs the CLI.
+    fn lookup_changelog_docs(&mut self, topic: String, scope: DocsScopeVm) -> Task<Message> {
+        let Some(key) = self.docs_key(&topic, scope) else {
+            self.notice = Some(Notice::info(
+                "Enter a package name before looking up package documentation.",
+            ));
+            return Task::none();
+        };
+        if self.docs_cache.contains_key(&key) || self.docs_loading.contains(&key) {
+            return Task::none();
+        }
+        self.docs_loading.insert(key.clone());
+
+        let lookup = DocsLookup {
+            topic: topic.clone(),
+            scope: key.scope.clone(),
+        };
+        let cli = self.cli.clone();
+        let version = key.version.clone();
+        let resolved_scope = key.scope.clone();
+        Task::perform(run_blocking(move || cli.docs(&lookup)), move |result| {
+            Message::DocsLoaded {
+                topic,
+                version,
+                scope: resolved_scope,
+                result,
+            }
+        })
     }
 
     fn diagnostics_vm(&self) -> DiagnosticsVm {
@@ -5169,6 +5432,7 @@ async fn load_changelog_future(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use unity_core::changelog::ChangelogSection;
     use unity_core::models::{CliVersion, VerifyReport};
 
     fn project(title: &str, path: &str, version: &str) -> Project {
@@ -7550,5 +7814,151 @@ mod tests {
             Some("unity plugin upgrade com.unity.ai")
         );
         assert_eq!(advisory.run_label, None);
+    }
+
+    fn docs_changelog(version: &str) -> ChangelogView {
+        ChangelogView {
+            version: version.to_string(),
+            sections: vec![ChangelogSection {
+                title: "Added".to_string(),
+                entries: vec![
+                    ChangelogEntry::new("`unity install-modules --architecture` selects a build."),
+                    ChangelogEntry::new("`unity editors default` stores the build."),
+                    ChangelogEntry::new("`MonoBehaviour.Start` runs first."),
+                    ChangelogEntry::new("A regular note without any token."),
+                ],
+            }],
+            breaking_changes: Vec::new(),
+            entry_count: 4,
+            source: "unity-changelog".to_string(),
+            source_detail: "Unity CLI 1.0.0-beta.17 release notes".to_string(),
+        }
+    }
+
+    fn app_with_changelog(version: &str) -> App {
+        let (mut app, _) = App::boot();
+        app.page = Page::Changelog;
+        app.changelog_loaded = true;
+        app.changelog.data = Some(docs_changelog(version));
+        app
+    }
+
+    #[test]
+    fn changelog_filter_count_matches_the_entries_it_keeps() {
+        let mut app = app_with_changelog("1.0.0-beta.17");
+        app.changelog_app_impact_only = false;
+
+        let vm = app.view_model();
+        let PageVm::Changelog(page) = &vm.page else {
+            panic!("expected the changelog page");
+        };
+        let data = page.state.data().expect("changelog data");
+        let visible = data
+            .sections
+            .iter()
+            .flat_map(|section| section.entries.iter())
+            .filter(|entry| entry.app_impact)
+            .count();
+        assert_eq!(visible, 2);
+        assert_eq!(data.app_impact_count, visible);
+        assert!(!page.app_impact_only);
+
+        let _ = app.update(Message::ToggleChangelogImpact(true));
+        let vm = app.view_model();
+        let PageVm::Changelog(page) = &vm.page else {
+            panic!("expected the changelog page");
+        };
+        let data = page.state.data().expect("changelog data");
+        let kept = data
+            .sections
+            .iter()
+            .flat_map(|section| section.entries.iter())
+            .filter(|entry| entry.app_impact)
+            .count();
+        assert!(page.app_impact_only);
+        assert_eq!(data.app_impact_count, kept);
+        assert_eq!(data.entry_count - kept, 2);
+    }
+
+    #[test]
+    fn docs_states_map_from_the_session_cache_without_running_the_cli() {
+        let mut app = app_with_changelog("1.0.0-beta.17");
+        let version = "1.0.0-beta.17".to_string();
+
+        app.docs_cache.insert(
+            DocsKey {
+                topic: "install-modules".to_string(),
+                version: version.clone(),
+                scope: DocsScope::Cli,
+            },
+            DocsPage {
+                topic: "install-modules".to_string(),
+                url: "https://docs.unity3d.com/Manual/EditorCommandLineArguments.html".to_string(),
+                search: false,
+            },
+        );
+        app.docs_errors.insert(
+            DocsKey {
+                topic: "editors default".to_string(),
+                version: version.clone(),
+                scope: DocsScope::Cli,
+            },
+            UnityError::new(DOCS_NOT_FOUND, "No documentation page was found."),
+        );
+        app.docs_errors.insert(
+            DocsKey {
+                topic: "MonoBehaviour.Start".to_string(),
+                version: version.clone(),
+                scope: DocsScope::ScriptReference,
+            },
+            UnityError::new("UNEXPECTED_OUTPUT", "The docs index could not be read."),
+        );
+
+        let vm = app.view_model();
+        let PageVm::Changelog(page) = &vm.page else {
+            panic!("expected the changelog page");
+        };
+        let entries = &page.state.data().expect("changelog data").sections[0].entries;
+
+        assert!(matches!(
+            &entries[0].docs,
+            EntryDocsVm::Ready { url, search: false, .. } if url.contains("EditorCommandLineArguments")
+        ));
+        assert!(matches!(
+            &entries[1].docs,
+            EntryDocsVm::Missing { topic } if topic == "editors default"
+        ));
+        assert!(matches!(
+            &entries[2].docs,
+            EntryDocsVm::Failed { message, .. } if message.contains("docs index")
+        ));
+        assert!(matches!(&entries[3].docs, EntryDocsVm::Unavailable));
+    }
+
+    #[test]
+    fn docs_cache_is_scoped_to_the_loaded_version_and_scope() {
+        let mut app = app_with_changelog("1.0.0-beta.18");
+        app.docs_cache.insert(
+            DocsKey {
+                topic: "install-modules".to_string(),
+                version: "1.0.0-beta.17".to_string(),
+                scope: DocsScope::Cli,
+            },
+            DocsPage {
+                topic: "install-modules".to_string(),
+                url: "https://docs.unity3d.com/old.html".to_string(),
+                search: false,
+            },
+        );
+
+        let vm = app.view_model();
+        let PageVm::Changelog(page) = &vm.page else {
+            panic!("expected the changelog page");
+        };
+        let first = &page.state.data().expect("changelog data").sections[0].entries[0];
+        assert!(matches!(
+            &first.docs,
+            EntryDocsVm::Idle { topic, scope } if topic == "install-modules" && *scope == DocsScopeVm::Cli
+        ));
     }
 }

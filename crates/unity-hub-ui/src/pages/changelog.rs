@@ -2,12 +2,14 @@ use iced::widget::{column, container, pick_list, row, space};
 use iced::{Center, Element, Fill};
 
 use unity_hub_model::{
-    ChangelogDataVm, ChangelogSectionVm, ChangelogVm, SectionKind, Tone, UiAction,
+    ChangelogDataVm, ChangelogEntryVm, ChangelogSectionVm, ChangelogVm, DocsScopeVm, EntryDocsVm,
+    SectionKind, Tone, UiAction,
 };
 
 use crate::components::{
-    badge, button, card_with, empty, error_text, hint, loading, notice, page_header, scroll,
-    stat_strip, status_dot, surface, ButtonKind, PICK_LIST_PADDING,
+    badge, button, card_with, checkbox, empty, error_text, hint, icon_button, loading, notice,
+    page_header, scroll, stat_strip, status_dot, surface, text_input, ButtonKind, COMPACT,
+    PICK_LIST_PADDING,
 };
 use crate::fonts;
 use crate::icons::{self, icon};
@@ -47,7 +49,7 @@ pub fn view(vm: &ChangelogVm) -> Element<'_, UiAction> {
     column![
         page_header(
             "Changelog",
-            "Release notes from the installed CLI, with a heuristic pass for breaking changes.",
+            "Release notes from the installed CLI, with docs links and a filter for the commands, flags and error codes this app uses.",
             Some(controls.into()),
         ),
         changelog_body(vm),
@@ -88,6 +90,7 @@ fn changelog_body(vm: &ChangelogVm) -> Element<'_, UiAction> {
 
     let breaking = data.breaking_changes.len();
     let mut body = column![
+        filter_bar(vm, data),
         row![
             column![
                 text(format!("Unity CLI {}", data.version))
@@ -112,13 +115,13 @@ fn changelog_body(vm: &ChangelogVm) -> Element<'_, UiAction> {
                 (breaking > 0).then_some(Tone::Danger),
             ),
             (
-                entries_of(data, SectionKind::Added).to_string(),
-                "Added".to_string(),
-                None,
+                data.app_impact_count.to_string(),
+                "Affects this app".to_string(),
+                (data.app_impact_count > 0).then_some(Tone::Accent),
             ),
             (
-                entries_of(data, SectionKind::Changed).to_string(),
-                "Changed".to_string(),
+                entries_of(data, SectionKind::Added).to_string(),
+                "Added".to_string(),
                 None,
             ),
         ]),
@@ -126,18 +129,40 @@ fn changelog_body(vm: &ChangelogVm) -> Element<'_, UiAction> {
     ]
     .spacing(spacing::SECTION);
 
-    // Sections sit two per row.
-    for pair in data.sections.chunks(2) {
-        let mut line = row![]
-            .spacing(spacing::SECTION)
-            .align_y(iced::Alignment::Start);
-        for section in pair {
-            line = line.push(container(section_card(section)).width(Fill));
+    let sections = data
+        .sections
+        .iter()
+        .filter(|section| {
+            !vm.app_impact_only || section.entries.iter().any(|entry| entry.app_impact)
+        })
+        .collect::<Vec<&ChangelogSectionVm>>();
+
+    if sections.is_empty() {
+        body = body.push(notice(
+            Tone::Info,
+            icons::INFO,
+            column![
+                text("No entry names a command, flag, error code or exit code this app uses.")
+                    .size(font::BODY_LARGE)
+                    .font(fonts::MEDIUM),
+                hint("Turn off “Affects this app” to read the full release notes."),
+            ]
+            .spacing(3),
+        ));
+    } else {
+        // Sections sit two per row.
+        for pair in sections.chunks(2) {
+            let mut line = row![]
+                .spacing(spacing::SECTION)
+                .align_y(iced::Alignment::Start);
+            for section in pair {
+                line = line.push(container(section_card(section, vm.app_impact_only)).width(Fill));
+            }
+            if pair.len() == 1 {
+                line = line.push(space().width(Fill));
+            }
+            body = body.push(line);
         }
-        if pair.len() == 1 {
-            line = line.push(space().width(Fill));
-        }
-        body = body.push(line);
     }
 
     body = body.push(
@@ -185,6 +210,49 @@ fn changelog_body(vm: &ChangelogVm) -> Element<'_, UiAction> {
     }
 
     body.into()
+}
+
+fn filter_bar<'a>(vm: &'a ChangelogVm, data: &'a ChangelogDataVm) -> Element<'a, UiAction> {
+    let mut controls = row![
+        checkbox(
+            format!("Affects this app ({})", data.app_impact_count),
+            vm.app_impact_only,
+            UiAction::ToggleChangelogImpact,
+        ),
+        space().width(Fill),
+        hint("Docs scope"),
+        pick_list(
+            DocsScopeVm::ALL.to_vec(),
+            Some(vm.docs_scope),
+            UiAction::ChangelogDocsScopeChanged,
+        )
+        .text_size(ui::font_size(font::BODY))
+        .padding(PICK_LIST_PADDING)
+        .handle(icons::pick_list_handle(font::ICON_SMALL))
+        .style(theme::pick_list)
+        .menu_style(theme::menu)
+        .width(190),
+    ]
+    .spacing(10)
+    .align_y(Center);
+
+    if vm.docs_scope == DocsScopeVm::Package {
+        controls = controls.push(
+            text_input("Package name", &vm.docs_package)
+                .on_input(UiAction::ChangelogDocsPackageChanged)
+                .width(220),
+        );
+    }
+
+    let mut content = column![controls].spacing(6).width(Fill);
+    if let Some(note) = &vm.docs_scope_note {
+        content = content.push(hint(note.as_str()));
+    }
+    container(content)
+        .padding([12.0, 14.0])
+        .width(Fill)
+        .style(theme::raised)
+        .into()
 }
 
 fn breaking_changes(data: &ChangelogDataVm) -> Element<'_, UiAction> {
@@ -258,11 +326,15 @@ fn breaking_changes(data: &ChangelogDataVm) -> Element<'_, UiAction> {
     )
 }
 
-fn section_card(section: &ChangelogSectionVm) -> Element<'_, UiAction> {
+fn section_card(section: &ChangelogSectionVm, app_impact_only: bool) -> Element<'_, UiAction> {
     let tone = section_tone(section.kind);
+    let visible = section
+        .entries
+        .iter()
+        .filter(|entry| !app_impact_only || entry.app_impact)
+        .collect::<Vec<&ChangelogEntryVm>>();
     let mut entries = column(
-        section
-            .entries
+        visible
             .iter()
             .take(MAX_SECTION_ENTRIES)
             .map(|entry| entry_row(entry, tone))
@@ -270,32 +342,76 @@ fn section_card(section: &ChangelogSectionVm) -> Element<'_, UiAction> {
     )
     .spacing(12);
 
-    if section.entries.len() > MAX_SECTION_ENTRIES {
+    if visible.len() > MAX_SECTION_ENTRIES {
         entries = entries.push(hint(format!(
             "… {} more entries. Use the raw Markdown view for the full list.",
-            section.entries.len() - MAX_SECTION_ENTRIES
+            visible.len() - MAX_SECTION_ENTRIES
         )));
     }
 
     card_with(
         section.title.as_str(),
-        hint(section.entries.len().to_string()),
+        hint(visible.len().to_string()),
         entries.into(),
     )
 }
 
-fn entry_row<'a>(entry: &'a str, tone: Tone) -> Element<'a, UiAction> {
-    row![
-        container(status_dot(tone)).padding([7.0, 0.0]),
-        text(entry)
-            .size(font::BODY_LARGE)
-            .line_height(1.55)
-            .style(theme::muted_text)
-            .width(Fill),
-    ]
-    .spacing(12)
-    .align_y(iced::Alignment::Start)
-    .into()
+fn entry_row<'a>(entry: &'a ChangelogEntryVm, tone: Tone) -> Element<'a, UiAction> {
+    let mut content = column![text(entry.text.as_str())
+        .size(font::BODY_LARGE)
+        .line_height(1.55)
+        .style(theme::muted_text)
+        .width(Fill),]
+    .spacing(7)
+    .width(Fill);
+
+    if let Some(docs) = docs_line(&entry.docs) {
+        content = content.push(docs);
+    }
+
+    row![container(status_dot(tone)).padding([7.0, 0.0]), content,]
+        .spacing(12)
+        .align_y(iced::Alignment::Start)
+        .into()
+}
+
+fn docs_line<'a>(docs: &'a EntryDocsVm) -> Option<Element<'a, UiAction>> {
+    match docs {
+        EntryDocsVm::Unavailable => None,
+        EntryDocsVm::Idle { topic, scope } => Some(
+            row![
+                icon_button(icons::SEARCH, "Docs", ButtonKind::Ghost)
+                    .padding(COMPACT)
+                    .on_press(UiAction::LookupChangelogDocs {
+                        topic: topic.clone(),
+                        scope: *scope,
+                    }),
+                hint(format!("Look up `{topic}`")),
+            ]
+            .spacing(8)
+            .align_y(Center)
+            .into(),
+        ),
+        EntryDocsVm::Loading { topic } => Some(loading(format!("Finding docs for `{topic}`…"))),
+        EntryDocsVm::Ready { topic, url, search } => {
+            let mut line = row![
+                icon_button(icons::EXTERNAL_LINK, "Open docs", ButtonKind::Ghost)
+                    .padding(COMPACT)
+                    .on_press(UiAction::OpenExternalUrl(url.clone())),
+            ]
+            .spacing(8)
+            .align_y(Center);
+            line = line.push(if *search {
+                badge("Search result", Tone::Warning)
+            } else {
+                badge(topic.clone(), Tone::Neutral)
+            });
+            line = line.push(hint(url.as_str()));
+            Some(line.into())
+        }
+        EntryDocsVm::Missing { topic } => Some(hint(format!("No docs page found for `{topic}`."))),
+        EntryDocsVm::Failed { message, .. } => Some(hint(format!("Docs: {message}"))),
+    }
 }
 
 fn section_tone(kind: SectionKind) -> Tone {
