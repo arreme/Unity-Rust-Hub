@@ -94,7 +94,9 @@ update target.
   combinations are cleared in the UI too. A failed or interrupted download offers
   **Resume** when the CLI reports a cache/interrupted state (or you choose `--resume`),
   reusing exactly the same build, modules, and cache. Download-only reports the folder the
-  files landed in and registers no Editor.
+  files landed in and registers no Editor. The CLI forbids `--resume` with
+  `--download-only`, so a download-only interruption is not offered as a Resume; choose a
+  normal install with `--resume` to continue into an installed Editor.
 - **Modules** — add modules to an installed Editor with `install-modules`, pinned to the
   architecture of the row you opened (`--architecture`) so an `arm64` and an `x86_64`
   build of the same version never get mixed up. Advanced module options set

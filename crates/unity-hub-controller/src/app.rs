@@ -405,6 +405,9 @@ pub struct App {
     pub cli_status: Loadable<CliStatus>,
     pub update: Loadable<CliUpdateInfo>,
     pub update_channel: String,
+    /// Set once the user picks a channel. A later status read must not move
+    /// the update flow to the channel the CLI happens to track.
+    pub update_channel_touched: bool,
     pub update_target: String,
     pub update_changelog: Loadable<unity_core::models::RawChangelog>,
     pub update_dry_run: Loadable<String>,
@@ -711,6 +714,7 @@ impl App {
             cli_status: Loadable::default(),
             update: Loadable::default(),
             update_channel: "stable".to_string(),
+            update_channel_touched: false,
             update_target: String::new(),
             update_changelog: Loadable::default(),
             update_dry_run: Loadable::default(),
@@ -864,8 +868,15 @@ impl App {
                             if version.channel == "beta" || version.channel == "alpha" {
                                 self.cli_channel = version.channel.clone();
                             }
-                            if version.channel == "beta" || version.channel == "stable" {
-                                self.update_channel = version.channel.clone();
+                            if (version.channel == "beta" || version.channel == "stable")
+                                && !self.update_channel_touched
+                                && self.update_channel != version.channel
+                            {
+                                // A status read can arrive after the user has
+                                // already reviewed a different channel. Only a
+                                // status-derived move goes through the same
+                                // invalidation as a manual pick.
+                                self.apply_update_channel(version.channel.clone());
                             }
                         }
                         let installed = status.installed;
@@ -1295,9 +1306,8 @@ impl App {
                 self.load_update_changelog()
             }
             Message::CliUpdateChannelChanged(channel) => {
-                self.update_channel = channel.clone();
-                self.update_changelog = Loadable::default();
-                self.update_dry_run = Loadable::default();
+                self.update_channel_touched = true;
+                self.apply_update_channel(channel.clone());
                 // The badge must describe the selected channel, not whichever
                 // channel the CLI happens to track by default.
                 self.update.begin();
@@ -2801,6 +2811,14 @@ impl App {
             .filter(|entry| !self.app_settings.is_advisory_dismissed(&version, &entry.id))
             .map(advisory_vm)
             .collect()
+    }
+
+    /// Moves the update flow to a channel and invalidates everything derived
+    /// from the old channel: the target release notes and the dry-run preview.
+    fn apply_update_channel(&mut self, channel: String) {
+        self.update_channel = channel;
+        self.update_changelog = Loadable::default();
+        self.update_dry_run = Loadable::default();
     }
 
     fn cli_update_flow_vm(&self) -> CliUpdateFlowVm {
@@ -6811,6 +6829,68 @@ mod tests {
         };
         assert!(!overview.update_flow.can_apply);
         assert!(overview.update_flow.changelog.data().is_none());
+    }
+
+    #[test]
+    fn status_refresh_never_moves_a_user_chosen_update_channel_or_reuses_stale_notes() {
+        let mut app = connected_app("1.0.0-beta.17");
+        app.boot_background_started = true;
+        app.page = Page::Overview;
+
+        // The user explicitly picks stable and loads its notes.
+        let _ = app.update(Message::CliUpdateChannelChanged("stable".to_string()));
+        app.update_changelog.data = Some(unity_core::models::RawChangelog {
+            version: "1.0.0-beta.18".to_string(),
+            changelog: "stable notes".to_string(),
+        });
+
+        // A later status read says the installed CLI tracks beta. It must not
+        // move the flow or retain notes that describe another channel.
+        let _ = app.update(Message::StatusLoaded(Ok(CliStatus {
+            installed: true,
+            version: Some(CliVersion {
+                version: "1.0.0-beta.17".to_string(),
+                channel: "beta".to_string(),
+                ..CliVersion::default()
+            }),
+            ..CliStatus::default()
+        })));
+
+        assert_eq!(app.update_channel, "stable");
+        assert_eq!(
+            app.update_changelog
+                .data
+                .as_ref()
+                .map(|raw| raw.version.as_str()),
+            Some("1.0.0-beta.18"),
+            "the stable notes still describe the selected channel"
+        );
+
+        // Before the user touches the flow, the status read owns the channel.
+        // A change there goes through the same invalidation path.
+        let mut fresh = connected_app("1.0.0-beta.17");
+        fresh.boot_background_started = true;
+        fresh.update_channel = "beta".to_string();
+        fresh.update_changelog.data = Some(unity_core::models::RawChangelog {
+            version: "1.0.0-beta.18".to_string(),
+            changelog: "beta notes".to_string(),
+        });
+
+        let _ = fresh.update(Message::StatusLoaded(Ok(CliStatus {
+            installed: true,
+            version: Some(CliVersion {
+                version: "1.0.0-beta.17".to_string(),
+                channel: "stable".to_string(),
+                ..CliVersion::default()
+            }),
+            ..CliStatus::default()
+        })));
+
+        assert_eq!(fresh.update_channel, "stable");
+        assert!(
+            fresh.update_changelog.data.is_none(),
+            "a status-derived channel change invalidates the old notes"
+        );
     }
 
     #[test]

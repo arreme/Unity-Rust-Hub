@@ -294,8 +294,10 @@ Gallery fixtures: `Editors · default cleared`, `Modal · prune candidates`,
   controller only creates it after a failed/cancelled `editor-install` whose
   error code is an interruption/timeout/network class or whose terminal result
   reports `resumable`, `resumeAvailable`, `interrupted`, or a cache path.
-  Download-only failures never offer it, because resuming as a normal install
-  would break the "installs nothing" promise.
+  Download-only failures never offer it: `editors-install.md:363` documents
+  that `--download-only` cannot be combined with `--resume`, and resuming as a
+  normal install would break the "installs nothing" promise. The Advanced
+  resume control still lets the user ask for a normal cached resume.
 - `EditorModulesVm` adds `retries_input`, `download_directory`,
   `retries_error`, and `command_preview`; the adapter appends `--retries <n>`
   and `--download-directory <dir>` only when set.

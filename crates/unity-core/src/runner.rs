@@ -1273,16 +1273,18 @@ pub fn install_parts_with(
             "The headless Editor is only available on Linux.",
         ));
     }
-    // These combinations are usage errors in beta.17; refuse them before the
-    // user sees a consent dialog for a command the CLI will reject.
+    // beta.17 documents these exclusions: set-default cannot combine with
+    // resume (editors-install.md:335), and download-only cannot combine with
+    // resume or set-default (editors-install.md:363). Keep the refusals: the
+    // CLI would reject the same argv with BAD_ARGS.
     if options.download_only && (options.resume || options.set_default) {
         return Err(UnityError::invalid_input(
-            "Download-only cannot be combined with resume or set-default.",
+            "Download-only cannot be combined with resume or set-default; the Unity CLI refuses that combination.",
         ));
     }
     if options.resume && options.set_default {
         return Err(UnityError::invalid_input(
-            "Resume cannot be combined with set-default.",
+            "Resume cannot be combined with set-default; the Unity CLI refuses that combination.",
         ));
     }
     if options.timeout_secs == Some(0) {
@@ -1311,9 +1313,11 @@ pub fn install_parts_with(
         parts.push("--download-only".to_string());
     }
     if options.no_wait {
+        // The CLI reference says `--no-wait` wins when both are given
+        // (editors-install.md:324). The GUI already clears the timeout, and
+        // the adapter does the same so the argv never carries both.
         parts.push("--no-wait".to_string());
-    }
-    if let Some(timeout) = options.timeout_secs {
+    } else if let Some(timeout) = options.timeout_secs {
         parts.extend(["--timeout".to_string(), timeout.to_string()]);
     }
     if options.set_default {
@@ -2077,6 +2081,17 @@ mod tests {
             ])
         );
 
+        // editors-install.md:324 says `--no-wait` wins when both are given.
+        // The adapter must never emit the pair, even if a caller sets both.
+        let no_wait_wins = InstallOptions {
+            no_wait: true,
+            timeout_secs: Some(600),
+            ..InstallOptions::default()
+        };
+        let parts = install_parts_with("lts", None, &[], false, false, &no_wait_wins).unwrap();
+        assert_eq!(parts, svec(&["install", "lts", "--yes", "--no-wait"]));
+        assert!(!parts.iter().any(|part| part == "--timeout"));
+
         let download_only = InstallOptions {
             download_only: true,
             ..InstallOptions::default()
@@ -2105,6 +2120,10 @@ mod tests {
 
     #[test]
     fn install_refuses_combinations_the_cli_calls_bad_args() {
+        // Documented exclusions kept deliberately:
+        // editors-install.md:335 (set-default + resume) and :363
+        // (download-only + resume/set-default). The adapter refuses them with
+        // INVALID_INPUT instead of letting the CLI answer BAD_ARGS.
         let download_only_resume = InstallOptions {
             download_only: true,
             resume: true,
