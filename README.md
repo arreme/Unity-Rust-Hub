@@ -85,6 +85,16 @@ update target.
 - **Modules** — add modules to an installed Editor with `install-modules`, pinned to the
   architecture of the row you opened (`--architecture`) so an `arm64` and an `x86_64`
   build of the same version never get mixed up.
+- **Editor maintenance** — `unity editors prune` runs report-only first and lists
+  every candidate with version, architecture, size (when the CLI reports it), reason,
+  and path, plus the CLI's reclaimable total. `--remove` is a streamed job behind a
+  confirmation that enumerates exactly which builds and files will be deleted;
+  cancelling removes nothing. `--remove-missing` is a separate, clearly labelled
+  registry-only action that explains no files are deleted, and `--force` appears only
+  after a failed running-Editor check. `unity editors verify` renders per-component
+  pass/warn/fail rows with the failing path, the CLI's repair command, and the raw log
+  when the check fails. The default Editor is set per `(version, architecture)` and
+  can be cleared from the list.
 - **Projects** — every project in the Hub registry, its Editor version and architecture,
   render pipeline, build target, cloud/VCS badges, an Open action, and a guarded upgrade
   dialog. "Editor not installed" matches both version and architecture, and a target

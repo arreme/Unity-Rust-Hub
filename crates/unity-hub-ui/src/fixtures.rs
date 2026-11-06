@@ -10,8 +10,9 @@ use unity_hub_model::{
     EditorModulesVm, EditorRowVm, EditorsVm, EnvironmentVm, ErrorActionKind, ErrorActionVm,
     InstallCliVm, InstallEditorVm, JobLogVm, JobPhase, JobVm, LicenseRowVm, LicenseVm, LoadState,
     ModalVm, ModuleOptionVm, NoticeVm, OverviewVm, Page, PageVm, ProjectRowVm, ProjectsVm, ProxyVm,
-    ReleaseRowVm, RunningEditorVm, SectionKind, SettingsVm, ShellVm, TextScaleOptionVm, Tone,
-    UiError, UpdateVm, UpgradeProjectVm, ViewModel,
+    PruneCandidateVm, PruneEditorsVm, PruneReportVm, ReleaseRowVm, RunningEditorVm, SectionKind,
+    SettingsVm, ShellVm, TextScaleOptionVm, Tone, UiError, UpdateVm, UpgradeProjectVm,
+    VerifyCheckVm, VerifyEditorVm, VerifyResultVm, ViewModel,
 };
 
 pub struct Fixture {
@@ -66,6 +67,10 @@ pub fn all() -> Vec<Fixture> {
             view_model: editors_two_builds(),
         },
         Fixture {
+            name: "Editors · default cleared",
+            view_model: editors_default_cleared(),
+        },
+        Fixture {
             name: "Projects",
             view_model: projects(),
         },
@@ -112,6 +117,22 @@ pub fn all() -> Vec<Fixture> {
         Fixture {
             name: "Modal · project upgrade (two builds)",
             view_model: upgrade_modal_two_builds(),
+        },
+        Fixture {
+            name: "Modal · prune candidates",
+            view_model: prune_modal(),
+        },
+        Fixture {
+            name: "Modal · prune confirm",
+            view_model: prune_modal_confirmed(),
+        },
+        Fixture {
+            name: "Modal · prune remove missing",
+            view_model: prune_modal_missing(),
+        },
+        Fixture {
+            name: "Modal · verify results",
+            view_model: verify_modal(),
         },
         Fixture {
             name: "Job · running",
@@ -367,6 +388,7 @@ fn editors() -> ViewModel {
                     installed: true,
                 },
             ]),
+            prune: LoadState::Idle,
         }),
     )
 }
@@ -424,6 +446,140 @@ fn editors_two_builds() -> ViewModel {
             preview_loading: false,
         };
     }
+    vm
+}
+
+/// No stored default: no row shows the badge.
+fn editors_default_cleared() -> ViewModel {
+    let mut vm = editors();
+    if let PageVm::Editors(editors_vm) = &mut vm.page {
+        if let LoadState::Ready(rows) = &mut editors_vm.installed {
+            for row in rows {
+                row.is_default = false;
+            }
+        }
+    }
+    vm
+}
+
+fn prune_report_fixture() -> PruneReportVm {
+    PruneReportVm {
+        unused: vec![
+            PruneCandidateVm {
+                version: "6000.3.27f2".to_string(),
+                architecture: "x86_64".to_string(),
+                path: "/home/ada/Unity/6000.3.27f2".to_string(),
+                size: Some("8.1 GB".to_string()),
+                reason: "Reported unused by `unity editors prune`.".to_string(),
+            },
+            PruneCandidateVm {
+                version: "2022.3.10f1".to_string(),
+                architecture: "arm64".to_string(),
+                path: "/home/ada/Unity/2022.3.10f1".to_string(),
+                size: Some("5.3 GB".to_string()),
+                reason: "Reported unused by `unity editors prune`.".to_string(),
+            },
+        ],
+        missing: vec![PruneCandidateVm {
+            version: "6000.0.0b1".to_string(),
+            architecture: "x86_64".to_string(),
+            path: "/Volumes/External/Unity/6000.0.0b1".to_string(),
+            size: None,
+            reason: "Reported missing by `unity editors prune --remove-missing`.".to_string(),
+        }],
+        reclaimable: "13.4 GB".to_string(),
+        removed: false,
+    }
+}
+
+fn prune_modal() -> ViewModel {
+    let mut vm = editors();
+    vm.modal = Some(ModalVm::PruneEditors(PruneEditorsVm {
+        report: LoadState::Ready(prune_report_fixture()),
+        confirmed: false,
+        missing_confirmed: false,
+        force: false,
+        force_available: false,
+        scan_command: "unity editors prune --remove-missing --format json --no-pager --no-banner --non-interactive".to_string(),
+        remove_command: "unity editors prune --remove --yes --format ndjson --no-pager --no-banner --non-interactive".to_string(),
+        missing_command: "unity editors prune --remove-missing --yes --format ndjson --no-pager --no-banner --non-interactive".to_string(),
+        remove_label: "Remove 2 unused Editors (13.4 GB)".to_string(),
+        missing_label: "Remove 1 missing registry entry (no files deleted)".to_string(),
+        confirm_label: "I understand these Editors and their files will be uninstalled: Unity 6000.3.27f2 (x86_64, 8.1 GB), Unity 2022.3.10f1 (arm64, 5.3 GB).".to_string(),
+        missing_confirm_label: "I understand only these registry entries are dropped; no files are deleted: Unity 6000.0.0b1 (x86_64).".to_string(),
+        can_remove: false,
+        can_remove_missing: false,
+        error: None,
+        job_running: false,
+    }));
+    vm
+}
+
+fn prune_modal_confirmed() -> ViewModel {
+    let mut vm = prune_modal();
+    if let Some(ModalVm::PruneEditors(prune)) = &mut vm.modal {
+        prune.confirmed = true;
+        prune.force_available = true;
+        prune.can_remove = true;
+    }
+    vm
+}
+
+fn prune_modal_missing() -> ViewModel {
+    let mut vm = prune_modal();
+    if let Some(ModalVm::PruneEditors(prune)) = &mut vm.modal {
+        prune.missing_confirmed = true;
+        prune.can_remove_missing = true;
+    }
+    vm
+}
+
+fn verify_modal() -> ViewModel {
+    let mut vm = editors();
+    vm.modal = Some(ModalVm::VerifyEditor(VerifyEditorVm {
+        version: "6000.6.6f1".to_string(),
+        architecture: "x86_64".to_string(),
+        command: "unity editors verify 6000.6.6f1 --architecture x86_64 --format json --no-pager --no-banner --non-interactive".to_string(),
+        state: LoadState::Ready(VerifyResultVm {
+            version: "6000.6.6f1".to_string(),
+            architecture: "x86_64".to_string(),
+            ok: false,
+            checks: vec![
+                VerifyCheckVm {
+                    component: "Editor".to_string(),
+                    kind: "Editor".to_string(),
+                    status: CheckStatus::Pass,
+                    path: Some("/home/ada/Unity/6000.6.6f1/Editor/Unity".to_string()),
+                    repair_command: None,
+                },
+                VerifyCheckVm {
+                    component: "Windows Mono".to_string(),
+                    kind: "Module".to_string(),
+                    status: CheckStatus::Warn,
+                    path: Some("/home/ada/Unity/6000.6.6f1/Editor/Data/PlaybackEngines/WindowsStandaloneSupport".to_string()),
+                    repair_command: None,
+                },
+                VerifyCheckVm {
+                    component: "iOS".to_string(),
+                    kind: "Module".to_string(),
+                    status: CheckStatus::Fail,
+                    path: Some("/home/ada/Unity/6000.6.6f1/Editor/Data/PlaybackEngines/iOSSupport".to_string()),
+                    repair_command: Some("unity install-modules --editor-version 6000.6.6f1 --architecture x86_64 -m ios --yes".to_string()),
+                },
+                VerifyCheckVm {
+                    component: "Linux IL2CPP".to_string(),
+                    kind: "Module".to_string(),
+                    status: CheckStatus::Unknown,
+                    path: None,
+                    repair_command: None,
+                },
+            ],
+            failed_count: 1,
+            repair_command: Some("unity install-modules --editor-version 6000.6.6f1 --architecture x86_64 -m ios --yes".to_string()),
+            raw: "{\n  \"success\": false,\n  \"command\": \"editors verify\",\n  \"data\": {\n    \"version\": \"6000.6.6f1\",\n    \"architecture\": \"x86_64\",\n    \"ok\": false,\n    \"components\": [\n      { \"component\": \"iOS\", \"status\": \"missing\" }\n    ]\n  },\n  \"errors\": [\n    { \"code\": \"EDITORS_VERIFY_FAILED\", \"message\": \"1 component is missing.\" }\n  ]\n}".to_string(),
+        }),
+        show_raw: true,
+    }));
     vm
 }
 

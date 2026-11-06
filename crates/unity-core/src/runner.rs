@@ -11,8 +11,8 @@ use crate::envelope::{parse_data, parse_envelope, parse_items, ValueEnvelope};
 use crate::errors::{code_for_exit_code, message_for_exit_code, UnityError};
 use crate::models::{
     AuthStatus, CliStatus, CliUpdateInfo, CliVersion, DoctorReport, Editor, EditorInfo,
-    EnvironmentInfo, InstallPath, LicenseStatus, Module, PipelineEditors, Project, RawChangelog,
-    Release, RunningEditor, RunningEditors,
+    EnvironmentInfo, InstallPath, LicenseStatus, Module, PipelineEditors, Project, PruneReport,
+    RawChangelog, Release, RunningEditor, RunningEditors, VerifyReport,
 };
 use crate::versions::{
     validate_architecture, validate_cli_version, validate_editor_version, validate_module_id,
@@ -499,6 +499,84 @@ impl UnityCli {
         self.spec(&parts, "json")
     }
 
+    /// Runs `unity editors verify` and keeps both the typed components and the
+    /// raw envelope.
+    ///
+    /// A failed verify is still a result: the CLI returns the component list
+    /// (and often a repair command) alongside `success: false`. The read only
+    /// becomes an error when no component list came back at all.
+    pub fn editors_verify(
+        &self,
+        version: &str,
+        architecture: Option<&str>,
+    ) -> Result<EditorVerifyRead, UnityError> {
+        let spec = self.editors_verify_spec(version, architecture)?;
+        let executed = self.execute_envelope(&spec)?;
+        let raw = serde_json::to_string_pretty(&executed.envelope)
+            .unwrap_or_else(|_| serde_json::to_string(&executed.envelope).unwrap_or_default());
+
+        let Some(data) = executed.envelope.data.clone() else {
+            if executed.envelope.success {
+                return Err(UnityError::unexpected_output(
+                    "`unity editors verify` returned no `data` field.",
+                ));
+            }
+            return Err(envelope_error(
+                &executed.envelope,
+                &executed.stderr,
+                executed.exit_code,
+            ));
+        };
+
+        let report: VerifyReport = serde_json::from_value(data).map_err(|err| {
+            UnityError::unexpected_output(format!(
+                "Could not parse the `unity editors verify` report: {err}"
+            ))
+        })?;
+
+        if !executed.envelope.success && report.components.is_empty() {
+            return Err(envelope_error(
+                &executed.envelope,
+                &executed.stderr,
+                executed.exit_code,
+            ));
+        }
+
+        Ok(EditorVerifyRead { report, raw })
+    }
+
+    /// Builds the report-only `unity editors prune --remove-missing` read.
+    ///
+    /// Nothing is removed: `--remove-missing` only extends the report with
+    /// registry entries whose install folder is already gone, so the prune
+    /// dialog can offer that separate, file-free action from one scan.
+    pub fn editors_prune_report_spec(&self) -> Result<CommandSpec, UnityError> {
+        self.spec(&editors_prune_parts(false, false, false, true), "json")
+    }
+
+    /// Reads the prune report without changing anything.
+    pub fn editors_prune(&self) -> Result<PruneReport, UnityError> {
+        let executed = self.execute(&self.editors_prune_report_spec()?)?;
+        parse_data(executed.envelope)
+    }
+
+    /// Builds `unity editors prune --remove --yes [--force]` as a streamed job.
+    ///
+    /// `--yes` is always present because the GUI owns the confirmation; the
+    /// CLI must never prompt on a child with no terminal. `--force` is only for
+    /// a running-Editor check that could not complete.
+    pub fn editors_prune_remove_spec(&self, force: bool) -> Result<CommandSpec, UnityError> {
+        self.spec(&editors_prune_parts(true, true, force, false), "ndjson")
+    }
+
+    /// Builds `unity editors prune --remove-missing --yes` as a streamed job.
+    ///
+    /// This changes the registry only; no files are deleted. It is independent
+    /// of `--remove` and never implies it.
+    pub fn editors_prune_remove_missing_spec(&self) -> Result<CommandSpec, UnityError> {
+        self.spec(&editors_prune_parts(false, true, false, true), "ndjson")
+    }
+
     pub fn upgrade_project_spec(
         &self,
         path: &str,
@@ -819,6 +897,16 @@ pub struct DoctorRead {
     pub raw: String,
 }
 
+/// A verify report plus the raw envelope the CLI returned.
+///
+/// A failed verify still lists the failing components and its repair command;
+/// the raw document is what the dialog exposes when `ok` is false.
+#[derive(Debug, Clone)]
+pub struct EditorVerifyRead {
+    pub report: VerifyReport,
+    pub raw: String,
+}
+
 /// The result of one synchronous CLI invocation.
 #[derive(Debug, Clone)]
 pub struct Executed {
@@ -1074,6 +1162,25 @@ fn editors_verify_parts(
     let mut parts = svec(&["editors", "verify", version]);
     append_architecture(&mut parts, architecture)?;
     Ok(parts)
+}
+
+/// Builds the `unity editors prune` argv. Every field is a boolean controlled
+/// by the app, so no user token can reach this command line.
+fn editors_prune_parts(remove: bool, yes: bool, force: bool, remove_missing: bool) -> Vec<String> {
+    let mut parts = svec(&["editors", "prune"]);
+    if remove {
+        parts.push("--remove".to_string());
+    }
+    if remove_missing {
+        parts.push("--remove-missing".to_string());
+    }
+    if yes {
+        parts.push("--yes".to_string());
+    }
+    if force {
+        parts.push("--force".to_string());
+    }
+    parts
 }
 
 /// Whether this platform can install the headless Unity Editor.
@@ -1564,6 +1671,33 @@ mod tests {
             svec(&["editors", "verify", "6000.6.6f1"])
         );
         assert!(editors_verify_parts("6000.6.6f1; rm -rf /", None).is_err());
+    }
+
+    #[test]
+    fn editors_prune_is_report_only_by_default_and_names_each_mutation() {
+        assert_eq!(
+            editors_prune_parts(false, false, false, false),
+            svec(&["editors", "prune"]),
+            "the plain report must not carry a removal flag"
+        );
+        assert_eq!(
+            editors_prune_parts(false, false, false, true),
+            svec(&["editors", "prune", "--remove-missing"]),
+            "the scan adds the missing class but still removes nothing"
+        );
+        assert_eq!(
+            editors_prune_parts(true, true, false, false),
+            svec(&["editors", "prune", "--remove", "--yes"])
+        );
+        assert_eq!(
+            editors_prune_parts(true, true, true, false),
+            svec(&["editors", "prune", "--remove", "--yes", "--force"])
+        );
+        assert_eq!(
+            editors_prune_parts(false, true, false, true),
+            svec(&["editors", "prune", "--remove-missing", "--yes"]),
+            "--remove-missing never implies --remove"
+        );
     }
 
     #[test]

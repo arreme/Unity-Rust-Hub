@@ -110,6 +110,13 @@ fixture when a new state needs review.
   warning, install enabled and disabled.
 - Available releases: loading, error, empty, installed badge (matched on
   version and architecture), use action that selects the build, stream tones.
+- Maintenance card: last prune report summary (unused count and reclaimable
+  size from the CLI) and a **Review unused Editors** action that opens the scan
+  dialog. It never scans or removes on its own.
+- Editor verify: each row has a Verify action for exactly that
+  `(version, architecture)` build. The dialog shows pass/warn/fail rows, the
+  failing path, the CLI's repair command, and the raw log when the verify
+  fails. A stale row action for a build that is gone does nothing.
 
 ### Projects
 
@@ -179,6 +186,58 @@ fixture when a new state needs review.
   picker (one entry per installed version, because the CLI upgrades by version),
   a note naming any target version with two installed builds, no target
   installed warning, confirmation, disabled/enabled upgrade.
+- Prune review: the report-only scan command, unused candidates (version,
+  architecture, size when the CLI reports one, CLI reason, path), and the
+  reclaimable total. A confirmation checkbox enumerates every build to delete
+  before the primary danger button enables. `--force` appears only after a
+  remove run failed because the running-Editor check could not complete.
+  Cancelling removes nothing.
+- Prune missing paths: a separate outlined block with an info notice stating
+  that no files are deleted, its own candidate list, confirmation, and registry
+  only button. It never implies `--remove`.
+- Verify results: one row per checked component with pass/warn/fail/unknown
+  badges, the exact failing path, a per-component repair command, the CLI
+  verdict summary, and a raw-log toggle whenever the verify failed.
+
+## Editor maintenance contract
+
+`EditorsVm::prune: LoadState<PruneReportVm>` is the page's last report.
+`PruneReportVm { unused: Vec<PruneCandidateVm>, missing: Vec<PruneCandidateVm>,
+reclaimable, removed }`; `PruneCandidateVm { version, architecture, path,
+size: Option<String>, reason }`. `size` and `reclaimable` are formatted from
+the CLI's `bytes`/`total`; `reason` is the CLI's `reason`/non-status text, or
+the command's own classification when the CLI omits it. Nothing is computed
+from the project registry locally.
+
+`ModalVm::PruneEditors(PruneEditorsVm)` carries the report plus
+`confirmed`, `missing_confirmed`, `force`, `force_available`, the three exact
+command previews (`scan_command`, `remove_command`, `missing_command`), labels
+that name the count and total, confirmation labels that enumerate every
+candidate, `can_remove`, `can_remove_missing`, the failed-run `error`, and
+`job_running`.
+
+`ModalVm::VerifyEditor(VerifyEditorVm)` carries the build, the exact
+`unity editors verify` `command`, and `LoadState<VerifyResultVm>`;
+`VerifyResultVm { version, architecture, ok, checks, failed_count,
+repair_command, raw }` and `VerifyCheckVm { component, kind, status:
+CheckStatus, path, repair_command }`. `ok` is the CLI's own verdict; `raw` is
+its full JSON envelope.
+
+Actions: `OpenPrune` (open + report scan), `PruneScan` (report scan only),
+`PruneConfirmed(bool)`, `PruneMissingConfirmed(bool)`, `PruneForceToggled(bool)`,
+`StartPruneRemove` (streamed `--remove --yes [--force]`),
+`StartPruneRemoveMissing` (streamed `--remove-missing --yes`, registry only),
+`OpenVerify(version, architecture)`, and `ToggleVerifyRaw`.
+
+Both remove commands are streamed jobs; their raw NDJSON log is the job card.
+A job failure keeps the dialog open and only
+`EDITORS_PRUNE_EDITOR_CHECK_FAILED` / `_UNAVAILABLE` enables `--force`.
+Verify is a read with its own `read:editor-verify` retry target that repeats
+the exact build.
+
+Gallery fixtures: `Editors · default cleared`, `Modal · prune candidates`,
+`Modal · prune confirm`, `Modal · prune remove missing`, `Modal · verify
+results`.
 
 ## Advisory contract
 

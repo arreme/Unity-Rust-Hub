@@ -2,8 +2,8 @@ use iced::widget::{column, container, row, space};
 use iced::{Center, Element, Fill, FillPortion};
 
 use unity_hub_model::{
-    EditorRowVm, EditorsVm, InstallEditorVm, LoadState, ModuleOptionVm, ReleaseRowVm, Tone,
-    UiAction,
+    EditorRowVm, EditorsVm, InstallEditorVm, LoadState, ModuleOptionVm, PruneReportVm,
+    ReleaseRowVm, Tone, UiAction,
 };
 
 use crate::components::{
@@ -25,6 +25,7 @@ pub fn view(vm: &EditorsVm) -> Element<'_, UiAction> {
             Some(refresh_button()),
         ),
         installed_card(&vm.installed),
+        prune_card(&vm.prune),
         row![
             container(install_card(&vm.install)).width(FillPortion(3)),
             container(releases_card(&vm.releases)).width(FillPortion(2)),
@@ -77,11 +78,17 @@ fn editor_row(editor: &EditorRowVm) -> Element<'_, UiAction> {
                 }),
                 FillPortion(2),
             ),
-            cell(modules, FillPortion(4)),
+            cell(modules, FillPortion(3)),
             cell(
                 row![
-                    button("Manage modules", ButtonKind::Secondary)
+                    button("Modules", ButtonKind::Secondary)
                         .on_press(UiAction::OpenEditorModules(
+                            editor.version.clone(),
+                            editor.architecture.clone(),
+                        ))
+                        .padding(components::COMPACT),
+                    button("Verify", ButtonKind::Ghost)
+                        .on_press(UiAction::OpenVerify(
                             editor.version.clone(),
                             editor.architecture.clone(),
                         ))
@@ -90,7 +97,7 @@ fn editor_row(editor: &EditorRowVm) -> Element<'_, UiAction> {
                 ]
                 .spacing(8)
                 .align_y(Center),
-                FillPortion(3),
+                FillPortion(4),
             ),
         ]
         .spacing(16)
@@ -142,6 +149,49 @@ fn installed_card(installed: &LoadState<Vec<EditorRowVm>>) -> Element<'_, UiActi
         .width(Fill)
         .style(theme::card)
         .into()
+}
+
+/// Maintenance entry point. The scan is report-only; the destructive actions
+/// live behind the dialog's explicit confirmations.
+fn prune_card(prune: &LoadState<PruneReportVm>) -> Element<'_, UiAction> {
+    let summary = match prune {
+        LoadState::Idle => "Not scanned yet.".to_string(),
+        LoadState::Loading { previous } => match previous {
+            Some(report) => format!(
+                "Rescanning… last report: {} unused · {} reclaimable",
+                report.unused.len(),
+                report.reclaimable
+            ),
+            None => "Scanning installed Editors…".to_string(),
+        },
+        LoadState::Ready(report) => format!(
+            "{} unused Editor{} · {} reclaimable",
+            report.unused.len(),
+            if report.unused.len() == 1 { "" } else { "s" },
+            report.reclaimable
+        ),
+        LoadState::Failed { .. } => "The last scan failed.".to_string(),
+    };
+
+    card(
+        "Maintenance",
+        column![
+            text("Find installed Editors no registered project uses, or drop registry entries whose folder is already gone. Every action starts with a report and needs a confirmation.")
+                .size(font::BODY)
+                .line_height(1.5)
+                .style(theme::muted_text),
+            row![
+                hint(summary),
+                space().width(Fill),
+                button("Review unused Editors", ButtonKind::Secondary)
+                    .on_press(UiAction::OpenPrune),
+            ]
+            .spacing(12)
+            .align_y(Center),
+        ]
+        .spacing(12)
+        .into(),
+    )
 }
 
 fn install_card(install: &InstallEditorVm) -> Element<'_, UiAction> {

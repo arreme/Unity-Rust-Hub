@@ -56,6 +56,24 @@ pub enum UiAction {
     SetDefaultEditor(String, String),
     /// Clears the stored default Editor.
     ClearDefaultEditor,
+    /// Opens the prune review dialog and starts the report-only scan.
+    OpenPrune,
+    /// Re-runs `unity editors prune --remove-missing` (still removes nothing).
+    PruneScan,
+    /// The user's explicit confirmation for deleting the unused candidates.
+    PruneConfirmed(bool),
+    /// The user's explicit confirmation for dropping missing registry entries.
+    PruneMissingConfirmed(bool),
+    /// Opts into `--force` after a failed running-Editor check.
+    PruneForceToggled(bool),
+    /// Runs the streamed `--remove` job. Ignored without `PruneConfirmed(true)`.
+    StartPruneRemove,
+    /// Runs the streamed `--remove-missing` job. Changes the registry only.
+    StartPruneRemoveMissing,
+    /// Opens the verify dialog and reads one build's structural check.
+    OpenVerify(String, String),
+    /// Expands or collapses the raw log of a failed verify.
+    ToggleVerifyRaw,
     CloseModal,
     ToggleDialogModule(String, bool),
     DialogEulaToggled(bool),

@@ -224,11 +224,16 @@ pub enum PageVm {
     Settings(SettingsVm),
 }
 
+// One snapshot exists per frame, so the variant size gap costs nothing worth
+// boxing for.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum ModalVm {
     InstallCli(InstallCliVm),
     EditorModules(EditorModulesVm),
     UpgradeProject(UpgradeProjectVm),
+    PruneEditors(PruneEditorsVm),
+    VerifyEditor(VerifyEditorVm),
 }
 
 #[derive(Debug, Clone)]
@@ -336,6 +341,33 @@ pub struct EditorsVm {
     pub installed: LoadState<Vec<EditorRowVm>>,
     pub install: InstallEditorVm,
     pub releases: LoadState<Vec<ReleaseRowVm>>,
+    /// The last `unity editors prune` report. Report-only: opening it removes
+    /// nothing, and the modal repeats it before any confirm.
+    pub prune: LoadState<PruneReportVm>,
+}
+
+/// A prune report as the page and dialog draw it.
+///
+/// `unused` and `missing` are separate candidate classes because they have
+/// different consequences: one deletes files, the other only edits the
+/// registry. `reclaimable` is the CLI's own total, formatted for display.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PruneReportVm {
+    pub unused: Vec<PruneCandidateVm>,
+    pub missing: Vec<PruneCandidateVm>,
+    pub reclaimable: String,
+    pub removed: bool,
+}
+
+/// One candidate line: version, architecture, size when the CLI reports it,
+/// and the CLI's reason or classification.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PruneCandidateVm {
+    pub version: String,
+    pub architecture: String,
+    pub path: String,
+    pub size: Option<String>,
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -651,4 +683,80 @@ pub struct UpgradeProjectVm {
     pub selected_target: Option<String>,
     pub confirmed: bool,
     pub can_upgrade: bool,
+}
+
+/// Review-and-confirm dialog for `unity editors prune`.
+///
+/// The report is always shown before a destructive button becomes available.
+/// `--remove` and `--remove-missing` are two independent actions with separate
+/// confirmations; the second one never deletes files.
+#[derive(Debug, Clone)]
+pub struct PruneEditorsVm {
+    pub report: LoadState<PruneReportVm>,
+    pub confirmed: bool,
+    pub missing_confirmed: bool,
+    /// Only meaningful when `force_available` is true.
+    pub force: bool,
+    /// True after a remove run failed because the running-Editor check could
+    /// not complete. `--force` is never offered before that.
+    pub force_available: bool,
+    /// The exact report command, shown so the user sees what ran.
+    pub scan_command: String,
+    /// The exact commands the two buttons would run.
+    pub remove_command: String,
+    pub missing_command: String,
+    /// Names the count and total that the removal button acts on.
+    pub remove_label: String,
+    /// Names the registry-only action and says no files are deleted.
+    pub missing_label: String,
+    /// Enumerates every build the remove confirmation would uninstall.
+    pub confirm_label: String,
+    /// Enumerates every registry entry the missing confirmation would drop.
+    pub missing_confirm_label: String,
+    pub can_remove: bool,
+    pub can_remove_missing: bool,
+    /// A failed remove run, kept beside the candidates so `--force` has context.
+    pub error: Option<UiError>,
+    pub job_running: bool,
+}
+
+/// The verify dialog: one row per checked file/module, plus the raw log when
+/// the CLI's own verdict is a failure.
+#[derive(Debug, Clone)]
+pub struct VerifyEditorVm {
+    pub version: String,
+    /// The build the row named; empty when the registry did not report one.
+    pub architecture: String,
+    /// The exact `unity editors verify` command this dialog ran.
+    pub command: String,
+    pub state: LoadState<VerifyResultVm>,
+    pub show_raw: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifyResultVm {
+    pub version: String,
+    pub architecture: String,
+    /// The CLI's own verdict (`ok` in its report).
+    pub ok: bool,
+    pub checks: Vec<VerifyCheckVm>,
+    pub failed_count: usize,
+    /// The exact `unity install-modules` command the CLI named, if any.
+    pub repair_command: Option<String>,
+    /// The raw JSON envelope, exposed when the verify fails.
+    pub raw: String,
+}
+
+/// One `unity editors verify` component.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifyCheckVm {
+    /// `component` from the CLI, e.g. `editor` or `windows-mono`.
+    pub component: String,
+    /// `editor` or `module`, as the CLI labels it.
+    pub kind: String,
+    pub status: CheckStatus,
+    /// The exact path checked. Shown for a failing row.
+    pub path: Option<String>,
+    /// A per-component repair command, when the CLI names one.
+    pub repair_command: Option<String>,
 }

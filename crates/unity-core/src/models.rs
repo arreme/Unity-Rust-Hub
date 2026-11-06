@@ -114,6 +114,96 @@ pub struct Module {
     pub is_installed: bool,
 }
 
+/// The useful parts of `unity editors prune --format json`.
+///
+/// `editors` holds builds no registered project uses; `missing` holds registry
+/// entries whose recorded install path no longer exists. The CLI only reports
+/// the missing class when `--remove-missing` was passed, and removing it never
+/// deletes files. `total` is the CLI's reclaimable total, never a local sum.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct PruneReport {
+    #[serde(default)]
+    pub removed: bool,
+    #[serde(default)]
+    pub editors: Vec<PruneCandidate>,
+    #[serde(default, deserialize_with = "default_u64")]
+    pub total: u64,
+    #[serde(default)]
+    pub missing: Vec<PruneCandidate>,
+}
+
+/// One Editor build named by `unity editors prune`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct PruneCandidate {
+    #[serde(default, deserialize_with = "default_string")]
+    pub version: String,
+    #[serde(default, deserialize_with = "default_string")]
+    pub architecture: String,
+    #[serde(default, deserialize_with = "default_string")]
+    pub path: String,
+    /// On-disk size in bytes, or `0` when the CLI does not report one.
+    #[serde(default, deserialize_with = "default_u64")]
+    pub bytes: u64,
+    /// A preformatted size some CLI versions send instead of `bytes`.
+    #[serde(default, deserialize_with = "optional_text")]
+    pub size: Option<String>,
+    /// Why the CLI classified the row as removable, when it says so.
+    #[serde(default, deserialize_with = "optional_text")]
+    pub reason: Option<String>,
+    /// The report's status column (`kept`, `removed`), when present.
+    #[serde(default, deserialize_with = "optional_text")]
+    pub status: Option<String>,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+/// The useful parts of `unity editors verify <version> --format json`.
+///
+/// `ok` is the CLI's own verdict. `components` carries one row per file or
+/// module checked; `status` is `ok`, `missing`, or `skipped`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct VerifyReport {
+    #[serde(default, deserialize_with = "default_string")]
+    pub version: String,
+    #[serde(default, deserialize_with = "default_string")]
+    pub architecture: String,
+    #[serde(default)]
+    pub ok: bool,
+    #[serde(default)]
+    pub components: Vec<VerifyComponent>,
+    /// A top-level repair command, when a CLI version reports one.
+    #[serde(default, deserialize_with = "optional_text")]
+    pub command: Option<String>,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+/// One component checked by `unity editors verify`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct VerifyComponent {
+    #[serde(default, deserialize_with = "default_string")]
+    pub component: String,
+    /// `editor` or `module`.
+    #[serde(default, deserialize_with = "default_string")]
+    pub kind: String,
+    /// `ok`, `missing`, or `skipped`.
+    #[serde(default, deserialize_with = "default_string")]
+    pub status: String,
+    #[serde(default, deserialize_with = "optional_text")]
+    pub path: Option<String>,
+    /// The exact `unity install-modules` command that repairs this component.
+    #[serde(default, deserialize_with = "optional_text")]
+    pub command: Option<String>,
+    #[serde(default, deserialize_with = "optional_text")]
+    pub message: Option<String>,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct Project {
@@ -560,6 +650,13 @@ where
     Ok(Option::<Vec<T>>::deserialize(deserializer)?.unwrap_or_default())
 }
 
+fn default_u64<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<u64>::deserialize(deserializer)?.unwrap_or_default())
+}
+
 fn default_map<'de, D>(deserializer: D) -> Result<Map<String, Value>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -699,6 +796,90 @@ mod tests {
         assert_eq!(report.cli_version.as_deref(), Some("1.0.0-beta.17"));
         assert_eq!(report.platform, "");
         assert!(report.checks.is_empty());
+    }
+
+    #[test]
+    fn prune_report_keeps_unused_and_missing_candidates() {
+        let report: PruneReport = serde_json::from_value(serde_json::json!({
+            "removed": false,
+            "editors": [
+                {
+                    "version": "6000.3.27f2",
+                    "architecture": "x86_64",
+                    "path": "/home/ada/Unity/6000.3.27f2",
+                    "bytes": 8688108322u64,
+                    "status": "kept"
+                },
+                {
+                    "version": null,
+                    "architecture": null,
+                    "path": null,
+                    "bytes": null,
+                    "reason": "No registered project uses this build."
+                }
+            ],
+            "total": 8688108322u64,
+            "missing": [
+                {
+                    "version": "2022.3.10f1",
+                    "architecture": "arm64",
+                    "path": "/gone/2022.3.10f1",
+                    "size": "4.2 GB"
+                }
+            ]
+        }))
+        .expect("prune report parses");
+
+        assert!(!report.removed);
+        assert_eq!(report.editors.len(), 2);
+        assert_eq!(report.editors[0].bytes, 8688108322);
+        assert_eq!(report.editors[0].status.as_deref(), Some("kept"));
+        assert_eq!(report.editors[1].version, "");
+        assert_eq!(report.editors[1].bytes, 0);
+        assert_eq!(
+            report.editors[1].reason.as_deref(),
+            Some("No registered project uses this build.")
+        );
+        assert_eq!(report.total, 8688108322);
+        assert_eq!(report.missing.len(), 1);
+        assert_eq!(report.missing[0].size.as_deref(), Some("4.2 GB"));
+    }
+
+    #[test]
+    fn verify_report_keeps_components_and_remediation() {
+        let report: VerifyReport = serde_json::from_value(serde_json::json!({
+            "version": "6000.6.6f1",
+            "architecture": "arm64",
+            "ok": false,
+            "components": [
+                {
+                    "component": "editor",
+                    "kind": "editor",
+                    "status": "ok",
+                    "path": "/home/ada/Unity/6000.6.6f1/Editor/Unity"
+                },
+                {
+                    "component": "windows-mono",
+                    "kind": "module",
+                    "status": "missing",
+                    "path": "/home/ada/Unity/6000.6.6f1/Editor/Data/PlaybackEngines/WindowsStandaloneSupport",
+                    "command": "unity install-modules --editor-version 6000.6.6f1 --architecture arm64 -m windows-mono --yes"
+                },
+                {
+                    "component": "iOS",
+                    "status": "skipped",
+                    "path": null
+                }
+            ]
+        }))
+        .expect("verify report parses");
+
+        assert!(!report.ok);
+        assert_eq!(report.components.len(), 3);
+        assert_eq!(report.components[1].status, "missing");
+        assert!(report.components[1].command.is_some());
+        assert_eq!(report.components[2].status, "skipped");
+        assert_eq!(report.components[2].path, None);
     }
 
     #[test]

@@ -10,11 +10,12 @@ use unity_core::changelog::{ChangelogRequest, ChangelogView, CliChangelogProvide
 use unity_core::errors::{redact_proxy, remediation_for, RemediationKind};
 use unity_core::models::{
     AuthStatus, CliStatus, CliUpdateInfo, DoctorCheck, Editor, EnvironmentInfo, EnvironmentProxy,
-    InstallPreview, LicenseStatus, Module, Project, Release, RunningEditor, RunningEditors,
+    InstallPreview, LicenseStatus, Module, Project, PruneCandidate, PruneReport, Release,
+    RunningEditor, RunningEditors, VerifyComponent,
 };
 use unity_core::{
-    AdvisoryOrigin, CliAdvisory, CommandSpec, DiagnoseTopic as CliDiagnose, DoctorRead, UnityCli,
-    UnityError,
+    AdvisoryOrigin, CliAdvisory, CommandSpec, DiagnoseTopic as CliDiagnose, DoctorRead,
+    EditorVerifyRead, UnityCli, UnityError,
 };
 use unity_hub_model::{
     AccountCardVm, AdvisoryVm, ArchitectureOptionVm, AuthVm, BadgeVm, BreakingChangeVm,
@@ -23,8 +24,10 @@ use unity_hub_model::{
     EditorModulesVm, EditorRowVm, EditorsVm, EnvironmentVm, ErrorActionKind, ErrorActionVm,
     InstallCliVm, InstallEditorVm, InstallPreviewVm, JobLogVm, JobPhase, JobVm, LicenseRowVm,
     LicenseVm, LoadState, ModalVm, ModuleOptionVm, NoticeVm, OverviewVm, Page, PageVm,
-    ProjectRowVm, ProjectsVm, ProxyVm, ReleaseRowVm, RunningEditorVm, SectionKind, SettingsVm,
-    ShellVm, TextScaleOptionVm, Tone, UiAction, UiError, UpdateVm, UpgradeProjectVm, ViewModel,
+    ProjectRowVm, ProjectsVm, ProxyVm, PruneCandidateVm, PruneEditorsVm, PruneReportVm,
+    ReleaseRowVm, RunningEditorVm, SectionKind, SettingsVm, ShellVm, TextScaleOptionVm, Tone,
+    UiAction, UiError, UpdateVm, UpgradeProjectVm, VerifyCheckVm, VerifyEditorVm, VerifyResultVm,
+    ViewModel,
 };
 
 use crate::jobs::{JobManager, JobStarted, JobState, StreamKind};
@@ -39,6 +42,11 @@ pub enum Modal {
     InstallCli,
     EditorModules(Editor),
     UpgradeProject(Project),
+    PruneEditors,
+    VerifyEditor {
+        version: String,
+        architecture: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -111,6 +119,8 @@ pub enum ReadKind {
     DiagnoseProxy,
     DiagnoseAccelerator,
     DiagnoseUpdate,
+    Prune,
+    EditorVerify,
 }
 
 impl ReadKind {
@@ -134,6 +144,8 @@ impl ReadKind {
             Self::DiagnoseProxy => "read:diagnose-proxy",
             Self::DiagnoseAccelerator => "read:diagnose-accelerator",
             Self::DiagnoseUpdate => "read:diagnose-update",
+            Self::Prune => "read:prune",
+            Self::EditorVerify => "read:editor-verify",
         }
     }
 }
@@ -157,6 +169,10 @@ pub enum RetryRequest {
         architecture: Option<String>,
         modules: Vec<String>,
         headless: bool,
+    },
+    EditorVerify {
+        version: String,
+        architecture: String,
     },
 }
 
@@ -358,6 +374,20 @@ pub struct App {
     pub license: Loadable<LicenseStatus>,
     pub running: Loadable<RunningEditors>,
     pub editors: Loadable<Vec<Editor>>,
+    /// The last report-only `unity editors prune` scan.
+    pub prune: Loadable<PruneReport>,
+    pub prune_confirmed: bool,
+    pub prune_missing_confirmed: bool,
+    pub prune_force: bool,
+    /// Set once a remove run fails because the running-Editor check could not
+    /// complete. `--force` is offered only after that.
+    pub prune_force_available: bool,
+    pub prune_error: Option<UnityError>,
+    /// The build the verify dialog is showing.
+    pub verify_version: String,
+    pub verify_architecture: String,
+    pub verify: Loadable<EditorVerifyRead>,
+    pub verify_show_raw: bool,
     pub releases: Loadable<Vec<Release>>,
     pub projects: Loadable<Vec<Project>>,
     pub changelog: Loadable<ChangelogView>,
@@ -438,6 +468,15 @@ pub enum Message {
     OpenModules(String, String),
     SetDefaultEditor(String, String),
     ClearDefaultEditor,
+    OpenPrune,
+    PruneScan,
+    PruneConfirmed(bool),
+    PruneMissingConfirmed(bool),
+    PruneForceToggled(bool),
+    StartPruneRemove,
+    StartPruneRemoveMissing,
+    OpenVerify(String, String),
+    ToggleVerifyRaw,
     CloseModal,
     ToggleDialogModule(String, bool),
     DialogEulaToggled(bool),
@@ -474,6 +513,8 @@ pub enum Message {
     DiagnoseProxyLoaded(Result<String, UnityError>),
     DiagnoseAcceleratorLoaded(Result<String, UnityError>),
     DiagnoseUpdateLoaded(Result<String, UnityError>),
+    PruneLoaded(Result<PruneReport, UnityError>),
+    VerifyLoaded(Result<EditorVerifyRead, UnityError>),
     PollJobs,
     ProjectOpened(Result<(), UnityError>),
 }
@@ -520,6 +561,15 @@ impl From<UiAction> for Message {
                 Self::SetDefaultEditor(version, architecture)
             }
             UiAction::ClearDefaultEditor => Self::ClearDefaultEditor,
+            UiAction::OpenPrune => Self::OpenPrune,
+            UiAction::PruneScan => Self::PruneScan,
+            UiAction::PruneConfirmed(value) => Self::PruneConfirmed(value),
+            UiAction::PruneMissingConfirmed(value) => Self::PruneMissingConfirmed(value),
+            UiAction::PruneForceToggled(value) => Self::PruneForceToggled(value),
+            UiAction::StartPruneRemove => Self::StartPruneRemove,
+            UiAction::StartPruneRemoveMissing => Self::StartPruneRemoveMissing,
+            UiAction::OpenVerify(version, architecture) => Self::OpenVerify(version, architecture),
+            UiAction::ToggleVerifyRaw => Self::ToggleVerifyRaw,
             UiAction::CloseModal => Self::CloseModal,
             UiAction::ToggleDialogModule(id, value) => Self::ToggleDialogModule(id, value),
             UiAction::DialogEulaToggled(value) => Self::DialogEulaToggled(value),
@@ -562,6 +612,16 @@ impl App {
             license: Loadable::default(),
             running: Loadable::default(),
             editors: Loadable::default(),
+            prune: Loadable::default(),
+            prune_confirmed: false,
+            prune_missing_confirmed: false,
+            prune_force: false,
+            prune_force_available: false,
+            prune_error: None,
+            verify_version: String::new(),
+            verify_architecture: String::new(),
+            verify: Loadable::default(),
+            verify_show_raw: false,
             releases: Loadable::default(),
             projects: Loadable::default(),
             changelog: Loadable::default(),
@@ -925,6 +985,36 @@ impl App {
                 self.note_diagnose_result(ReadKind::DiagnoseUpdate, result);
                 Task::none()
             }
+            Message::PruneLoaded(result) => {
+                match result {
+                    Ok(report) => {
+                        self.prune.succeeded(report);
+                        self.clear_retry(ReadKind::Prune);
+                    }
+                    Err(error) => {
+                        self.prune.failed(error);
+                        self.note_read_failed(ReadKind::Prune);
+                    }
+                }
+                Task::none()
+            }
+            Message::VerifyLoaded(result) => {
+                match result {
+                    Ok(read) => {
+                        // A failed verify still has a report; open the raw log
+                        // so the failing paths and the CLI's own errors are
+                        // visible without another click.
+                        self.verify_show_raw = !read.report.ok;
+                        self.verify.succeeded(read);
+                        self.clear_retry(ReadKind::EditorVerify);
+                    }
+                    Err(error) => {
+                        self.verify.failed(error);
+                        self.note_read_failed(ReadKind::EditorVerify);
+                    }
+                }
+                Task::none()
+            }
             Message::PollJobs => self.poll_jobs(),
             Message::DismissJob => {
                 self.active_job = None;
@@ -1233,6 +1323,11 @@ impl App {
             }
             Message::CloseModal => {
                 self.modal = Modal::None;
+                self.prune_confirmed = false;
+                self.prune_missing_confirmed = false;
+                self.prune_force = false;
+                self.prune_error = None;
+                self.verify_show_raw = false;
                 Task::none()
             }
             Message::ToggleDialogModule(id, value) => {
@@ -1294,6 +1389,82 @@ impl App {
                         self.notice = Some(Notice::error(error_text(&error)));
                     }
                 }
+                Task::none()
+            }
+            Message::OpenPrune => self.open_prune(),
+            Message::PruneScan => self.scan_prune(),
+            Message::PruneConfirmed(value) => {
+                self.prune_confirmed = value;
+                Task::none()
+            }
+            Message::PruneMissingConfirmed(value) => {
+                self.prune_missing_confirmed = value;
+                Task::none()
+            }
+            Message::PruneForceToggled(value) => {
+                // `--force` only exists for a failed running-Editor check, so a
+                // stale toggle cannot turn it on before that failure.
+                self.prune_force = value && self.prune_force_available;
+                Task::none()
+            }
+            Message::StartPruneRemove => {
+                if !matches!(self.modal, Modal::PruneEditors)
+                    || !self.prune_confirmed
+                    || self.prune.loading
+                {
+                    return Task::none();
+                }
+                let has_candidates = self
+                    .prune
+                    .data
+                    .as_ref()
+                    .is_some_and(|report| !report.editors.is_empty());
+                if !has_candidates {
+                    return Task::none();
+                }
+                let force = self.prune_force && self.prune_force_available;
+                match self.cli.editors_prune_remove_spec(force) {
+                    Ok(spec) => {
+                        if self.start_job("editor-prune", spec) {
+                            self.prune_confirmed = false;
+                        }
+                    }
+                    Err(error) => {
+                        self.notice = Some(Notice::error(error_text(&error)));
+                    }
+                }
+                Task::none()
+            }
+            Message::StartPruneRemoveMissing => {
+                if !matches!(self.modal, Modal::PruneEditors)
+                    || !self.prune_missing_confirmed
+                    || self.prune.loading
+                {
+                    return Task::none();
+                }
+                let has_missing = self
+                    .prune
+                    .data
+                    .as_ref()
+                    .is_some_and(|report| !report.missing.is_empty());
+                if !has_missing {
+                    return Task::none();
+                }
+                match self.cli.editors_prune_remove_missing_spec() {
+                    Ok(spec) => {
+                        if self.start_job("editor-prune-missing", spec) {
+                            self.prune_missing_confirmed = false;
+                        }
+                    }
+                    Err(error) => {
+                        self.notice = Some(Notice::error(error_text(&error)));
+                    }
+                }
+                Task::none()
+            }
+            Message::OpenVerify(version, architecture) => self.open_verify(&version, &architecture),
+            Message::ToggleVerifyRaw => {
+                self.verify_show_raw = !self.verify_show_raw;
                 Task::none()
             }
             Message::ProjectSearchChanged(value) => {
@@ -1739,6 +1910,25 @@ impl App {
                 self.diagnose_update.begin();
                 load_diagnose(self.cli.clone(), CliDiagnose::Update)
             }
+            RetryRequest::Read(ReadKind::Prune) => {
+                self.prune.begin();
+                Task::perform(
+                    run_blocking({
+                        let cli = self.cli.clone();
+                        move || cli.editors_prune()
+                    }),
+                    Message::PruneLoaded,
+                )
+            }
+            RetryRequest::Read(ReadKind::EditorVerify) => {
+                // Parameterised verifies use the variant below, which carries
+                // the build the user saw fail.
+                Task::none()
+            }
+            RetryRequest::EditorVerify {
+                version,
+                architecture,
+            } => self.load_verify(version, architecture),
             RetryRequest::Read(ReadKind::Modules)
             | RetryRequest::Read(ReadKind::DialogModules)
             | RetryRequest::Read(ReadKind::PreviewInstall) => {
@@ -1885,7 +2075,8 @@ impl App {
             }
             JobState::Failed => {
                 let message = error
-                    .map(|error| error_text(&error))
+                    .as_ref()
+                    .map(error_text)
                     .unwrap_or_else(|| "The job failed.".to_string());
                 self.notice = Some(Notice::error(message));
             }
@@ -1900,6 +2091,21 @@ impl App {
                 Task::batch(vec![self.refresh_status(), self.load_overview_data(true)])
             }
             "editor-install" | "module-install" | "editor-default" => self.load_editors_page(true),
+            "editor-prune" | "editor-prune-missing" => {
+                if let Some(error) = &error {
+                    self.prune_error = Some(error.clone());
+                    if kind == "editor-prune" && prune_force_available_for(error) {
+                        // The running-Editor check could not complete. Offer
+                        // `--force` only now, and start from an off toggle.
+                        self.prune_force_available = true;
+                        self.prune_force = false;
+                    }
+                }
+                if state == JobState::Succeeded {
+                    self.modal = Modal::None;
+                }
+                Task::batch(vec![self.load_editors_page(true), self.scan_prune()])
+            }
             "auth-login" => {
                 let mut tasks = Vec::new();
                 if !self.auth.loading {
@@ -2383,6 +2589,7 @@ impl App {
                     })
                     .collect()
             }),
+            prune: self.load_state(ReadKind::Prune, &self.prune, prune_report_vm),
         }
     }
 
@@ -2538,6 +2745,84 @@ impl App {
         }
         let architecture = (!architecture.is_empty()).then_some(architecture);
         self.cli.editor_default_spec(version, architecture)
+    }
+
+    /// Opens the prune dialog and starts the report-only scan.
+    fn open_prune(&mut self) -> Task<Message> {
+        self.modal = Modal::PruneEditors;
+        self.prune_confirmed = false;
+        self.prune_missing_confirmed = false;
+        self.prune_force = false;
+        self.prune_force_available = false;
+        self.prune_error = None;
+        self.scan_prune()
+    }
+
+    /// Re-runs the report-only scan. It never carries a removal flag.
+    fn scan_prune(&mut self) -> Task<Message> {
+        if self.prune.loading {
+            return Task::none();
+        }
+        self.prune.begin();
+        self.prune_confirmed = false;
+        self.prune_missing_confirmed = false;
+        Task::perform(
+            run_blocking({
+                let cli = self.cli.clone();
+                move || cli.editors_prune()
+            }),
+            Message::PruneLoaded,
+        )
+    }
+
+    /// Opens the verify dialog for exactly the build the row named.
+    ///
+    /// A stale action whose build is no longer installed does nothing rather
+    /// than verifying a different build of the same version.
+    fn open_verify(&mut self, version: &str, architecture: &str) -> Task<Message> {
+        let architecture = architecture.trim().to_string();
+        let known = self.editors.data.as_ref().is_some_and(|editors| {
+            editors
+                .iter()
+                .any(|editor| editor.version == version && editor.architecture == architecture)
+        });
+        if !known {
+            return Task::none();
+        }
+
+        self.modal = Modal::VerifyEditor {
+            version: version.to_string(),
+            architecture: architecture.clone(),
+        };
+        self.verify_version = version.to_string();
+        self.verify_architecture = architecture.clone();
+        self.verify_show_raw = false;
+        // Never show the previous build's result under this build's header.
+        self.verify = Loadable::default();
+        self.load_verify(version.to_string(), architecture)
+    }
+
+    fn load_verify(&mut self, version: String, architecture: String) -> Task<Message> {
+        self.verify.begin();
+        self.retry_targets.insert(
+            ReadKind::EditorVerify.id().to_string(),
+            RetryRequest::EditorVerify {
+                version: version.clone(),
+                architecture: architecture.clone(),
+            },
+        );
+        Task::perform(
+            run_blocking({
+                let cli = self.cli.clone();
+                move || {
+                    cli.editors_verify(
+                        &version,
+                        Some(architecture.as_str()).filter(|value| !value.trim().is_empty()),
+                    )
+                }
+            }),
+            Message::VerifyLoaded,
+        )
     }
 
     fn projects_vm(&self) -> ProjectsVm {
@@ -2824,7 +3109,124 @@ impl App {
                     can_upgrade: self.upgrade_confirmed && self.upgrade_target.is_some(),
                 }))
             }
+            Modal::PruneEditors => Some(ModalVm::PruneEditors(self.prune_editors_vm())),
+            Modal::VerifyEditor {
+                version,
+                architecture,
+            } => {
+                let build = Some(architecture.as_str()).filter(|value| !value.trim().is_empty());
+                let fallback = if architecture.trim().is_empty() {
+                    format!("unity editors verify {version}")
+                } else {
+                    format!("unity editors verify {version} --architecture {architecture}")
+                };
+                Some(ModalVm::VerifyEditor(VerifyEditorVm {
+                    version: version.clone(),
+                    architecture: architecture.clone(),
+                    command: self.command_preview(
+                        self.cli.editors_verify_spec(version, build),
+                        fallback.as_str(),
+                    ),
+                    state: self.load_state(ReadKind::EditorVerify, &self.verify, verify_result_vm),
+                    show_raw: self.verify_show_raw,
+                }))
+            }
         }
+    }
+
+    /// Builds the prune dialog. Every command preview comes from the adapter,
+    /// so the dialog shows exactly what a button would run.
+    fn prune_editors_vm(&self) -> PruneEditorsVm {
+        let report = self.load_state(ReadKind::Prune, &self.prune, prune_report_vm);
+        let (unused_count, missing_count, reclaimable, unused_names, missing_names) =
+            match report.data() {
+                Some(report) => (
+                    report.unused.len(),
+                    report.missing.len(),
+                    report.reclaimable.clone(),
+                    candidate_names(&report.unused),
+                    candidate_names(&report.missing),
+                ),
+                None => (0, 0, String::new(), String::new(), String::new()),
+            };
+        let job_running = self
+            .active_job
+            .as_ref()
+            .map(ActiveJob::is_running)
+            .unwrap_or(false);
+        let busy = job_running || self.prune.loading;
+
+        let remove_label = if unused_count == 0 {
+            "Remove unused Editors".to_string()
+        } else {
+            format!(
+                "Remove {unused_count} unused Editor{} ({reclaimable})",
+                plural(unused_count)
+            )
+        };
+        let missing_label = if missing_count == 0 {
+            "Remove missing registry entries (no files deleted)".to_string()
+        } else {
+            format!(
+                "Remove {missing_count} missing registry entr{} (no files deleted)",
+                if missing_count == 1 { "y" } else { "ies" }
+            )
+        };
+        let confirm_label = if unused_count == 0 {
+            "No unused Editors are selected.".to_string()
+        } else {
+            format!(
+                "I understand these Editors and their files will be uninstalled: {unused_names}."
+            )
+        };
+        let missing_confirm_label = if missing_count == 0 {
+            "No missing registry entries are selected.".to_string()
+        } else {
+            format!(
+                "I understand only these registry entries are dropped; no files are deleted: {missing_names}."
+            )
+        };
+
+        PruneEditorsVm {
+            report,
+            confirmed: self.prune_confirmed,
+            missing_confirmed: self.prune_missing_confirmed,
+            force: self.prune_force,
+            force_available: self.prune_force_available,
+            scan_command: self.command_preview(
+                self.cli.editors_prune_report_spec(),
+                "unity editors prune --remove-missing",
+            ),
+            remove_command: self.command_preview(
+                self.cli
+                    .editors_prune_remove_spec(self.prune_force && self.prune_force_available),
+                "unity editors prune --remove --yes",
+            ),
+            missing_command: self.command_preview(
+                self.cli.editors_prune_remove_missing_spec(),
+                "unity editors prune --remove-missing --yes",
+            ),
+            remove_label,
+            missing_label,
+            confirm_label,
+            missing_confirm_label,
+            can_remove: unused_count > 0 && self.prune_confirmed && !busy,
+            can_remove_missing: missing_count > 0 && self.prune_missing_confirmed && !busy,
+            error: self.prune_error.as_ref().map(|error| {
+                self.ui_error(
+                    error,
+                    ErrorContext::Job {
+                        kind: "editor-prune".to_string(),
+                    },
+                )
+            }),
+            job_running,
+        }
+    }
+
+    fn command_preview(&self, spec: Result<CommandSpec, UnityError>, fallback: &str) -> String {
+        spec.map(|spec| spec.display())
+            .unwrap_or_else(|_| fallback.to_string())
     }
 
     fn first_other_editor_version(&self, current: &str) -> Option<String> {
@@ -2994,6 +3396,16 @@ impl App {
 /// with an explicit kind; it must never default to retryable.
 fn job_allows_retry(_kind: &str) -> bool {
     false
+}
+
+/// `--force` exists only for the prune running-Editor check. Any other failure
+/// (permissions, a busy file, an elevated uninstall that needs a terminal)
+/// must not be retried with `--force`.
+fn prune_force_available_for(error: &UnityError) -> bool {
+    matches!(
+        error.code.as_str(),
+        "EDITORS_PRUNE_EDITOR_CHECK_FAILED" | "EDITORS_PRUNE_EDITOR_CHECK_UNAVAILABLE"
+    )
 }
 
 /// The proxy the CLI would use, as a display string for the network error
@@ -3535,6 +3947,153 @@ fn push_environment_report(out: &mut String, info: &EnvironmentInfo) {
     }
 }
 
+/// Maps the CLI's report into the page/dialog shape. Every size and reason
+/// comes from the CLI document; only formatting happens here.
+fn prune_report_vm(report: &PruneReport) -> PruneReportVm {
+    PruneReportVm {
+        unused: report
+            .editors
+            .iter()
+            .map(|candidate| {
+                prune_candidate_vm(candidate, "Reported unused by `unity editors prune`.")
+            })
+            .collect(),
+        missing: report
+            .missing
+            .iter()
+            .map(|candidate| {
+                prune_candidate_vm(
+                    candidate,
+                    "Reported missing by `unity editors prune --remove-missing`.",
+                )
+            })
+            .collect(),
+        reclaimable: format_bytes(report.total),
+        removed: report.removed,
+    }
+}
+
+fn prune_candidate_vm(candidate: &PruneCandidate, fallback_reason: &str) -> PruneCandidateVm {
+    let size = candidate
+        .size
+        .clone()
+        .map(|size| size.trim().to_string())
+        .filter(|size| !size.is_empty())
+        .or_else(|| (candidate.bytes > 0).then(|| format_bytes(candidate.bytes)));
+    let reason = candidate
+        .reason
+        .clone()
+        .map(|reason| reason.trim().to_string())
+        .filter(|reason| !reason.is_empty())
+        .or_else(|| {
+            candidate
+                .status
+                .clone()
+                .filter(|status| !matches!(status.as_str(), "kept" | "removed"))
+        })
+        .unwrap_or_else(|| fallback_reason.to_string());
+
+    PruneCandidateVm {
+        version: candidate.version.clone(),
+        architecture: candidate.architecture.clone(),
+        path: candidate.path.clone(),
+        size,
+        reason,
+    }
+}
+
+/// Names every candidate in a confirmation, so the checkbox says exactly what
+/// the button will do.
+fn candidate_names(candidates: &[PruneCandidateVm]) -> String {
+    candidates
+        .iter()
+        .map(|candidate| {
+            let build = if candidate.architecture.trim().is_empty() {
+                "host build".to_string()
+            } else {
+                candidate.architecture.clone()
+            };
+            match &candidate.size {
+                Some(size) => format!("Unity {} ({build}, {size})", candidate.version),
+                None => format!("Unity {} ({build})", candidate.version),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn plural(count: usize) -> &'static str {
+    if count == 1 {
+        ""
+    } else {
+        "s"
+    }
+}
+
+fn verify_result_vm(read: &EditorVerifyRead) -> VerifyResultVm {
+    let report = &read.report;
+    let checks: Vec<VerifyCheckVm> = report.components.iter().map(verify_check_vm).collect();
+    let failed_count = checks
+        .iter()
+        .filter(|check| check.status == CheckStatus::Fail)
+        .count();
+    let repair_command = report
+        .command
+        .clone()
+        .map(|command| command.trim().to_string())
+        .filter(|command| !command.is_empty())
+        .or_else(|| checks.iter().find_map(|check| check.repair_command.clone()));
+
+    VerifyResultVm {
+        version: report.version.clone(),
+        architecture: report.architecture.clone(),
+        ok: report.ok,
+        checks,
+        failed_count,
+        repair_command,
+        raw: read.raw.clone(),
+    }
+}
+
+fn verify_check_vm(component: &VerifyComponent) -> VerifyCheckVm {
+    let component_name = component.component.trim();
+    let label = if component_name.is_empty() {
+        if component.kind.trim().is_empty() {
+            "Component".to_string()
+        } else {
+            humanize_identifier(&component.kind)
+        }
+    } else {
+        component_name.to_string()
+    };
+
+    VerifyCheckVm {
+        component: label,
+        kind: humanize_identifier(&component.kind),
+        status: verify_status(&component.status),
+        path: component
+            .path
+            .clone()
+            .map(|path| path.trim().to_string())
+            .filter(|path| !path.is_empty()),
+        repair_command: component
+            .command
+            .clone()
+            .map(|command| command.trim().to_string())
+            .filter(|command| !command.is_empty()),
+    }
+}
+
+fn verify_status(status: &str) -> CheckStatus {
+    match status.trim().to_ascii_lowercase().as_str() {
+        "ok" | "pass" => CheckStatus::Pass,
+        "missing" | "fail" => CheckStatus::Fail,
+        "skipped" | "warn" => CheckStatus::Warn,
+        "info" => CheckStatus::Info,
+        _ => CheckStatus::Unknown,
+    }
+}
+
 fn editor_row_vm(editor: &Editor) -> EditorRowVm {
     EditorRowVm {
         version: editor.version.clone(),
@@ -3749,7 +4308,7 @@ async fn load_changelog_future(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use unity_core::models::CliVersion;
+    use unity_core::models::{CliVersion, VerifyReport};
 
     fn project(title: &str, path: &str, version: &str) -> Project {
         Project {
@@ -4057,6 +4616,401 @@ mod tests {
             .args
             .windows(2)
             .any(|pair| pair == ["--architecture", "arm64"]));
+    }
+
+    // ------------------------------------------------------------------
+    // Editor maintenance: prune, verify, default
+
+    /// A harmless executable for tests that must reach `start_job`. Never the
+    /// real `unity` binary: no test may run a CLI mutation.
+    fn startable_cli() -> PathBuf {
+        #[cfg(windows)]
+        {
+            PathBuf::from("cmd.exe")
+        }
+        #[cfg(not(windows))]
+        {
+            PathBuf::from("/bin/sh")
+        }
+    }
+
+    fn prune_candidate(version: &str, architecture: &str, bytes: u64) -> PruneCandidate {
+        PruneCandidate {
+            version: version.to_string(),
+            architecture: architecture.to_string(),
+            path: format!("/home/ada/Unity/{version}"),
+            bytes,
+            ..PruneCandidate::default()
+        }
+    }
+
+    fn prune_report() -> PruneReport {
+        PruneReport {
+            removed: false,
+            editors: vec![
+                prune_candidate("6000.3.27f2", "x86_64", 8_688_108_322),
+                prune_candidate("2022.3.10f1", "arm64", 5_690_000_000),
+            ],
+            total: 13_400_000_000,
+            missing: vec![PruneCandidate {
+                version: "6000.0.0b1".to_string(),
+                architecture: "x86_64".to_string(),
+                path: "/gone/6000.0.0b1".to_string(),
+                ..PruneCandidate::default()
+            }],
+        }
+    }
+
+    fn verify_read(ok: bool) -> EditorVerifyRead {
+        EditorVerifyRead {
+            report: VerifyReport {
+                version: "6000.6.6f1".to_string(),
+                architecture: "arm64".to_string(),
+                ok,
+                components: vec![
+                    VerifyComponent {
+                        component: "editor".to_string(),
+                        kind: "editor".to_string(),
+                        status: "ok".to_string(),
+                        path: Some("/home/ada/Unity/6000.6.6f1/Editor/Unity".to_string()),
+                        ..VerifyComponent::default()
+                    },
+                    VerifyComponent {
+                        component: "windows-mono".to_string(),
+                        kind: "module".to_string(),
+                        status: "missing".to_string(),
+                        path: Some("/home/ada/Unity/6000.6.6f1/WindowsSupport".to_string()),
+                        command: Some(
+                            "unity install-modules --editor-version 6000.6.6f1 --architecture arm64 -m windows-mono --yes"
+                                .to_string(),
+                        ),
+                        ..VerifyComponent::default()
+                    },
+                    VerifyComponent {
+                        component: "ios".to_string(),
+                        kind: "module".to_string(),
+                        status: "skipped".to_string(),
+                        ..VerifyComponent::default()
+                    },
+                ],
+                ..VerifyReport::default()
+            },
+            raw: "{\"success\":false,\"data\":{\"ok\":false}}".to_string(),
+        }
+    }
+
+    #[test]
+    fn prune_commands_are_report_only_until_a_removal_is_explicit() {
+        let app = connected_app("1.0.0-beta.17");
+        app.cli.set_override_path(Some(temporary_cli()));
+
+        let report = app.cli.editors_prune_report_spec().expect("report spec");
+        assert_eq!(
+            &report.args[..3],
+            &[
+                "editors".to_string(),
+                "prune".to_string(),
+                "--remove-missing".to_string()
+            ]
+        );
+        assert!(!report.args.iter().any(|arg| arg == "--remove"));
+        assert!(!report.args.iter().any(|arg| arg == "--yes"));
+        assert!(report
+            .args
+            .windows(2)
+            .any(|pair| pair == ["--format", "json"]));
+
+        let remove = app
+            .cli
+            .editors_prune_remove_spec(false)
+            .expect("remove spec");
+        assert_eq!(
+            &remove.args[..4],
+            &[
+                "editors".to_string(),
+                "prune".to_string(),
+                "--remove".to_string(),
+                "--yes".to_string()
+            ]
+        );
+        assert!(remove
+            .args
+            .windows(2)
+            .any(|pair| pair == ["--format", "ndjson"]));
+
+        let forced = app
+            .cli
+            .editors_prune_remove_spec(true)
+            .expect("forced remove spec");
+        assert!(forced.args.iter().any(|arg| arg == "--force"));
+
+        let missing = app
+            .cli
+            .editors_prune_remove_missing_spec()
+            .expect("missing spec");
+        assert!(missing.args.iter().any(|arg| arg == "--remove-missing"));
+        assert!(!missing.args.iter().any(|arg| arg == "--remove"));
+        assert!(missing.args.iter().any(|arg| arg == "--yes"));
+    }
+
+    #[test]
+    fn cancelling_the_prune_review_removes_nothing() {
+        let mut app = connected_app("1.0.0-beta.17");
+        app.cli.set_override_path(Some(startable_cli()));
+        app.editors.data = Some(vec![editor("6000.1.1f1", "x86_64", false)]);
+
+        let _ = app.update(Message::OpenPrune);
+        assert!(matches!(app.modal, Modal::PruneEditors));
+        assert!(app.prune.loading);
+
+        let _ = app.update(Message::CloseModal);
+
+        assert!(matches!(app.modal, Modal::None));
+        assert!(
+            app.active_job.is_none(),
+            "closing the review must not start a removal"
+        );
+    }
+
+    #[test]
+    fn prune_requires_its_own_confirmation_and_names_the_candidates() {
+        let mut app = connected_app("1.0.0-beta.17");
+        app.cli.set_override_path(Some(startable_cli()));
+        app.prune.data = Some(prune_report());
+        app.modal = Modal::PruneEditors;
+
+        let _ = app.update(Message::StartPruneRemove);
+        assert!(
+            app.active_job.is_none(),
+            "the unconfirmed button must remove nothing"
+        );
+
+        let _ = app.update(Message::PruneConfirmed(true));
+        let vm = app.view_model();
+        let Some(ModalVm::PruneEditors(prune)) = vm.modal else {
+            panic!("expected the prune dialog");
+        };
+        assert!(prune.can_remove);
+        assert_eq!(prune.remove_label, "Remove 2 unused Editors (12.5 GB)");
+        assert!(
+            prune.confirm_label.contains("6000.3.27f2"),
+            "{}",
+            prune.confirm_label
+        );
+        assert!(
+            prune.confirm_label.contains("2022.3.10f1"),
+            "{}",
+            prune.confirm_label
+        );
+        assert!(prune.remove_command.contains("--remove"));
+        assert!(!prune.remove_command.contains("--force"));
+
+        let _ = app.update(Message::StartPruneRemove);
+        let job = app.active_job.as_ref().expect("confirmed removal starts");
+        assert_eq!(job.kind, "editor-prune");
+        assert!(job.command.contains("--remove"));
+    }
+
+    #[test]
+    fn remove_missing_is_a_separate_registry_only_action() {
+        let mut app = connected_app("1.0.0-beta.17");
+        app.cli.set_override_path(Some(startable_cli()));
+        app.prune.data = Some(prune_report());
+        app.modal = Modal::PruneEditors;
+
+        let _ = app.update(Message::StartPruneRemoveMissing);
+        assert!(app.active_job.is_none());
+
+        let _ = app.update(Message::PruneMissingConfirmed(true));
+        let vm = app.view_model();
+        let Some(ModalVm::PruneEditors(prune)) = vm.modal else {
+            panic!("expected the prune dialog");
+        };
+        assert!(prune.can_remove_missing);
+        assert!(
+            prune.missing_label.contains("no files deleted"),
+            "{}",
+            prune.missing_label
+        );
+        assert!(prune.missing_command.contains("--remove-missing"));
+        assert!(!prune.missing_command.contains("--remove "));
+        assert!(
+            !prune.can_remove,
+            "the missing confirmation is not the file one"
+        );
+
+        let _ = app.update(Message::StartPruneRemoveMissing);
+        let job = app.active_job.as_ref().expect("confirmed registry action");
+        assert_eq!(job.kind, "editor-prune-missing");
+    }
+
+    #[test]
+    fn force_is_only_offered_after_a_failed_running_editor_check() {
+        let mut app = connected_app("1.0.0-beta.17");
+        app.cli.set_override_path(Some(startable_cli()));
+        app.prune.data = Some(prune_report());
+        app.modal = Modal::PruneEditors;
+
+        let _ = app.update(Message::PruneForceToggled(true));
+        assert!(!app.prune_force, "force must not be selectable up front");
+
+        app.prune_force_available = true;
+        let _ = app.update(Message::PruneForceToggled(true));
+        assert!(app.prune_force);
+        let vm = app.view_model();
+        let Some(ModalVm::PruneEditors(prune)) = vm.modal else {
+            panic!("expected the prune dialog");
+        };
+        assert!(prune.remove_command.contains("--force"));
+
+        assert!(prune_force_available_for(&UnityError::new(
+            "EDITORS_PRUNE_EDITOR_CHECK_FAILED",
+            "Could not detect running Editors."
+        )));
+        assert!(prune_force_available_for(&UnityError::new(
+            "EDITORS_PRUNE_EDITOR_CHECK_UNAVAILABLE",
+            "Could not detect running Editors."
+        )));
+        assert!(!prune_force_available_for(&UnityError::new(
+            "INSTALL_LOCKED",
+            "Another process holds the lock."
+        )));
+    }
+
+    #[test]
+    fn prune_report_maps_every_candidate_from_the_cli_document() {
+        let (mut app, _) = App::boot();
+        app.page = Page::Editors;
+        app.prune.data = Some(prune_report());
+
+        let vm = app.view_model();
+        let PageVm::Editors(editors) = &vm.page else {
+            panic!("expected the Editors page");
+        };
+        let report = editors.prune.data().expect("prune report");
+        assert_eq!(report.unused.len(), 2);
+        assert_eq!(report.unused[0].version, "6000.3.27f2");
+        assert_eq!(report.unused[0].architecture, "x86_64");
+        assert_eq!(report.unused[0].size.as_deref(), Some("8.1 GB"));
+        assert!(report.unused[0].reason.contains("unused"));
+        assert_eq!(report.reclaimable, "12.5 GB");
+        assert_eq!(report.missing.len(), 1);
+        assert_eq!(report.missing[0].size, None);
+        assert!(report.missing[0].reason.contains("missing"));
+        assert!(!report.removed);
+    }
+
+    #[test]
+    fn verifying_two_builds_targets_the_clicked_build_or_nothing() {
+        let (mut app, _) = App::boot();
+        app.editors.data = Some(vec![
+            editor("6000.1.1f1", "arm64", false),
+            editor("6000.1.1f1", "x86_64", false),
+        ]);
+
+        let _ = app.update(Message::OpenVerify(
+            "6000.1.1f1".to_string(),
+            "x86_64".to_string(),
+        ));
+        let Modal::VerifyEditor {
+            version,
+            architecture,
+        } = &app.modal
+        else {
+            panic!("expected the verify dialog");
+        };
+        assert_eq!(version, "6000.1.1f1");
+        assert_eq!(architecture, "x86_64");
+        assert_eq!(
+            app.retry_targets.get("read:editor-verify"),
+            Some(&RetryRequest::EditorVerify {
+                version: "6000.1.1f1".to_string(),
+                architecture: "x86_64".to_string(),
+            })
+        );
+
+        // A stale action naming a build this version never had must not verify
+        // the other build.
+        let _ = app.update(Message::OpenVerify(
+            "6000.1.1f1".to_string(),
+            "ppc64".to_string(),
+        ));
+        let Modal::VerifyEditor { architecture, .. } = &app.modal else {
+            panic!("the original dialog stays open");
+        };
+        assert_eq!(architecture, "x86_64");
+    }
+
+    #[test]
+    fn verify_results_map_status_path_and_raw_log() {
+        let (mut app, _) = App::boot();
+        app.verify.data = Some(verify_read(false));
+        app.verify_show_raw = true;
+        app.modal = Modal::VerifyEditor {
+            version: "6000.6.6f1".to_string(),
+            architecture: "arm64".to_string(),
+        };
+
+        let vm = app.view_model();
+        let Some(ModalVm::VerifyEditor(verify)) = vm.modal else {
+            panic!("expected the verify dialog");
+        };
+        assert!(verify.show_raw);
+        let result = verify.state.data().expect("verify result");
+        assert!(!result.ok);
+        assert_eq!(result.failed_count, 1);
+        assert_eq!(result.checks[0].status, CheckStatus::Pass);
+        assert_eq!(result.checks[1].status, CheckStatus::Fail);
+        assert_eq!(result.checks[2].status, CheckStatus::Warn);
+        assert_eq!(
+            result.checks[1].path.as_deref(),
+            Some("/home/ada/Unity/6000.6.6f1/WindowsSupport")
+        );
+        assert!(result.checks[1].repair_command.is_some());
+        assert_eq!(
+            result.repair_command.as_deref(),
+            result.checks[1].repair_command.as_deref()
+        );
+        assert!(result.raw.contains("\"ok\":false"));
+    }
+
+    #[test]
+    fn clearing_the_default_leaves_no_badge_and_set_targets_the_build() {
+        let mut app = connected_app("1.0.0-beta.17");
+        app.cli.set_override_path(Some(startable_cli()));
+        app.page = Page::Editors;
+        app.editors.data = Some(vec![editor("6000.1.1f1", "arm64", true)]);
+
+        let vm = app.view_model();
+        let PageVm::Editors(editors) = &vm.page else {
+            panic!("expected the Editors page");
+        };
+        assert!(editors.installed.data().unwrap()[0].is_default);
+
+        let _ = app.update(Message::SetDefaultEditor(
+            "6000.1.1f1".to_string(),
+            "arm64".to_string(),
+        ));
+        let job = app.active_job.as_ref().expect("set default job");
+        assert_eq!(job.kind, "editor-default");
+        assert!(job.command.contains("--architecture"));
+        assert!(job.command.contains("arm64"));
+
+        app.active_job = None;
+        let _ = app.update(Message::ClearDefaultEditor);
+        let job = app.active_job.as_ref().expect("clear default job");
+        assert_eq!(job.kind, "editor-default");
+        assert!(job.command.contains("editors default --unset"));
+
+        // The refreshed list the CLI will return has no default row, so the
+        // page shows no badge.
+        app.active_job = None;
+        app.editors.data = Some(vec![editor("6000.1.1f1", "arm64", false)]);
+        let vm = app.view_model();
+        let PageVm::Editors(editors) = &vm.page else {
+            panic!("expected the Editors page");
+        };
+        assert!(!editors.installed.data().unwrap()[0].is_default);
     }
 
     #[test]
