@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
+use crate::advisory::{advisories_from_envelope, AdvisorySink, CliAdvisory};
 use crate::envelope::{parse_data, parse_envelope, parse_items, ValueEnvelope};
 use crate::errors::{message_for_exit_code, UnityError};
 use crate::models::{
@@ -160,6 +161,10 @@ impl UnityCli {
             err.exit_code = exit_code;
             err
         })?;
+
+        // Collect before the success check: a failed envelope can still carry
+        // the advisory that explains or fixes the failure.
+        self.advisories.push(advisories_from_envelope(&envelope));
 
         if require_success && !envelope.success {
             return Err(envelope_error(&envelope, &stderr, exit_code));
@@ -629,6 +634,7 @@ pub struct Executed {
 #[derive(Clone)]
 pub struct UnityCli {
     override_path: Arc<RwLock<Option<PathBuf>>>,
+    advisories: AdvisorySink,
 }
 
 #[derive(Debug, Clone)]
@@ -647,7 +653,18 @@ impl UnityCli {
     pub fn new() -> Self {
         Self {
             override_path: Arc::new(RwLock::new(None)),
+            advisories: AdvisorySink::default(),
         }
+    }
+
+    /// The sink every read and streamed job reports advisories to.
+    pub fn advisory_sink(&self) -> AdvisorySink {
+        self.advisories.clone()
+    }
+
+    /// Drains the advisories collected since the last call.
+    pub fn take_advisories(&self) -> Vec<CliAdvisory> {
+        self.advisories.drain()
     }
 
     pub fn set_override_path(&self, path: Option<PathBuf>) {
@@ -1360,6 +1377,29 @@ mod tests {
         assert!(!executed.envelope.success);
         assert!(executed.envelope.data.is_some());
         assert!(cli.execute(&spec).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn execute_collects_advisories_even_from_a_failed_envelope() {
+        let spec = CommandSpec::new(
+            "sh",
+            svec(&[
+                "-c",
+                r#"printf '%s' '{"success":false,"errors":[{"code":"AUTH_ERROR","message":"signed out"}],"warnings":["Beta plugin."],"notifications":[{"code":"CLI_UPDATE_AVAILABLE","message":"Update available.","data":{"current":"1.0.0-beta.16","latest":"1.0.0-beta.17"}}]}'"#,
+            ]),
+        );
+        let cli = UnityCli::new();
+
+        let error = cli.execute(&spec).expect_err("the envelope failed");
+        assert_eq!(error.code, "AUTH_ERROR");
+
+        let advisories = cli.take_advisories();
+        assert_eq!(advisories.len(), 2);
+        assert_eq!(advisories[0].code.as_deref(), Some("CLI_UPDATE_AVAILABLE"));
+        assert_eq!(advisories[1].message, "Beta plugin.");
+        // Draining twice never duplicates the advisory.
+        assert!(cli.take_advisories().is_empty());
     }
 
     /// The AppImage runtime exports APPIMAGE/APPDIR/OWD/ARGV0 for the AppImage

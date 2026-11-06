@@ -2,7 +2,7 @@ use iced::widget::{button, column, container, row, space};
 use iced::{Center, Element, Fill, Padding};
 
 use unity_hub_model::{
-    CliConnectionVm, JobPhase, JobVm, NoticeVm, Page, Tone, UiAction, ViewModel,
+    AdvisoryVm, CliConnectionVm, JobPhase, JobVm, NoticeVm, Page, Tone, UiAction, ViewModel,
 };
 
 use crate::components::{self, badge, icon_tile, notice, scroll, status_dot, ButtonKind};
@@ -30,6 +30,12 @@ pub fn view(vm: &ViewModel) -> Element<'_, UiAction> {
 
     if let Some(notice) = &vm.shell.notice {
         content = content.push(notice_view(notice));
+    }
+
+    // Advisories sit above the transient notice: they come from the CLI itself
+    // and stay until dismissed or the CLI version changes.
+    for advisory in &vm.shell.advisories {
+        content = content.push(advisory_view(advisory));
     }
 
     content = content.push(pages::view(&vm.page));
@@ -179,6 +185,91 @@ fn notice_view(notice_vm: &NoticeVm) -> Element<'_, UiAction> {
         ]
         .spacing(10)
         .align_y(Center),
+    )
+}
+
+/// A CLI advisory: title, the CLI's message, per-code detail, and the exact
+/// remediation command with Copy plus an explicit Run. Never a modal.
+fn advisory_view(advisory: &AdvisoryVm) -> Element<'_, UiAction> {
+    let glyph = match advisory.tone {
+        Tone::Success => icons::CIRCLE_CHECK,
+        Tone::Danger => icons::CIRCLE_ALERT,
+        Tone::Warning => icons::TRIANGLE_ALERT,
+        _ => icons::INFO,
+    };
+
+    let mut body = column![
+        // The message is the CLI's localized text; the title is the app's
+        // neutral label for the code.
+        text(advisory.title.as_str())
+            .size(font::BODY)
+            .font(fonts::SEMIBOLD),
+        text(advisory.message.as_str()).size(font::BODY),
+    ]
+    .spacing(4);
+
+    if let Some(detail) = &advisory.detail {
+        body = body.push(
+            text(detail.as_str())
+                .size(font::MONO)
+                .font(fonts::MONO)
+                .style(theme::muted_text),
+        );
+    }
+
+    if let Some(command) = &advisory.command {
+        let mut actions = row![
+            icon(icons::TERMINAL, font::ICON_SMALL).style(theme::faint_text),
+            text(command.as_str())
+                .size(font::MONO)
+                .font(fonts::MONO)
+                .width(Fill),
+            components::icon_button(icons::COPY, "Copy", ButtonKind::Ghost)
+                .on_press(UiAction::CopyAdvisoryCommand(advisory.id.clone()))
+                .padding(components::COMPACT),
+        ]
+        .spacing(8)
+        .align_y(Center);
+
+        // Run only appears when the adapter has an explicit builder; the
+        // controller still refuses anything that is not an advisory click.
+        if let Some(label) = &advisory.run_label {
+            actions = actions.push(
+                components::button(label.as_str(), ButtonKind::Primary)
+                    .on_press(UiAction::RunAdvisoryRemediation(advisory.id.clone()))
+                    .padding(components::COMPACT),
+            );
+        }
+
+        body = body.push(
+            container(actions)
+                .padding([10.0, 12.0])
+                .width(Fill)
+                .style(theme::inset),
+        );
+        body = body.push(components::hint(if advisory.requires_approval {
+            "Runs only when you click; the app never executes a remediation by itself."
+        } else {
+            "The app never runs this command by itself."
+        }));
+    }
+
+    let mut trailing = row![];
+    if advisory.dismissible {
+        trailing = trailing.push(
+            button(icon(icons::X, font::ICON_SMALL))
+                .on_press(UiAction::DismissAdvisory(advisory.id.clone()))
+                .padding(6)
+                .style(theme::button_ghost),
+        );
+    }
+
+    notice(
+        advisory.tone,
+        glyph,
+        row![body.width(Fill), trailing]
+            .spacing(10)
+            .align_y(iced::Alignment::Start),
     )
 }
 

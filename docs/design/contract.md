@@ -62,6 +62,18 @@ fixture when a new state needs review.
 - Sidebar footer: CLI status (checking / connected with version / missing).
 - Page header: title, subtitle, and actions (Refresh on Overview, Editors,
   Projects).
+- Advisory banners (above the notice), sourced from the CLI's `notifications[]`
+  and `warnings[]` on any read or streamed job result frame:
+  - CLI update available: neutral title, CLI message, `current → latest`, the
+    exact `unity self-update` command, Copy, and a Run button (click only).
+  - Plugin update available: same shape with `plugin · current → latest` and a
+    copy-only command until the Plugins page supplies a builder.
+  - Plugin beta / deprecated-flag warning: warning tone, CLI text verbatim, no
+    invented action.
+  - Unknown notification code or object-shaped warning: neutral title, CLI
+    message verbatim.
+  - Dismissed: hidden for the current CLI version (an info notice confirms).
+  - Every banner is dismissible and never blocks the screen.
 - Notice banner: info, success, error.
 - Job card: running with progress, succeeded, failed with error detail,
   cancelled, with collapsible-looking log area.
@@ -120,6 +132,32 @@ fixture when a new state needs review.
   disabled/enabled install.
 - Project upgrade: current version/path, target picker, no target installed
   warning, confirmation, disabled/enabled upgrade.
+
+## Advisory contract
+
+`ShellVm::advisories: Vec<AdvisoryVm>` is the single surface every CLI advisory
+uses; later pages (#7 install resilience, #9 plugins) reuse it instead of
+drawing their own banners.
+
+- `AdvisoryVm { id, tone, title, message, detail, command, run_label,
+  requires_approval, dismissible }`.
+- `message` is always the CLI's own (localized) text. The controller derives
+  `title` and `detail` only for documented codes (`CLI_UPDATE_AVAILABLE`,
+  `PLUGIN_UPDATE_AVAILABLE`, `FEX_EMU_EXPERIMENTAL`,
+  `AGENT_PLUGIN_AVAILABLE`); unknown codes and warnings keep the CLI text and a
+  neutral title.
+- `id` is the adapter's stable identity: origin + `code` + the documented
+  stable `data` fields (update/plugin versions, plugin id). Plain warnings use
+  their text. The controller dedupes on it, so a polled refresh cannot stack
+  identical banners.
+- Dismissal is persisted in `settings.json` as
+  `dismissedAdvisories: { "<cli version>": ["<id>", …] }`. A CLI version change
+  drops the stored list and the old dismissals, so the new version shows its
+  advisory once.
+- `UiAction::DismissAdvisory(id)`, `UiAction::CopyAdvisoryCommand(id)` (clipboard
+  only), and `UiAction::RunAdvisoryRemediation(id)`. Run exists only when the
+  adapter has an explicit command builder; otherwise the command is
+  visible/copyable and no button is drawn.
 
 ## Platform constraints to design around
 

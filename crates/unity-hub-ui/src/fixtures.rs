@@ -4,12 +4,12 @@
 //! surface a designer can review without a Unity installation.
 
 use unity_hub_model::{
-    AccountCardVm, AuthVm, BadgeVm, BreakingChangeVm, ChangelogDataVm, ChangelogSectionVm,
-    ChangelogVm, CliCardVm, CliConnectionVm, CliDetailsVm, EditorModulesVm, EditorRowVm, EditorsVm,
-    InstallCliVm, InstallEditorVm, JobLogVm, JobPhase, JobVm, LicenseRowVm, LicenseVm, LoadState,
-    ModalVm, ModuleOptionVm, OverviewVm, Page, PageVm, ProjectRowVm, ProjectsVm, ReleaseRowVm,
-    RunningEditorVm, SectionKind, SettingsVm, ShellVm, TextScaleOptionVm, Tone, UiError, UpdateVm,
-    UpgradeProjectVm, ViewModel,
+    AccountCardVm, AdvisoryVm, AuthVm, BadgeVm, BreakingChangeVm, ChangelogDataVm,
+    ChangelogSectionVm, ChangelogVm, CliCardVm, CliConnectionVm, CliDetailsVm, EditorModulesVm,
+    EditorRowVm, EditorsVm, InstallCliVm, InstallEditorVm, JobLogVm, JobPhase, JobVm, LicenseRowVm,
+    LicenseVm, LoadState, ModalVm, ModuleOptionVm, NoticeVm, OverviewVm, Page, PageVm,
+    ProjectRowVm, ProjectsVm, ReleaseRowVm, RunningEditorVm, SectionKind, SettingsVm, ShellVm,
+    TextScaleOptionVm, Tone, UiError, UpdateVm, UpgradeProjectVm, ViewModel,
 };
 
 pub struct Fixture {
@@ -30,6 +30,22 @@ pub fn all() -> Vec<Fixture> {
         Fixture {
             name: "Overview · load error",
             view_model: overview_error(),
+        },
+        Fixture {
+            name: "Advisory · CLI update",
+            view_model: advisory_update(),
+        },
+        Fixture {
+            name: "Advisory · plugin beta warning",
+            view_model: advisory_plugin_beta(),
+        },
+        Fixture {
+            name: "Advisory · unknown code",
+            view_model: advisory_unknown(),
+        },
+        Fixture {
+            name: "Advisory · dismissed",
+            view_model: advisory_dismissed(),
         },
         Fixture {
             name: "Editors",
@@ -76,6 +92,7 @@ fn shell(page: Page) -> ShellVm {
         cli: CliConnectionVm::Connected {
             version: Some("1.0.0-beta.17".to_string()),
         },
+        advisories: Vec::new(),
         notice: None,
         job: None,
     }
@@ -452,6 +469,64 @@ fn job_running() -> ViewModel {
             is_stderr: false,
             text: "downloaded 4.2 GB of 9.8 GB".to_string(),
         }],
+    });
+    vm
+}
+
+fn advisory_update() -> ViewModel {
+    let mut vm = overview();
+    vm.shell.advisories = vec![AdvisoryVm {
+        id: "notification:CLI_UPDATE_AVAILABLE:current=1.0.0-beta.16:latest=1.0.0-beta.17"
+            .to_string(),
+        tone: Tone::Accent,
+        title: "CLI update available".to_string(),
+        message: "A new Unity CLI is available.".to_string(),
+        detail: Some("1.0.0-beta.16 → 1.0.0-beta.17".to_string()),
+        command: Some("unity self-update".to_string()),
+        run_label: Some("Update CLI".to_string()),
+        requires_approval: true,
+        dismissible: true,
+    }];
+    vm
+}
+
+fn advisory_plugin_beta() -> ViewModel {
+    let mut vm = editors();
+    vm.shell.advisories = vec![AdvisoryVm {
+        id: "warning:This plugin is a beta release.".to_string(),
+        tone: Tone::Warning,
+        title: "CLI warning".to_string(),
+        message: "This plugin is a beta release. Beta plugins can break projects.".to_string(),
+        detail: None,
+        command: None,
+        run_label: None,
+        requires_approval: false,
+        dismissible: true,
+    }];
+    vm
+}
+
+fn advisory_unknown() -> ViewModel {
+    let mut vm = overview();
+    vm.shell.advisories = vec![AdvisoryVm {
+        id: "notification:FUTURE_CODE:Something new happened.".to_string(),
+        tone: Tone::Info,
+        title: "Advisory".to_string(),
+        message: "Something new happened. This CLI is newer than the app.".to_string(),
+        detail: None,
+        command: None,
+        run_label: None,
+        requires_approval: false,
+        dismissible: true,
+    }];
+    vm
+}
+
+fn advisory_dismissed() -> ViewModel {
+    let mut vm = overview();
+    vm.shell.notice = Some(NoticeVm {
+        tone: Tone::Info,
+        text: "Advisory dismissed for this CLI version.".to_string(),
     });
     vm
 }

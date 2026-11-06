@@ -4,6 +4,7 @@
 //! envelopes are shaped, and how to turn CLI failures into structured errors.
 //! It has no UI toolkit dependency, so it can be tested on its own.
 
+pub mod advisory;
 pub mod bootstrap;
 pub mod changelog;
 pub mod envelope;
@@ -12,5 +13,6 @@ pub mod models;
 pub mod runner;
 pub mod versions;
 
+pub use advisory::{AdvisoryOrigin, AdvisorySink, CliAdvisory};
 pub use errors::UnityError;
 pub use runner::{scrub_appimage_env, CommandSpec, Executed, UnityCli};

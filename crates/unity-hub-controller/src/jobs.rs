@@ -7,6 +7,7 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
+use unity_core::advisory::{advisories_from_value, AdvisorySink, CliAdvisory};
 use unity_core::envelope::CliEnvelope;
 use unity_core::errors::{code_for_exit_code, message_for_exit_code};
 use unity_core::{scrub_appimage_env, CommandSpec, UnityError};
@@ -59,6 +60,7 @@ pub struct JobStarted {
 pub struct JobManager {
     inner: Arc<Mutex<Inner>>,
     counter: Arc<AtomicU64>,
+    advisories: AdvisorySink,
 }
 
 impl Hash for JobManager {
@@ -82,6 +84,12 @@ struct Handle {
 
 impl JobManager {
     pub fn new() -> Self {
+        Self::with_sink(AdvisorySink::default())
+    }
+
+    /// Builds a manager whose streamed advisory frames land in `sink`, normally
+    /// the same sink the CLI adapter's reads use.
+    pub fn with_sink(advisories: AdvisorySink) -> Self {
         Self {
             inner: Arc::new(Mutex::new(Inner {
                 events: VecDeque::new(),
@@ -89,7 +97,13 @@ impl JobManager {
                 notifier: None,
             })),
             counter: Arc::new(AtomicU64::new(0)),
+            advisories,
         }
+    }
+
+    /// Drains advisories reported by result frames since the last call.
+    pub fn take_advisories(&self) -> Vec<CliAdvisory> {
+        self.advisories.drain()
     }
 
     pub fn start(&self, kind: &str, spec: CommandSpec) -> Result<JobStarted, UnityError> {
@@ -180,6 +194,9 @@ impl JobManager {
                     if let Some(result) = &parsed.result {
                         last_result = Some(result.clone());
                     }
+                    // Warnings on the terminal frame belong to the job card,
+                    // not only to the raw log.
+                    manager.advisories.push(parsed.advisories);
                     manager.push(JobEvent {
                         job_id: task_id.clone(),
                         state: JobState::Running,
@@ -318,23 +335,23 @@ struct ParsedLine {
     progress: Option<f32>,
     message: Option<String>,
     result: Option<Value>,
+    advisories: Vec<CliAdvisory>,
 }
 
 fn parse_stdout(line: &str) -> ParsedLine {
+    let empty = || ParsedLine {
+        progress: None,
+        message: None,
+        result: None,
+        advisories: Vec::new(),
+    };
+
     let Ok(value) = serde_json::from_str::<Value>(line) else {
-        return ParsedLine {
-            progress: None,
-            message: None,
-            result: None,
-        };
+        return empty();
     };
 
     let Value::Object(object) = &value else {
-        return ParsedLine {
-            progress: None,
-            message: None,
-            result: None,
-        };
+        return empty();
     };
 
     let is_result = object.get("type").and_then(Value::as_str) == Some("result")
@@ -344,8 +361,20 @@ fn parse_stdout(line: &str) -> ParsedLine {
     ParsedLine {
         progress: progress_from(object).map(|value| value as f32),
         message: message_from(object),
-        result: is_result.then_some(value),
+        result: is_result.then(|| value.clone()),
+        advisories: if is_result {
+            result_frame_advisories(&value)
+        } else {
+            Vec::new()
+        },
     }
+}
+
+/// Parses the advisories of a streamed `result` frame with the same typed
+/// arrays the synchronous reads use. The frame does not need to be a complete
+/// envelope for its advisories to reach the shell.
+fn result_frame_advisories(value: &Value) -> Vec<CliAdvisory> {
+    advisories_from_value(value)
 }
 
 fn progress_from(object: &serde_json::Map<String, Value>) -> Option<f64> {
@@ -531,6 +560,105 @@ mod tests {
         assert_eq!(error.code, "COMMAND_FAILED");
         assert_eq!(error.message, "The Unity CLI command failed.");
         assert_eq!(error.exit_code, Some(6));
+    }
+
+    #[test]
+    fn result_frame_warnings_and_notifications_become_advisories() {
+        let line = serde_json::json!({
+            "type": "result",
+            "success": true,
+            "data": { "plugin": "com.unity.ai" },
+            "warnings": ["This plugin is a beta release."],
+            "notifications": [{
+                "code": "PLUGIN_UPDATE_AVAILABLE",
+                "message": "A plugin update is available.",
+                "data": { "plugin": "com.unity.ai", "current": "1.0.0", "latest": "1.1.0" },
+                "remediation": { "command": "unity plugin upgrade com.unity.ai", "requiresUserApproval": true }
+            }]
+        })
+        .to_string();
+
+        let parsed = parse_stdout(&line);
+
+        assert!(parsed.result.is_some());
+        assert_eq!(parsed.advisories.len(), 2);
+        assert_eq!(
+            parsed.advisories[0].code.as_deref(),
+            Some("PLUGIN_UPDATE_AVAILABLE")
+        );
+        assert_eq!(
+            parsed.advisories[1].message,
+            "This plugin is a beta release."
+        );
+    }
+
+    #[test]
+    fn progress_frames_do_not_report_advisories() {
+        let parsed = parse_stdout(
+            &serde_json::json!({
+                "type": "progress",
+                "progress": 42.0,
+                "warnings": ["not a result frame"]
+            })
+            .to_string(),
+        );
+
+        assert!(parsed.advisories.is_empty());
+        assert_eq!(parsed.progress, Some(42.0));
+    }
+
+    #[test]
+    fn job_manager_hands_result_frame_advisories_to_its_sink() {
+        let sink = AdvisorySink::default();
+        let manager = JobManager::with_sink(sink.clone());
+        let frame = serde_json::json!({
+            "type": "result",
+            "success": true,
+            "warnings": ["Beta plugin."]
+        });
+        let parsed = parse_stdout(&frame.to_string());
+        manager.advisories.push(parsed.advisories);
+
+        let drained = sink.drain();
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0].message, "Beta plugin.");
+        assert!(manager.take_advisories().is_empty());
+    }
+
+    /// A streamed job that prints a terminal result frame must hand that
+    /// frame's warnings to the same sink reads use.
+    #[cfg(unix)]
+    #[test]
+    fn streamed_job_reports_terminal_frame_advisories() {
+        let sink = AdvisorySink::default();
+        let manager = JobManager::with_sink(sink.clone());
+        let spec = CommandSpec::new(
+            "sh",
+            vec![
+                "-c".to_string(),
+                r#"printf '%s' '{"type":"result","success":true,"warnings":["This plugin is a beta release."]}'"#
+                    .to_string(),
+            ],
+        );
+        let started = manager.start("plugin-install", spec).expect("job starts");
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let finished = manager.poll().iter().any(|event| {
+                event.job_id == started.id
+                    && matches!(event.state, JobState::Succeeded | JobState::Failed)
+            });
+            if finished {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "job did not finish");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        let advisories = manager.take_advisories();
+        assert_eq!(advisories.len(), 1);
+        assert_eq!(advisories[0].message, "This plugin is a beta release.");
+        assert!(sink.drain().is_empty());
     }
 
     /// Update jobs are CLI children like any other: inheriting the GUI's AppImage

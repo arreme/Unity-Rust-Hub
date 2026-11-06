@@ -87,6 +87,12 @@ update target.
   `CliChangelogProvider`. A remote JSON/docs feed can be added without changing the UI.
 - **Settings** — explicit CLI path override with auto-detection fallback and a persisted
   text-size setting (100%, 110%, 125%, 150%).
+- **CLI advisories** — `notifications[]` and `warnings[]` from every read and streamed
+  job appear as dismissible banners in the shell: update notices with current → latest,
+  plugin beta warnings, and unknown codes rendered with the CLI's own message. A
+  remediation command is always visible and copyable, and only runs after an explicit
+  click when the adapter has a builder for it. Dismissals are scoped to the CLI version,
+  so a refresh does not re-stack a banner but a new CLI shows it once.
 
 ## Stack
 
@@ -112,14 +118,14 @@ crates/unity-hub-model/     Stable presentation contract: view models, UiAction,
 crates/unity-hub-controller/ State, messages, update loop, jobs, settings, and
   src/app.rs                domain/CLI → view-model mapping.
   src/jobs.rs               Child processes, NDJSON progress, cancellation.
-  src/settings.rs           Persisted CLI path and text-size preference.
+  src/settings.rs           Persisted CLI path, text size, and advisory dismissals.
   src/util.rs               Serialized reader worker and display formatting.
 crates/unity-hub-ui/        Visual layer; depends only on unity-hub-model + iced.
   src/tokens.rs             Figma-mappable palette, spacing, radii, type tokens.
   src/theme.rs              iced theme/styles built from tokens.
   src/components.rs         Shared cards, badges, tables, headers.
   src/pages/                overview, editors, projects, changelog, settings.
-  src/shell.rs              Sidebar, notice and job cards.
+  src/shell.rs              Sidebar, advisory banners, notice and job cards.
   src/modals.rs             Full-screen dialog screens.
   src/fixtures.rs           Deterministic content for every screen/state.
   src/bin/gallery.rs        CLI-free design gallery.

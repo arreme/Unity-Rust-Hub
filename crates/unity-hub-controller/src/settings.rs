@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fmt;
 use std::path::PathBuf;
 
@@ -55,6 +56,11 @@ pub struct AppSettings {
     pub cli_path: Option<String>,
     #[serde(default = "default_text_scale_percent")]
     pub text_scale_percent: u16,
+    /// Dismissed advisory ids per CLI version. An advisory stays dismissed for
+    /// the life of one CLI version; a new version shows it once again because
+    /// the key no longer matches.
+    #[serde(default)]
+    pub dismissed_advisories: BTreeMap<String, Vec<String>>,
 }
 
 impl Default for AppSettings {
@@ -62,6 +68,7 @@ impl Default for AppSettings {
         Self {
             cli_path: None,
             text_scale_percent: default_text_scale_percent(),
+            dismissed_advisories: BTreeMap::new(),
         }
     }
 }
@@ -74,6 +81,34 @@ impl AppSettings {
     pub fn normalized(mut self) -> Self {
         self.text_scale_percent = normalize_text_scale_percent(self.text_scale_percent);
         self
+    }
+
+    pub fn is_advisory_dismissed(&self, cli_version: &str, id: &str) -> bool {
+        self.dismissed_advisories
+            .get(cli_version)
+            .is_some_and(|ids| ids.iter().any(|dismissed| dismissed == id))
+    }
+
+    /// Records a dismissal for the current CLI version and forgets older
+    /// versions' records so the settings file stays small.
+    pub fn dismiss_advisory(&mut self, cli_version: &str, id: &str) {
+        self.keep_advisories_for(cli_version);
+        let ids = self
+            .dismissed_advisories
+            .entry(cli_version.to_string())
+            .or_default();
+        if !ids.iter().any(|dismissed| dismissed == id) {
+            ids.push(id.to_string());
+        }
+    }
+
+    /// Keeps only `cli_version`'s dismissals. Returns whether anything changed
+    /// so callers can skip pointless writes.
+    pub fn keep_advisories_for(&mut self, cli_version: &str) -> bool {
+        let before = self.dismissed_advisories.len();
+        self.dismissed_advisories
+            .retain(|version, _| version == cli_version);
+        before != self.dismissed_advisories.len()
     }
 }
 
@@ -156,5 +191,53 @@ mod tests {
 
         let settings: AppSettings = serde_json::from_str("{}").unwrap();
         assert_eq!(settings.text_scale_percent, 100);
+        assert!(settings.dismissed_advisories.is_empty());
+    }
+
+    #[test]
+    fn dismissal_is_scoped_to_the_cli_version() {
+        let mut settings = AppSettings::default();
+        settings.dismiss_advisory("1.0.0-beta.16", "notification:CLI_UPDATE_AVAILABLE");
+
+        assert!(
+            settings.is_advisory_dismissed("1.0.0-beta.16", "notification:CLI_UPDATE_AVAILABLE")
+        );
+        assert!(
+            !settings.is_advisory_dismissed("1.0.0-beta.17", "notification:CLI_UPDATE_AVAILABLE")
+        );
+        assert!(!settings.is_advisory_dismissed("1.0.0-beta.16", "warning:Beta plugin."));
+    }
+
+    #[test]
+    fn dismissing_prunes_older_cli_versions() {
+        let mut settings = AppSettings::default();
+        settings.dismiss_advisory("1.0.0-beta.16", "advisory-a");
+        settings.dismiss_advisory("1.0.0-beta.16", "advisory-a");
+        settings.dismiss_advisory("1.0.0-beta.17", "advisory-b");
+
+        assert_eq!(settings.dismissed_advisories.len(), 1);
+        let ids = settings.dismissed_advisories.get("1.0.0-beta.17").unwrap();
+        assert_eq!(ids, &vec!["advisory-b".to_string()]);
+    }
+
+    #[test]
+    fn keeping_a_version_reports_whether_it_changed_anything() {
+        let mut settings = AppSettings::default();
+        settings.dismiss_advisory("1.0.0-beta.16", "advisory-a");
+
+        assert!(settings.keep_advisories_for("1.0.0-beta.17"));
+        assert!(settings.dismissed_advisories.is_empty());
+        assert!(!settings.keep_advisories_for("1.0.0-beta.17"));
+    }
+
+    #[test]
+    fn dismissals_round_trip_through_settings_json() {
+        let mut settings = AppSettings::default();
+        settings.dismiss_advisory("1.0.0-beta.17", "warning:Beta plugin.");
+
+        let json = serde_json::to_string(&settings).unwrap();
+        let restored: AppSettings = serde_json::from_str(&json).unwrap();
+
+        assert!(restored.is_advisory_dismissed("1.0.0-beta.17", "warning:Beta plugin."));
     }
 }

@@ -104,6 +104,32 @@ pub struct NoticeVm {
     pub text: String,
 }
 
+/// A CLI advisory (`notifications[]` or `warnings[]`) as a dismissible banner.
+///
+/// The controller resolves the CLI's `code`, `data`, and `remediation` into
+/// display fields, so the UI never interprets a code or invents a meaning for
+/// an unknown one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdvisoryVm {
+    /// Stable identity for dismissal and remediation actions.
+    pub id: String,
+    pub tone: Tone,
+    pub title: String,
+    /// The CLI's own message, verbatim.
+    pub message: String,
+    /// Per-code summary derived from `data`, for example
+    /// `1.0.0-beta.16 → 1.0.0-beta.17`.
+    pub detail: Option<String>,
+    /// The exact command the CLI named as the remedy, when it named one.
+    pub command: Option<String>,
+    /// Label for the run button. `None` means the adapter has no explicit
+    /// builder for this remediation; the command stays copy-only.
+    pub run_label: Option<String>,
+    /// The CLI asked for an explicit human decision before the command runs.
+    pub requires_approval: bool,
+    pub dismissible: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JobPhase {
     Running,
@@ -140,6 +166,9 @@ pub enum CliConnectionVm {
 pub struct ShellVm {
     pub page: Page,
     pub cli: CliConnectionVm,
+    /// Advisories from the most recent reads and job frames, deduplicated and
+    /// minus the ones dismissed for this CLI version.
+    pub advisories: Vec<AdvisoryVm>,
     pub notice: Option<NoticeVm>,
     pub job: Option<JobVm>,
 }

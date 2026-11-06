@@ -17,13 +17,79 @@ pub struct CliEnvelope<T> {
     pub data: Option<T>,
     #[serde(default)]
     pub errors: Vec<CliError>,
-    #[serde(default, skip)]
-    pub warnings: Vec<Value>,
-    #[serde(default, skip)]
-    pub notifications: Vec<Value>,
+    /// Free-form advisories. The CLI sends strings or objects, so the DTO
+    /// accepts both instead of dropping the array.
+    #[serde(default, deserialize_with = "null_as_empty_vec")]
+    pub warnings: Vec<CliWarning>,
+    #[serde(default, deserialize_with = "null_as_empty_vec")]
+    pub notifications: Vec<CliNotification>,
 }
 
 pub type ValueEnvelope = CliEnvelope<Value>;
+
+/// A `notifications[]` entry. Every field is optional because an older or
+/// newer CLI may omit parts of the shape.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CliNotification {
+    #[serde(default, deserialize_with = "null_as_default_string")]
+    pub code: String,
+    #[serde(default, deserialize_with = "null_as_default_string")]
+    pub message: String,
+    /// Per-code payload. Known codes have documented fields; unknown codes are
+    /// carried through untouched.
+    #[serde(default)]
+    pub data: Option<Value>,
+    #[serde(default)]
+    pub remediation: Option<CliRemediation>,
+}
+
+/// A command the CLI names as the remedy for an advisory.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CliRemediation {
+    #[serde(default, deserialize_with = "null_as_default_string")]
+    pub command: String,
+    /// The CLI's own request for an explicit human decision. The app never
+    /// runs any remediation on its own, and this flag requires a click too.
+    #[serde(default, deserialize_with = "null_as_false")]
+    pub requires_user_approval: bool,
+}
+
+/// The CLI can send `null` for an optional string field; a missing value and an
+/// explicit null must both fall back to the default.
+fn null_as_default_string<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<String>::deserialize(deserializer)?.unwrap_or_default())
+}
+
+fn null_as_false<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<bool>::deserialize(deserializer)?.unwrap_or(false))
+}
+
+/// A CLI that writes `null` for an optional array must not fail the read.
+fn null_as_empty_vec<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Ok(Option::<Vec<T>>::deserialize(deserializer)?.unwrap_or_default())
+}
+
+/// A `warnings[]` entry: a string or an object. `Other` keeps an unexpected
+/// scalar from failing the whole envelope.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(untagged)]
+pub enum CliWarning {
+    Text(String),
+    Record(CliNotification),
+    Other(Value),
+}
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -215,6 +281,68 @@ mod tests {
         let error = envelope.errors[0].to_unity_error(Some(12), "");
         assert_eq!(error.code, "STATUS_NO_INSTANCES");
         assert!(error.retryable);
+    }
+
+    #[test]
+    fn parses_typed_warnings_and_notifications() {
+        let envelope = parse_envelope(
+            r#"{
+                "success": true,
+                "warnings": [
+                    "This plugin is a beta release.",
+                    { "code": null, "message": "The --skip flag is deprecated." }
+                ],
+                "notifications": [{
+                    "code": "CLI_UPDATE_AVAILABLE",
+                    "message": "Update available.",
+                    "data": { "current": "1.0.0-beta.16", "latest": "1.0.0-beta.17" },
+                    "remediation": { "command": "unity self-update", "requiresUserApproval": true }
+                }]
+            }"#,
+        )
+        .unwrap();
+
+        assert!(
+            matches!(&envelope.warnings[0], CliWarning::Text(text) if text == "This plugin is a beta release.")
+        );
+        assert!(
+            matches!(&envelope.warnings[1], CliWarning::Record(record) if record.message == "The --skip flag is deprecated.")
+        );
+
+        let notification = &envelope.notifications[0];
+        assert_eq!(notification.code, "CLI_UPDATE_AVAILABLE");
+        assert_eq!(notification.message, "Update available.");
+        assert_eq!(
+            notification
+                .data
+                .as_ref()
+                .and_then(|data| data.get("latest"))
+                .and_then(Value::as_str),
+            Some("1.0.0-beta.17")
+        );
+        let remediation = notification.remediation.as_ref().expect("remediation");
+        assert_eq!(remediation.command, "unity self-update");
+        assert!(remediation.requires_user_approval);
+    }
+
+    #[test]
+    fn missing_and_null_advisories_do_not_fail_the_envelope() {
+        for envelope in [
+            parse_envelope(r#"{"success":true}"#),
+            parse_envelope(r#"{"success":true,"warnings":null,"notifications":null}"#),
+        ] {
+            let envelope = envelope.unwrap();
+            assert!(envelope.warnings.is_empty());
+            assert!(envelope.notifications.is_empty());
+        }
+
+        let envelope =
+            parse_envelope(r#"{"success":true,"notifications":[{"code":"FUTURE_CODE"},{}]}"#)
+                .unwrap();
+        assert_eq!(envelope.notifications.len(), 2);
+        assert_eq!(envelope.notifications[0].code, "FUTURE_CODE");
+        assert!(envelope.notifications[0].message.is_empty());
+        assert!(envelope.notifications[1].code.is_empty());
     }
 
     #[test]

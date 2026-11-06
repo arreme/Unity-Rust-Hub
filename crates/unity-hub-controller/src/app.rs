@@ -10,14 +10,14 @@ use unity_core::models::{
     AuthStatus, CliStatus, CliUpdateInfo, Editor, InstallPreview, LicenseStatus, Module, Project,
     Release, RunningEditor, RunningEditors,
 };
-use unity_core::{CommandSpec, UnityCli, UnityError};
+use unity_core::{AdvisoryOrigin, CliAdvisory, CommandSpec, UnityCli, UnityError};
 use unity_hub_model::{
-    AccountCardVm, AuthVm, BadgeVm, BreakingChangeVm, ChangelogDataVm, ChangelogSectionVm,
-    ChangelogVm, CliCardVm, CliConnectionVm, CliDetailsVm, EditorModulesVm, EditorRowVm, EditorsVm,
-    InstallCliVm, InstallEditorVm, InstallPreviewVm, JobLogVm, JobPhase, JobVm, LicenseRowVm,
-    LicenseVm, LoadState, ModalVm, ModuleOptionVm, NoticeVm, OverviewVm, Page, PageVm,
-    ProjectRowVm, ProjectsVm, ReleaseRowVm, RunningEditorVm, SectionKind, SettingsVm, ShellVm,
-    TextScaleOptionVm, Tone, UiAction, UiError, UpdateVm, UpgradeProjectVm, ViewModel,
+    AccountCardVm, AdvisoryVm, AuthVm, BadgeVm, BreakingChangeVm, ChangelogDataVm,
+    ChangelogSectionVm, ChangelogVm, CliCardVm, CliConnectionVm, CliDetailsVm, EditorModulesVm,
+    EditorRowVm, EditorsVm, InstallCliVm, InstallEditorVm, InstallPreviewVm, JobLogVm, JobPhase,
+    JobVm, LicenseRowVm, LicenseVm, LoadState, ModalVm, ModuleOptionVm, NoticeVm, OverviewVm, Page,
+    PageVm, ProjectRowVm, ProjectsVm, ReleaseRowVm, RunningEditorVm, SectionKind, SettingsVm,
+    ShellVm, TextScaleOptionVm, Tone, UiAction, UiError, UpdateVm, UpgradeProjectVm, ViewModel,
 };
 
 use crate::jobs::{JobManager, JobStarted, JobState, StreamKind};
@@ -148,6 +148,39 @@ pub struct LogLine {
     pub text: String,
 }
 
+/// One advisory kept in controller state. The identity is computed once, when
+/// the advisory is absorbed, so dedupe, dismissal, and actions all agree.
+#[derive(Debug, Clone)]
+pub struct AdvisoryEntry {
+    pub advisory: CliAdvisory,
+    pub id: String,
+    /// The remediation kind the app can run after an explicit click. `None`
+    /// when the CLI named a remediation the adapter has no builder for: the
+    /// banner still shows the command and offers Copy.
+    pub run: Option<AdvisoryRun>,
+}
+
+/// A remediation the adapter knows how to build as argv. The command itself is
+/// built on click, so it always uses the CLI path configured at that moment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdvisoryRun {
+    CliUpdate,
+}
+
+impl AdvisoryRun {
+    fn label(self) -> &'static str {
+        match self {
+            Self::CliUpdate => "Update CLI",
+        }
+    }
+
+    fn job_kind(self) -> &'static str {
+        match self {
+            Self::CliUpdate => "cli-update",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ActiveJob {
     pub id: String,
@@ -219,6 +252,7 @@ pub struct App {
     pub config_dir: Option<String>,
     pub active_job: Option<ActiveJob>,
     pub notice: Option<Notice>,
+    pub advisories: Vec<AdvisoryEntry>,
     pub boot_background_started: bool,
 }
 
@@ -231,6 +265,9 @@ pub enum Message {
     DismissJob,
     CancelJob,
     DismissNotice,
+    DismissAdvisory(String),
+    CopyAdvisoryCommand(String),
+    RunAdvisoryRemediation(String),
     SignIn,
     TextSizeChanged(TextSize),
     OpenInstallCli,
@@ -289,6 +326,9 @@ impl From<UiAction> for Message {
             UiAction::Navigate(page) => Self::Navigate(page),
             UiAction::Refresh => Self::Refresh,
             UiAction::DismissNotice => Self::DismissNotice,
+            UiAction::DismissAdvisory(id) => Self::DismissAdvisory(id),
+            UiAction::CopyAdvisoryCommand(id) => Self::CopyAdvisoryCommand(id),
+            UiAction::RunAdvisoryRemediation(id) => Self::RunAdvisoryRemediation(id),
             UiAction::DismissJob => Self::DismissJob,
             UiAction::CancelJob => Self::CancelJob,
             UiAction::SignIn => Self::SignIn,
@@ -345,7 +385,7 @@ impl App {
 
         let app = Self {
             cli: cli.clone(),
-            jobs: JobManager::new(),
+            jobs: JobManager::with_sink(cli.advisory_sink()),
             page: Page::Overview,
             cli_status: Loadable::default(),
             update: Loadable::default(),
@@ -383,6 +423,7 @@ impl App {
             config_dir: settings::config_dir().map(|path| path.display().to_string()),
             active_job: None,
             notice: None,
+            advisories: Vec::new(),
             boot_background_started: false,
         };
 
@@ -436,6 +477,14 @@ impl App {
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        let task = self.handle(message);
+        // Every read and every polled job event funnels through `update`, so a
+        // single drain here means no envelope can lose an advisory.
+        self.absorb_advisories();
+        task
+    }
+
+    fn handle(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::Navigate(page) => {
                 self.page = page;
@@ -443,6 +492,7 @@ impl App {
             }
             Message::Refresh => self.refresh_page(),
             Message::StatusLoaded(result) => {
+                let previous_version = self.cli_version_key();
                 let installed = match result {
                     Ok(status) => {
                         if let Some(version) = &status.version {
@@ -459,6 +509,8 @@ impl App {
                         false
                     }
                 };
+
+                self.on_cli_version_resolved(&previous_version);
 
                 if self.boot_background_started {
                     Task::none()
@@ -590,6 +642,44 @@ impl App {
             }
             Message::DismissNotice => {
                 self.notice = None;
+                Task::none()
+            }
+            Message::DismissAdvisory(id) => {
+                let version = self.cli_version_key();
+                self.app_settings.dismiss_advisory(&version, &id);
+                self.notice = Some(match settings::save(&self.app_settings) {
+                    Ok(()) => Notice::info("Advisory dismissed for this CLI version."),
+                    Err(error) => Notice::error(error_text(&error)),
+                });
+                Task::none()
+            }
+            Message::CopyAdvisoryCommand(id) => {
+                let Some(command) = self.advisory_command(&id) else {
+                    return Task::none();
+                };
+                self.notice = Some(Notice::success("Command copied to the clipboard."));
+                iced::clipboard::write(command)
+            }
+            Message::RunAdvisoryRemediation(id) => {
+                let Some(entry) = self.advisories.iter().find(|entry| entry.id == id) else {
+                    return Task::none();
+                };
+                let Some(run) = entry.run else {
+                    self.notice = Some(Notice::error(
+                        "This advisory's command cannot run from the app. Copy it and run it in a terminal.",
+                    ));
+                    return Task::none();
+                };
+                // An explicit click is the only path to this command; nothing
+                // here is ever triggered by a read or a refresh.
+                match self.advisory_spec(run) {
+                    Ok(spec) => {
+                        self.start_job(run.job_kind(), spec);
+                    }
+                    Err(error) => {
+                        self.notice = Some(Notice::error(error_text(&error)));
+                    }
+                }
                 Task::none()
             }
             Message::SignIn => {
@@ -960,7 +1050,7 @@ impl App {
                     } else {
                         Some(value.clone())
                     },
-                    text_scale_percent: self.app_settings.text_scale_percent,
+                    ..self.app_settings.clone()
                 };
                 if !value.is_empty() {
                     let path = PathBuf::from(&value);
@@ -1276,12 +1366,103 @@ impl App {
         ShellVm {
             page: self.page,
             cli,
+            advisories: self.advisory_vms(),
             notice: self.notice.as_ref().map(|notice| NoticeVm {
                 tone: notice_tone(notice.kind),
                 text: notice.text.clone(),
             }),
             job: self.active_job.as_ref().map(job_vm),
         }
+    }
+
+    /// The CLI version dismissals are scoped to. Before the status read lands
+    /// the key is `unknown`; the status read is the first boot read, so no
+    /// advisory can be dismissed against the placeholder in practice.
+    fn cli_version_key(&self) -> String {
+        self.cli_status
+            .data
+            .as_ref()
+            .and_then(|status| status.version.as_ref())
+            .map(|version| version.version.clone())
+            .unwrap_or_else(|| UNKNOWN_CLI_VERSION.to_string())
+    }
+
+    /// Advisories describe the CLI that reported them: a version change drops
+    /// the in-memory list and the previous version's persisted dismissals, so
+    /// a new CLI shows its advisories once more.
+    fn on_cli_version_resolved(&mut self, previous_version: &str) {
+        let version = self.cli_version_key();
+        if version == previous_version {
+            return;
+        }
+        self.advisories.clear();
+        if version == UNKNOWN_CLI_VERSION {
+            return;
+        }
+        // Prune lazily: the next settings write persists it, and a boot must
+        // not rewrite the settings file on its own.
+        self.app_settings.keep_advisories_for(&version);
+    }
+
+    /// Merges every advisory a read or job reported since the last update.
+    /// `CliAdvisory::identity` collapses repeated frames into one entry.
+    fn absorb_advisories(&mut self) {
+        let mut incoming = self.cli.take_advisories();
+        incoming.append(&mut self.jobs.take_advisories());
+
+        for advisory in incoming {
+            let id = advisory.identity();
+            if self.advisories.iter().any(|entry| entry.id == id) {
+                continue;
+            }
+            let run = self.advisory_run(&advisory);
+            self.advisories.push(AdvisoryEntry { advisory, id, run });
+        }
+    }
+
+    /// Maps a remediation onto a command the adapter can build. Only codes with
+    /// an explicit builder get a Run button; every other named command stays
+    /// visible and copyable so the app never runs an unvetted argv.
+    fn advisory_run(&self, advisory: &CliAdvisory) -> Option<AdvisoryRun> {
+        let remediation = advisory.remediation.as_ref()?;
+        if remediation.command.trim().is_empty() {
+            return None;
+        }
+
+        match advisory.code.as_deref()? {
+            // #7 (CLI rollback) and #9 (plugins) add their builders here.
+            "CLI_UPDATE_AVAILABLE" => Some(AdvisoryRun::CliUpdate),
+            _ => None,
+        }
+    }
+
+    /// Builds the argv for a remediation at click time. The CLI names
+    /// `unity self-update`; the adapter's builder is that command with the
+    /// standard machine flags plus `--yes`.
+    fn advisory_spec(&self, run: AdvisoryRun) -> Result<CommandSpec, UnityError> {
+        match run {
+            AdvisoryRun::CliUpdate => self.cli.self_update_spec(),
+        }
+    }
+
+    fn advisory_command(&self, id: &str) -> Option<String> {
+        self.advisories
+            .iter()
+            .find(|entry| entry.id == id)
+            .and_then(|entry| entry.advisory.remediation.as_ref())
+            .map(|remediation| remediation.command.trim().to_string())
+            .filter(|command| !command.is_empty())
+    }
+
+    /// The banners the shell draws: deduplicated, in first-seen order, minus
+    /// the ones dismissed for the current CLI version.
+    fn advisory_vms(&self) -> Vec<AdvisoryVm> {
+        let version = self.cli_version_key();
+        self.advisories
+            .iter()
+            .filter(|entry| !self.app_settings.is_advisory_dismissed(&version, &entry.id))
+            .map(advisory_vm)
+            .collect()
     }
 
     fn overview_vm(&self) -> OverviewVm {
@@ -1840,6 +2021,74 @@ fn notice_tone(kind: NoticeKind) -> Tone {
     }
 }
 
+const UNKNOWN_CLI_VERSION: &str = "unknown";
+
+/// Branches on `code`, keeps the CLI's message verbatim, and only derives
+/// fields for the codes the CLI documents. Unknown codes and warnings keep the
+/// CLI's own text and get a neutral title instead of invented semantics.
+fn advisory_vm(entry: &AdvisoryEntry) -> AdvisoryVm {
+    let advisory = &entry.advisory;
+    let (tone, title) = match advisory.code.as_deref() {
+        Some("CLI_UPDATE_AVAILABLE") => (Tone::Accent, "CLI update available"),
+        Some("PLUGIN_UPDATE_AVAILABLE") => (Tone::Accent, "Plugin update available"),
+        Some("FEX_EMU_EXPERIMENTAL") => (Tone::Warning, "Experimental environment"),
+        Some("AGENT_PLUGIN_AVAILABLE") => (Tone::Info, "Agent integration available"),
+        _ => match advisory.origin {
+            AdvisoryOrigin::Notification => (Tone::Info, "Advisory"),
+            AdvisoryOrigin::Warning => (Tone::Warning, "CLI warning"),
+        },
+    };
+
+    AdvisoryVm {
+        id: entry.id.clone(),
+        tone,
+        title: title.to_string(),
+        message: advisory.message.clone(),
+        detail: advisory_detail(advisory),
+        command: advisory
+            .remediation
+            .as_ref()
+            .map(|remediation| remediation.command.trim().to_string())
+            .filter(|command| !command.is_empty()),
+        run_label: entry.run.map(|run| run.label().to_string()),
+        requires_approval: advisory
+            .remediation
+            .as_ref()
+            .is_some_and(|remediation| remediation.requires_user_approval),
+        dismissible: true,
+    }
+}
+
+/// Per-code `data` summary. Codes without a documented shape render no
+/// detail rather than a speculative one.
+fn advisory_detail(advisory: &CliAdvisory) -> Option<String> {
+    let data = advisory.data.as_ref()?;
+    let field = |key: &str| {
+        data.get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    };
+
+    match advisory.code.as_deref()? {
+        "CLI_UPDATE_AVAILABLE" => match (field("current"), field("latest")) {
+            (Some(current), Some(latest)) => Some(format!("{current} → {latest}")),
+            _ => None,
+        },
+        "PLUGIN_UPDATE_AVAILABLE" => {
+            let versions = match (field("current"), field("latest")) {
+                (Some(current), Some(latest)) => format!("{current} → {latest}"),
+                _ => return None,
+            };
+            Some(match field("plugin") {
+                Some(plugin) => format!("{plugin} · {versions}"),
+                None => versions,
+            })
+        }
+        _ => None,
+    }
+}
+
 fn job_vm(job: &ActiveJob) -> JobVm {
     JobVm {
         kind: job.kind.clone(),
@@ -2228,5 +2477,239 @@ mod tests {
         let _task = app.load_projects_page(true);
 
         assert!(app.running.loading);
+    }
+
+    // ------------------------------------------------------------------
+    // CLI advisories
+
+    fn connected_app(version: &str) -> App {
+        let (mut app, _) = App::boot();
+        // Tests must not inherit the developer's persisted dismissals.
+        app.app_settings.dismissed_advisories.clear();
+        app.cli_status = Loadable::default();
+        app.cli_status.data = Some(CliStatus {
+            installed: true,
+            version: Some(CliVersion {
+                version: version.to_string(),
+                ..CliVersion::default()
+            }),
+            ..CliStatus::default()
+        });
+        app.advisories.clear();
+        app
+    }
+
+    fn absorb(app: &mut App, envelope: Value) {
+        let envelope: unity_core::envelope::ValueEnvelope =
+            serde_json::from_value(envelope).expect("envelope");
+        app.cli
+            .advisory_sink()
+            .push(unity_core::advisory::advisories_from_envelope(&envelope));
+        app.absorb_advisories();
+    }
+
+    fn update_advisory() -> Value {
+        serde_json::json!({
+            "success": true,
+            "notifications": [{
+                "code": "CLI_UPDATE_AVAILABLE",
+                "message": "A new Unity CLI is available.",
+                "data": { "current": "1.0.0-beta.16", "latest": "1.0.0-beta.17" },
+                "remediation": { "command": "unity self-update", "requiresUserApproval": true }
+            }]
+        })
+    }
+
+    fn temporary_cli() -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "unity-rust-hub-advisory-{}-{}.bin",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        std::fs::write(&path, b"test").expect("temp binary");
+        path
+    }
+
+    #[test]
+    fn duplicate_advisories_from_a_refresh_collapse_into_one_banner() {
+        let mut app = connected_app("1.0.0-beta.17");
+
+        absorb(&mut app, update_advisory());
+        absorb(&mut app, update_advisory());
+        absorb(&mut app, update_advisory());
+
+        let advisories = app.view_model().shell.advisories;
+        assert_eq!(advisories.len(), 1);
+        assert_eq!(advisories[0].message, "A new Unity CLI is available.");
+    }
+
+    #[test]
+    fn update_advisory_shows_current_to_latest_and_a_runnable_command() {
+        let mut app = connected_app("1.0.0-beta.16");
+        let binary = temporary_cli();
+        app.cli.set_override_path(Some(binary.clone()));
+
+        absorb(&mut app, update_advisory());
+
+        let vm = app.view_model();
+        assert_eq!(vm.shell.advisories.len(), 1);
+        let advisory = &vm.shell.advisories[0];
+        assert_eq!(advisory.title, "CLI update available");
+        assert_eq!(
+            advisory.detail.as_deref(),
+            Some("1.0.0-beta.16 → 1.0.0-beta.17")
+        );
+        assert_eq!(advisory.command.as_deref(), Some("unity self-update"));
+        assert!(advisory.requires_approval);
+        assert_eq!(advisory.run_label.as_deref(), Some("Update CLI"));
+        assert!(advisory.dismissible);
+
+        // The Run button executes a builder, never the raw CLI string.
+        let run = app.advisories[0].run.expect("a builder exists");
+        assert_eq!(run, AdvisoryRun::CliUpdate);
+        let spec = app.advisory_spec(run).expect("the builder resolves");
+        assert!(spec.args.iter().any(|arg| arg == "self-update"));
+        assert!(spec.args.iter().any(|arg| arg == "--yes"));
+        std::fs::remove_file(binary).ok();
+    }
+
+    #[test]
+    fn update_advisory_run_builds_the_command_at_click_time() {
+        let mut app = connected_app("1.0.0-beta.16");
+        // A path that does not exist makes resolution fail deterministically,
+        // even on a machine with a real `unity` on PATH.
+        app.cli
+            .set_override_path(Some(PathBuf::from("/nonexistent/unity-rust-hub-test")));
+
+        absorb(&mut app, update_advisory());
+
+        let advisory = &app.view_model().shell.advisories[0];
+        assert_eq!(advisory.command.as_deref(), Some("unity self-update"));
+        assert_eq!(advisory.run_label.as_deref(), Some("Update CLI"));
+        assert!(app.advisory_command(&advisory.id).is_some());
+
+        // The command is only built when the user clicks, so a missing CLI is
+        // reported then instead of silently removing the button.
+        let run = app.advisories[0].run.expect("a builder exists");
+        assert!(app.advisory_spec(run).is_err());
+    }
+
+    #[test]
+    fn dismissal_hides_the_banner_for_one_cli_version_and_survives_a_refresh() {
+        let mut app = connected_app("1.0.0-beta.16");
+        absorb(&mut app, update_advisory());
+        let id = app.advisories[0].id.clone();
+        let version = app.cli_version_key();
+
+        app.app_settings.dismiss_advisory(&version, &id);
+        assert!(app.view_model().shell.advisories.is_empty());
+
+        // A polled refresh reports the same advisory again.
+        absorb(&mut app, update_advisory());
+        assert!(app.view_model().shell.advisories.is_empty());
+
+        // A CLI version change drops the store and the dismissal scope, so
+        // the new CLI shows its advisory once.
+        let previous = app.cli_version_key();
+        app.cli_status.data = Some(CliStatus {
+            installed: true,
+            version: Some(CliVersion {
+                version: "1.0.0-beta.17".to_string(),
+                ..CliVersion::default()
+            }),
+            ..CliStatus::default()
+        });
+        app.on_cli_version_resolved(&previous);
+        assert!(app.advisories.is_empty());
+        assert!(app.app_settings.dismissed_advisories.is_empty());
+
+        absorb(&mut app, update_advisory());
+        assert_eq!(app.view_model().shell.advisories.len(), 1);
+    }
+
+    #[test]
+    fn unknown_codes_and_object_warnings_render_their_message() {
+        let mut app = connected_app("1.0.0-beta.17");
+
+        absorb(
+            &mut app,
+            serde_json::json!({
+                "success": true,
+                "notifications": [{ "code": "FUTURE_CODE", "message": "Something new happened." }]
+            }),
+        );
+        absorb(
+            &mut app,
+            serde_json::json!({
+                "success": true,
+                "warnings": [{ "message": "The --skip flag is deprecated." }]
+            }),
+        );
+
+        let advisories = app.view_model().shell.advisories;
+        assert_eq!(advisories.len(), 2);
+        assert_eq!(advisories[0].title, "Advisory");
+        assert_eq!(advisories[0].message, "Something new happened.");
+        assert!(advisories[0].command.is_none());
+        assert_eq!(advisories[1].title, "CLI warning");
+        assert_eq!(advisories[1].message, "The --skip flag is deprecated.");
+    }
+
+    #[test]
+    fn plugin_beta_warning_from_a_job_frame_reaches_the_shell() {
+        let mut app = connected_app("1.0.0-beta.17");
+        absorb(
+            &mut app,
+            serde_json::json!({
+                "type": "result",
+                "success": true,
+                "data": { "plugin": "com.unity.ai" },
+                "warnings": ["This plugin is a beta release. Beta plugins can break projects."]
+            }),
+        );
+
+        let advisories = app.view_model().shell.advisories;
+        assert_eq!(advisories.len(), 1);
+        assert_eq!(advisories[0].title, "CLI warning");
+        assert_eq!(
+            advisories[0].message,
+            "This plugin is a beta release. Beta plugins can break projects."
+        );
+        assert!(advisories[0].command.is_none());
+    }
+
+    #[test]
+    fn plugin_remediation_is_copy_only_until_the_plugins_ticket_lands() {
+        let mut app = connected_app("1.0.0-beta.17");
+        absorb(
+            &mut app,
+            serde_json::json!({
+                "success": true,
+                "notifications": [{
+                    "code": "PLUGIN_UPDATE_AVAILABLE",
+                    "message": "A plugin update is available.",
+                    "data": { "plugin": "com.unity.ai", "current": "1.0.0", "latest": "1.1.0" },
+                    "remediation": {
+                        "command": "unity plugin upgrade com.unity.ai",
+                        "requiresUserApproval": true
+                    }
+                }]
+            }),
+        );
+
+        let advisory = &app.view_model().shell.advisories[0];
+        assert_eq!(advisory.title, "Plugin update available");
+        assert_eq!(
+            advisory.detail.as_deref(),
+            Some("com.unity.ai · 1.0.0 → 1.1.0")
+        );
+        assert_eq!(
+            advisory.command.as_deref(),
+            Some("unity plugin upgrade com.unity.ai")
+        );
+        assert_eq!(advisory.run_label, None);
     }
 }

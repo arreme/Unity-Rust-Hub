@@ -11,6 +11,14 @@ pub enum UiAction {
     Navigate(Page),
     Refresh,
     DismissNotice,
+    /// Dismisses one advisory banner. The id is the CLI advisory's stable
+    /// identity, already scoped to the current CLI version by the controller.
+    DismissAdvisory(String),
+    /// Copies the CLI-named remediation command. Never runs it.
+    CopyAdvisoryCommand(String),
+    /// Runs the remediation command the user just clicked. The controller only
+    /// honours this for advisories the adapter has an explicit builder for.
+    RunAdvisoryRemediation(String),
     DismissJob,
     CancelJob,
     SignIn,
