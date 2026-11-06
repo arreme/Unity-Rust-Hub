@@ -144,6 +144,9 @@ pub struct ShellVm {
     pub job: Option<JobVm>,
 }
 
+// One snapshot exists per frame, so the variant size gap costs nothing worth
+// boxing for.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum PageVm {
     Overview(OverviewVm),
@@ -177,6 +180,10 @@ pub struct OverviewVm {
     pub update: LoadState<UpdateVm>,
     pub account: AccountCardVm,
     pub running: LoadState<Vec<RunningEditorVm>>,
+    /// Installed Editors, once the list has loaded.
+    pub editor_count: Option<usize>,
+    /// Registered projects, once the list has loaded.
+    pub project_count: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -268,7 +275,8 @@ pub struct EditorRowVm {
     pub version: String,
     pub architecture: String,
     pub is_default: bool,
-    pub modules: String,
+    /// Installed module names; empty when the CLI reports none.
+    pub modules: Vec<String>,
 }
 
 #[derive(Debug, Clone)]

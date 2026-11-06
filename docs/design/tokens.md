@@ -1,36 +1,36 @@
 # Design tokens
 
-All visual primitives live in `crates/unity-hub-ui/src/tokens.rs`. When the
-Figma file arrives, map its variables onto these names and change values in that
-one file where possible.
+All visual primitives live in `crates/unity-hub-ui/src/tokens.rs`. Change
+values in that one file where possible.
 
 ## Palette
 
-| Token | Current value | Figma role |
+Clean graphite: grey surfaces one step apart, hairline borders, and white as
+the only accent. Status colors are muted and used for small marks (dots,
+chips, icons), never for large fills.
+
+| Token | Current value | Role |
 |---|---|---|
-| `palette.background` | `#0b0e13` | App/window background |
-| `palette.panel` | `#141922` | Card surface |
-| `palette.panel_raised` | `#1a202b` | Hero/modal raised surface |
-| `palette.border` | `#242c39` | Default border |
-| `palette.border_strong` | `#313c4c` | Modal/strong border |
-| `palette.text` | `#e8edf4` | Primary text |
-| `palette.muted` | `#8e9aac` | Secondary text |
-| `palette.faint` | `#667286` | Tertiary text and metadata |
-| `palette.accent` | `#f0a35e` | Brand/accent |
-| `palette.success` | `#5fd39a` | Success/positive |
-| `palette.warning` | `#f4c566` | Warning/caution |
-| `palette.danger` | `#ff7a85` | Error/destructive |
-| `palette.info` | `#73b7ff` | Informational |
-| `palette.highlight` | `#b79cff` | Highlight/pipeline |
+| `palette.background` | `#1f2225` | Page background |
+| `palette.panel` | `#26292d` | Card surface |
+| `palette.panel_raised` | `#2f3337` | Tiles, chips, raised blocks inside cards, active nav |
+| `palette.sunken` | `#1f2225` | Inputs, logs, previews |
+| `palette.border` | `#34383d` | Hairlines and card borders |
+| `palette.border_strong` | `#43484e` | Control borders |
+| `palette.text` | `#f1f2f3` | Primary text |
+| `palette.muted` | `#b4b8bd` | Secondary text |
+| `palette.faint` | `#8e9399` | Labels, captions, metadata |
+| `palette.accent` | `#f1f2f3` | Primary button fill, checked boxes, progress |
+| `palette.accent_hover` / `accent_pressed` | `#ffffff` / `#d6d8db` | Primary button states |
+| `palette.on_accent` | `#1a1c1f` | Text on the accent fill |
+| `palette.success` | `#86cfa6` | Success/positive |
+| `palette.warning` | `#e6c27c` | Warning/caution |
+| `palette.danger` | `#ec8f97` | Error/destructive |
+| `palette.info` | `#94bce8` | Informational |
+| `palette.highlight` | `#bcaeea` | Highlight/pipeline |
 
-Surfaces that are not simple palette roles:
-
-- `sidebar_background`
-- `topbar_background`
-- `hero_border`
-- `row_header_background`
-- `job_background`
-- `job_border`
+Other surfaces: `sidebar_background` (`#1a1c1f`), `backdrop` (dialog screen,
+`#16181a`), and `hover` / `pressed` (white washes for ghost and nav controls).
 
 ## Semantic tones
 
@@ -39,36 +39,67 @@ The contract carries semantic tones, not colors. The UI maps them in
 
 | Contract tone | Token |
 |---|---|
-| `Neutral` | `muted` |
-| `Accent` | `accent` |
+| `Neutral` | `muted` (grey chip) |
+| `Accent` | `text` (grey chip) |
 | `Success` | `success` |
 | `Warning` | `warning` |
 | `Danger` | `danger` |
 | `Info` | `info` |
 | `Highlight` | `highlight` |
 
-A designer can change the mapping without touching controller code.
-
 ## Spacing, radii, type
 
-- `space`: page/content/card/row gaps.
-- `radius`: card, hero, modal, row, notice, badge, nav.
-- `font`: eyebrow, page title, subtitle, card/section title, body, small, badge,
-  monospace.
+- `spacing`: page padding (`PAGE_X`, `PAGE_TOP`), section gap, card padding and
+  gap, list-row padding, small, xs.
+- `radius`: card 16, modal 20, control 12, tile 12, notice 14, nav 10, and
+  `PILL` for buttons, chips, and segmented controls.
+- `font`: caption 11 (uppercase labels), small 12, body 13, body large 14,
+  card title 16, row title 18, modal title 20, stat 26, page title 28,
+  display 36, plus button, badge, mono, and icon sizes.
 
-The current pages still contain some one-off sizes for dense table cells. When
-implementing the new Figma design, prefer moving those values into `font` and
-`space` rather than adding new literals.
+## Layout
+
+- No top bar: every page starts with `components::page_header` (title,
+  subtitle, optional actions such as `refresh_button`).
+- Lists are rows separated by hairlines (`components::divided`, `list_row`)
+  inside one card, not boxed rows.
+- Summary numbers use `components::stat_strip`; settings use `group` and
+  `setting_row`.
+
+## Controls
+
+Every interactive widget is styled in `theme.rs`; pages use the helpers in
+`components.rs` rather than iced's built-in styles:
+
+- `components::button` / `icon_button` with `ButtonKind::{Primary, Secondary,
+  Ghost, Danger}`: white pill, outlined pill, text pill, danger outline. Use at
+  most one primary action per card or dialog. Pass `components::COMPACT`
+  padding inside list rows.
+- `components::segmented` for small exclusive choices.
+- `components::text_input`, `search_input`, `checkbox`, `scroll`.
+- Pick lists take `theme::pick_list`, `theme::menu`,
+  `icons::pick_list_handle`, and `components::PICK_LIST_PADDING`.
+- Status helpers: `notice`, `error_text`, `loading`, `hint`, `badge`,
+  `icon_badge`, `status_dot`, `status_label`, `empty`, `icon_tile`,
+  `initial_tile`.
 
 ## Text scaling
 
 The Settings screen persists a text scale (100/110/125/150%). The UI applies it
 through `ui::text` and `ui::font_size`. New components should use those helpers
-for any explicit text size so accessibility scaling keeps working.
+for any explicit text size so accessibility scaling keeps working. Icons are
+text glyphs, so they scale with it; fixed widths that hold text use
+`ui::scaled_pixels`.
 
-## Fonts and assets
+## Fonts and icons
 
-The current build uses the system font. If the Figma design specifies a custom
-font, add the font files under `crates/unity-hub-ui/assets/fonts/` and load them
-in `crates/unity-hub/src/main.rs` before building the application. Keep the
-license file next to the font.
+The UI bundles subsets of Inter (Regular, Medium, SemiBold), JetBrains Mono,
+and the Lucide icon font under `crates/unity-hub-ui/assets/fonts/`, with their
+licenses next to them. `fonts::ALL` is loaded by both the app and the gallery,
+and `fonts::SANS` is the default font.
+
+Each static Inter weight registers as its own family, so `fonts::MEDIUM` and
+`fonts::SEMIBOLD` name both the family and the weight.
+
+To add an icon, add its Lucide name to `ICONS` in `scripts/subset-fonts.sh`,
+run the script, and add the codepoint constant to `icons.rs`.

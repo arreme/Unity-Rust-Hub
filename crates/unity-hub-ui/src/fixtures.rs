@@ -147,6 +147,8 @@ fn overview() -> ViewModel {
                     dialog: Some("Save changes?".to_string()),
                 },
             ]),
+            editor_count: Some(2),
+            project_count: Some(2),
         }),
     )
 }
@@ -162,6 +164,8 @@ fn overview_missing() -> ViewModel {
                 license: LicenseVm::Idle,
             },
             running: LoadState::Ready(Vec::new()),
+            editor_count: None,
+            project_count: None,
         }),
     );
     vm.shell.cli = CliConnectionVm::Missing;
@@ -194,6 +198,8 @@ fn overview_error() -> ViewModel {
                 }),
             },
             running: LoadState::Loading { previous: None },
+            editor_count: None,
+            project_count: None,
         }),
     )
 }
@@ -207,13 +213,13 @@ fn editors() -> ViewModel {
                     version: "6000.1.1f1".to_string(),
                     architecture: "x86_64".to_string(),
                     is_default: true,
-                    modules: "linux-il2cpp, linux-server".to_string(),
+                    modules: vec!["linux-il2cpp".to_string(), "linux-server".to_string()],
                 },
                 EditorRowVm {
                     version: "2022.3.62f1".to_string(),
                     architecture: "x86_64".to_string(),
                     is_default: false,
-                    modules: "No modules reported".to_string(),
+                    modules: Vec::new(),
                 },
             ]),
             install: InstallEditorVm {

@@ -1,78 +1,106 @@
-use iced::widget::{button, column, container, row, rule, space};
-use iced::{Element, Fill};
+use iced::widget::{column, container, row, space};
+use iced::{Center, Element, Fill, FillPortion};
 
 use unity_hub_model::{
-    AccountCardVm, AuthVm, CliCardVm, CliDetailsVm, LicenseVm, LoadState, OverviewVm, Tone,
-    UiAction, UpdateVm,
+    AccountCardVm, AuthVm, CliCardVm, CliDetailsVm, LicenseVm, LoadState, OverviewVm,
+    RunningEditorVm, Tone, UiAction, UpdateVm,
 };
 
-use crate::components::{badge, card, detail_column};
+use crate::components::{
+    badge, button, caption, card, card_with, detail_column, detail_mono, divided, divider,
+    error_text, hint, icon_badge, icon_button, icon_tile, list_row, loading, mono, notice,
+    page_header, refresh_button, stat_strip, status_label, ButtonKind,
+};
+use crate::fonts;
+use crate::icons;
 use crate::theme;
+use crate::tokens::{font, spacing};
 use crate::ui::text;
 
 pub fn view(vm: &OverviewVm) -> Element<'_, UiAction> {
-    let mut page = column![hero()].spacing(16);
+    let title = match &vm.account.auth {
+        AuthVm::SignedIn { name, .. } => match name.split_whitespace().next() {
+            Some(first) => format!("Welcome back, {first}"),
+            None => "Overview".to_string(),
+        },
+        _ => "Overview".to_string(),
+    };
 
-    page = page.push(
-        row![cli_card(vm), account_card(&vm.account)]
-            .spacing(16)
-            .align_y(iced::Alignment::Start),
-    );
-
-    page = page.push(running_card(&vm.running));
-
-    page.into()
-}
-
-fn hero() -> Element<'static, UiAction> {
-    container(
+    column![
+        page_header(
+            title,
+            "Your local Unity toolchain at a glance.",
+            Some(refresh_button()),
+        ),
+        summary(vm),
         row![
-            column![
-                text("LOCAL UNITY TOOLCHAIN")
-                    .size(9)
-                    .style(theme::accent_text),
-                text("One desk for the Unity CLI.").size(28),
-                text("Check the CLI, manage Editors and modules, upgrade project versions, and read release notes — natively.")
-                    .size(12)
-                    .style(theme::muted_text),
-            ]
-            .spacing(5)
-            .width(Fill),
-            container(text("U").size(34).style(theme::accent_text))
-                .width(76)
-                .height(76)
-                .center(76)
-                .style(theme::badge(Tone::Accent)),
+            container(cli_card(vm)).width(FillPortion(2)),
+            container(account_card(&vm.account)).width(FillPortion(1)),
         ]
-        .spacing(20)
-        .align_y(iced::Alignment::Center),
-    )
-    .padding(24)
-    .width(Fill)
-    .style(theme::hero)
+        .spacing(spacing::SECTION)
+        .align_y(iced::Alignment::Start),
+        running_card(&vm.running),
+    ]
+    .spacing(spacing::SECTION)
     .into()
 }
 
+fn count(value: Option<usize>) -> String {
+    value.map_or_else(|| "—".to_string(), |value| value.to_string())
+}
+
+fn summary(vm: &OverviewVm) -> Element<'_, UiAction> {
+    let (cli_value, cli_label) = match &vm.cli {
+        CliCardVm::Ready { details, .. } => {
+            let state = match vm.update.data() {
+                Some(update) if update.available => "update available",
+                Some(_) => "up to date",
+                None => "installed",
+            };
+            (details.version.clone(), format!("Unity CLI · {state}"))
+        }
+        CliCardVm::Missing => ("—".to_string(), "Unity CLI · not installed".to_string()),
+        CliCardVm::Failed(_) => ("—".to_string(), "Unity CLI · unavailable".to_string()),
+        CliCardVm::Idle | CliCardVm::Loading => ("…".to_string(), "Unity CLI".to_string()),
+    };
+
+    stat_strip(vec![
+        (cli_value, cli_label, None),
+        (
+            count(vm.editor_count),
+            "Editors installed".to_string(),
+            None,
+        ),
+        (count(vm.project_count), "Projects".to_string(), None),
+        (
+            count(vm.running.data().map(Vec::len)),
+            "Editors running".to_string(),
+            None,
+        ),
+    ])
+}
+
 fn cli_card(vm: &OverviewVm) -> Element<'_, UiAction> {
-    let mut body = column![].spacing(11);
+    let mut body = column![].spacing(spacing::CARD_GAP);
+    let mut trailing = row![].spacing(8).align_y(Center);
 
     match &vm.cli {
         CliCardVm::Idle => {}
         CliCardVm::Loading => {
-            body = body.push(
-                text("Resolving the Unity CLI…")
-                    .size(11)
-                    .style(theme::muted_text),
-            );
+            body = body.push(loading("Resolving the Unity CLI…"));
         }
         CliCardVm::Missing => {
             body = body.push(install_callout());
         }
         CliCardVm::Failed(error) => {
-            body = body.push(text(error.text()).size(10).style(theme::danger_text));
+            body = body.push(error_text(error));
         }
         CliCardVm::Ready { details, error } => {
-            body = body.push(cli_details(details, &vm.update));
+            trailing = trailing
+                .push(badge(details.channel.clone(), Tone::Neutral))
+                .push(update_badge(&vm.update));
+
+            body = body.push(cli_details(details));
 
             if let Some(update) = vm.update.data() {
                 if update.available {
@@ -81,79 +109,66 @@ fn cli_card(vm: &OverviewVm) -> Element<'_, UiAction> {
             }
 
             if let Some(error) = error {
-                body = body.push(text(error.text()).size(10).style(theme::danger_text));
+                body = body.push(error_text(error));
             }
             if let Some(error) = vm.update.error() {
                 body = body.push(
                     text(format!("Update check failed: {}", error.text()))
-                        .size(10)
+                        .size(font::SMALL)
                         .style(theme::danger_text),
                 );
             }
 
+            body = body.push(divider());
             body = body.push(
                 row![
-                    button(text("Re-check").size(10))
-                        .on_press(UiAction::Refresh)
-                        .padding([5.0, 9.0])
-                        .style(button::secondary),
-                    button(text("Open Settings").size(10))
-                        .on_press(UiAction::Navigate(unity_hub_model::Page::Settings))
-                        .padding([5.0, 9.0])
-                        .style(button::text),
+                    button("Re-check", ButtonKind::Secondary).on_press(UiAction::Refresh),
+                    button("Open settings", ButtonKind::Ghost)
+                        .on_press(UiAction::Navigate(unity_hub_model::Page::Settings)),
                 ]
-                .spacing(6),
+                .spacing(8),
             );
         }
     }
 
-    card("Unity CLI", body.into())
+    card_with("Unity CLI", trailing.into(), body.into())
 }
 
-fn cli_details<'a>(
-    details: &'a CliDetailsVm,
-    update: &'a LoadState<UpdateVm>,
-) -> Element<'a, UiAction> {
+fn cli_details(details: &CliDetailsVm) -> Element<'_, UiAction> {
     column![
-        row![
-            text(details.version.as_str())
-                .size(24)
-                .style(theme::accent_text),
-            badge(details.channel.clone(), Tone::Accent),
-            update_badge(update),
-        ]
-        .spacing(8)
-        .align_y(iced::Alignment::Center),
+        text(details.version.as_str())
+            .size(font::DISPLAY)
+            .font(fonts::SEMIBOLD),
         row![
             detail_column("Platform", details.platform.as_str()),
             detail_column("Runtime", details.runtime.as_str()),
         ]
-        .spacing(16),
+        .spacing(24),
         row![
-            detail_column("Executable", details.executable.as_str()),
+            detail_mono("Executable", details.executable.as_str()),
             detail_column("Resolved via", details.resolved_via.as_str()),
         ]
-        .spacing(16),
+        .spacing(24),
         row![
-            detail_column("Editor install path", details.install_path.as_str()),
+            detail_mono("Editor install path", details.install_path.as_str()),
             detail_column("Build date", details.build_date.as_str()),
         ]
-        .spacing(16),
+        .spacing(24),
     ]
-    .spacing(11)
+    .spacing(16)
     .into()
 }
 
 fn update_badge(update: &LoadState<UpdateVm>) -> Element<'static, UiAction> {
     if update.is_loading() {
-        badge("checking updates", Tone::Info)
+        icon_badge(icons::LOADER, "checking updates", Tone::Neutral)
     } else if update.error().is_some() {
         badge("update check failed", Tone::Neutral)
     } else if let Some(update) = update.data() {
         if update.available {
-            badge("update available", Tone::Warning)
+            icon_badge(icons::CIRCLE_ARROW_UP, "update available", Tone::Warning)
         } else {
-            badge("up to date", Tone::Success)
+            icon_badge(icons::CHECK, "up to date", Tone::Success)
         }
     } else {
         badge("unknown", Tone::Neutral)
@@ -161,82 +176,104 @@ fn update_badge(update: &LoadState<UpdateVm>) -> Element<'static, UiAction> {
 }
 
 fn update_callout(update: &UpdateVm) -> Element<'static, UiAction> {
-    container(
+    notice(
+        Tone::Warning,
+        icons::CIRCLE_ARROW_UP,
         row![
             column![
-                text("A newer CLI is available.").size(11),
+                text("A newer CLI is available.")
+                    .size(font::BODY_LARGE)
+                    .font(fonts::MEDIUM),
                 text(format!(
                     "{} → {}",
                     update.current_version, update.latest_version
                 ))
-                .size(10)
+                .size(font::MONO)
+                .font(fonts::MONO)
                 .style(theme::muted_text),
-            ]
-            .spacing(2)
-            .width(Fill),
-            button(text("Update CLI").size(10))
-                .on_press(UiAction::UpdateCli)
-                .padding([5.0, 9.0])
-                .style(button::primary),
-        ]
-        .spacing(10)
-        .align_y(iced::Alignment::Center),
-    )
-    .padding(10)
-    .width(Fill)
-    .style(theme::notice_card(Tone::Warning))
-    .into()
-}
-
-fn install_callout() -> Element<'static, UiAction> {
-    container(
-        row![
-            column![
-                text("The Unity CLI is not installed.").size(13),
-                text("This app is a native GUI over the official unity binary. Install it to unlock Editors, projects, and release notes.")
-                    .size(10)
-                    .style(theme::muted_text),
             ]
             .spacing(3)
             .width(Fill),
-            button(text("Install Unity CLI").size(10))
-                .on_press(UiAction::OpenInstallCli)
-                .padding([6.0, 10.0])
-                .style(button::primary),
+            icon_button(icons::DOWNLOAD, "Update CLI", ButtonKind::Primary)
+                .on_press(UiAction::UpdateCli),
         ]
         .spacing(12)
-        .align_y(iced::Alignment::Center),
+        .align_y(Center),
     )
-    .padding(12)
-    .width(Fill)
-    .style(theme::notice_card(Tone::Warning))
-    .into()
+}
+
+fn install_callout() -> Element<'static, UiAction> {
+    notice(
+        Tone::Warning,
+        icons::TRIANGLE_ALERT,
+        row![
+            column![
+                text("The Unity CLI is not installed.")
+                    .size(font::BODY_LARGE)
+                    .font(fonts::MEDIUM),
+                text("This app is a native GUI over the official unity binary. Install it to manage Editors, projects, and release notes.")
+                    .size(font::BODY)
+                    .style(theme::muted_text),
+            ]
+            .spacing(4)
+            .width(Fill),
+            icon_button(icons::DOWNLOAD, "Install Unity CLI", ButtonKind::Primary)
+                .on_press(UiAction::OpenInstallCli),
+        ]
+        .spacing(14)
+        .align_y(Center),
+    )
+}
+
+fn avatar(name: &str) -> Element<'static, UiAction> {
+    let initials = name
+        .split_whitespace()
+        .filter_map(|part| part.chars().next())
+        .take(2)
+        .collect::<String>()
+        .to_uppercase();
+
+    let content: Element<'static, UiAction> = if initials.is_empty() {
+        crate::icons::icon(icons::USER, font::ICON).into()
+    } else {
+        text(initials)
+            .size(font::BODY_LARGE)
+            .font(fonts::SEMIBOLD)
+            .into()
+    };
+
+    container(content)
+        .width(44)
+        .height(44)
+        .center(44)
+        .style(theme::avatar)
+        .into()
 }
 
 fn account_card(account: &AccountCardVm) -> Element<'_, UiAction> {
-    let mut body = column![].spacing(8);
+    let mut body = column![].spacing(16);
 
     match &account.auth {
         AuthVm::Idle => {}
         AuthVm::Loading => {
-            body = body.push(text("Checking sign-in…").size(10).style(theme::muted_text));
+            body = body.push(loading("Checking sign-in…"));
         }
         AuthVm::SignedIn { name, email } => {
             body = body.push(
                 row![
-                    container(text("U").size(16).style(theme::accent_text))
-                        .width(38)
-                        .height(38)
-                        .center(38)
-                        .style(theme::badge(Tone::Accent)),
+                    avatar(name),
                     column![
-                        text(name.as_str()).size(12),
-                        text(email.as_str()).size(10).style(theme::muted_text),
+                        text(name.as_str())
+                            .size(font::BODY_LARGE)
+                            .font(fonts::MEDIUM),
+                        text(email.as_str())
+                            .size(font::SMALL)
+                            .style(theme::faint_text),
                     ]
-                    .spacing(1),
+                    .spacing(2),
                 ]
-                .spacing(10)
-                .align_y(iced::Alignment::Center),
+                .spacing(12)
+                .align_y(Center),
             );
         }
         AuthVm::SignedOut { expired } => {
@@ -248,64 +285,56 @@ fn account_card(account: &AccountCardVm) -> Element<'_, UiAction> {
 
             body = body.push(
                 row![
-                    text(message).size(11).style(theme::muted_text).width(Fill),
-                    button(text("Sign in").size(10))
-                        .on_press(UiAction::SignIn)
-                        .padding([5.0, 9.0])
-                        .style(button::primary),
+                    text(message)
+                        .size(font::BODY)
+                        .style(theme::muted_text)
+                        .width(Fill),
+                    icon_button(icons::LOG_IN, "Sign in", ButtonKind::Primary)
+                        .on_press(UiAction::SignIn),
                 ]
-                .spacing(8)
-                .align_y(iced::Alignment::Center),
+                .spacing(10)
+                .align_y(Center),
             );
         }
         AuthVm::Failed(error) => {
-            body = body.push(
-                text(format!("Sign-in unavailable: {}", error.message))
-                    .size(10)
-                    .style(theme::muted_text),
-            );
+            body = body.push(hint(format!("Sign-in unavailable: {}", error.message)));
         }
     }
 
-    body = body.push(rule::horizontal(1));
+    body = body.push(divider());
 
     match &account.license {
         LicenseVm::Idle => {}
         LicenseVm::Failed(error) => {
-            body = body.push(
-                text(format!("License unavailable: {}", error.message))
-                    .size(10)
-                    .style(theme::muted_text),
-            );
+            body = body.push(hint(format!("License unavailable: {}", error.message)));
         }
         LicenseVm::Ready { active, licenses } => {
             body = body.push(
                 row![
-                    text("License").size(10).style(theme::faint_text),
-                    space().width(Fill),
-                    badge(
-                        if *active { "active" } else { "inactive" },
-                        if *active { Tone::Success } else { Tone::Danger },
-                    ),
+                    container(caption("Licenses")).width(Fill),
+                    if *active {
+                        status_label("active", Tone::Success)
+                    } else {
+                        status_label("inactive", Tone::Danger)
+                    },
                 ]
-                .align_y(iced::Alignment::Center),
+                .align_y(Center),
             );
 
             if licenses.is_empty() {
-                body = body.push(
-                    text("No licenses reported.")
-                        .size(10)
-                        .style(theme::muted_text),
-                );
+                body = body.push(hint("No licenses reported."));
             } else {
                 for license in licenses {
                     body = body.push(
                         row![
-                            text(license.product.as_str()).size(11).width(Fill),
+                            text(license.product.as_str())
+                                .size(font::BODY_LARGE)
+                                .font(fonts::MEDIUM)
+                                .width(Fill),
                             badge(license.kind.clone(), Tone::Neutral),
                         ]
                         .spacing(8)
-                        .align_y(iced::Alignment::Center),
+                        .align_y(Center),
                     );
                 }
             }
@@ -315,81 +344,96 @@ fn account_card(account: &AccountCardVm) -> Element<'_, UiAction> {
     card("Account", body.into())
 }
 
-fn running_card(
-    running: &LoadState<Vec<unity_hub_model::RunningEditorVm>>,
-) -> Element<'_, UiAction> {
-    let mut body = column![].spacing(8);
+/// The last path component, which is the project's folder name.
+fn project_name(path: &str) -> &str {
+    path.trim_end_matches(['/', '\\'])
+        .rsplit(['/', '\\'])
+        .next()
+        .filter(|name| !name.is_empty())
+        .unwrap_or(path)
+}
 
-    if running.is_loading() && running.data().is_none() {
-        body = body.push(
-            text("Checking running Editors…")
-                .size(10)
-                .style(theme::muted_text),
+fn running_row(instance: &RunningEditorVm) -> Element<'_, UiAction> {
+    let (glyph, tone) = if instance.dialog.is_some() || instance.safe_mode {
+        (icons::TRIANGLE_ALERT, Tone::Warning)
+    } else {
+        (icons::PLAY, Tone::Success)
+    };
+
+    let mut details = row![column![
+        text(project_name(&instance.project_path))
+            .size(font::BODY_LARGE)
+            .font(fonts::MEDIUM),
+        mono(format!(
+            "{} · {} · pid {}",
+            instance.project_path, instance.editor_version, instance.pid
+        )),
+    ]
+    .spacing(2)
+    .width(Fill)]
+    .spacing(10)
+    .align_y(Center);
+
+    if let Some(dialog) = &instance.dialog {
+        details = details.push(
+            text(format!("Waiting on dialog: {dialog}"))
+                .size(font::SMALL)
+                .style(theme::warning_text),
         );
-    } else if let Some(instances) = running.data() {
-        if instances.is_empty() {
-            body = body.push(
-                column![
-                    text("No Editor running.").size(12),
-                    text("Open a project with the Pipeline package to see live Editors here.")
-                        .size(10)
-                        .style(theme::muted_text),
-                ]
-                .spacing(3),
-            );
-        } else {
-            for instance in instances {
-                let mut details = column![
-                    text(instance.project_path.as_str()).size(11),
-                    text(format!(
-                        "{} · pid {}",
-                        instance.editor_version, instance.pid
-                    ))
-                    .size(9)
-                    .style(theme::faint_text),
-                ]
-                .spacing(2);
-
-                if let Some(phase) = &instance.phase {
-                    details = details.push(
-                        text(format!("Phase: {phase}"))
-                            .size(9)
-                            .style(theme::muted_text),
-                    );
-                }
-
-                let mut badges = Vec::new();
-                if let Some(version) = &instance.pipeline_version {
-                    badges.push(badge(format!("Pipeline {version}"), Tone::Highlight));
-                }
-                if instance.update_available {
-                    badges.push(badge("update available", Tone::Warning));
-                }
-                if instance.safe_mode {
-                    badges.push(badge("Safe mode", Tone::Danger));
-                }
-                if !badges.is_empty() {
-                    details = details.push(row(badges).spacing(6));
-                }
-
-                if let Some(dialog) = &instance.dialog {
-                    details = details.push(
-                        text(format!("Waiting on dialog: {dialog}"))
-                            .size(9)
-                            .style(theme::warning_text),
-                    );
-                }
-
-                body = body.push(container(details).padding(8).width(Fill).style(theme::card));
-            }
-        }
-    } else if let Some(error) = running.error() {
-        body = body.push(
-            text(error.message.as_str())
-                .size(10)
+    } else if let Some(phase) = &instance.phase {
+        details = details.push(
+            text(format!("Phase: {phase}"))
+                .size(font::SMALL)
                 .style(theme::muted_text),
         );
     }
+    if let Some(version) = &instance.pipeline_version {
+        details = details.push(badge(format!("Pipeline {version}"), Tone::Highlight));
+    }
+    if instance.update_available {
+        details = details.push(badge("update available", Tone::Warning));
+    }
+    if instance.safe_mode {
+        details = details.push(badge("Safe mode", Tone::Danger));
+    }
 
-    card("Running Editors", body.into())
+    list_row(
+        row![icon_tile(glyph, tone, 40.0), details]
+            .spacing(16)
+            .align_y(Center),
+    )
+}
+
+fn running_card(running: &LoadState<Vec<RunningEditorVm>>) -> Element<'_, UiAction> {
+    let body: Element<'_, UiAction> = if running.is_loading() && running.data().is_none() {
+        loading("Checking running Editors…")
+    } else if let Some(instances) = running.data() {
+        if instances.is_empty() {
+            row![
+                icon_tile(icons::MONITOR, Tone::Neutral, 40.0),
+                column![
+                    text("No Editor running.")
+                        .size(font::BODY_LARGE)
+                        .font(fonts::MEDIUM),
+                    hint("Open a project with the Pipeline package to see live Editors here."),
+                ]
+                .spacing(2),
+            ]
+            .spacing(16)
+            .align_y(Center)
+            .into()
+        } else {
+            column![
+                divider(),
+                divided(instances.iter().map(running_row).collect()),
+            ]
+            .into()
+        }
+    } else if let Some(error) = running.error() {
+        hint(error.message.as_str())
+    } else {
+        space().height(0).into()
+    };
+
+    card_with("Running Editors", hint("From unity editors running"), body)
 }

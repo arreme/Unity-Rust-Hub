@@ -59,8 +59,9 @@ fixture when a new state needs review.
 ### Shell
 
 - Sidebar navigation (5 destinations), active state.
-- Top bar: page title, CLI badge (checking / connected with version / missing),
-  refresh.
+- Sidebar footer: CLI status (checking / connected with version / missing).
+- Page header: title, subtitle, and actions (Refresh on Overview, Editors,
+  Projects).
 - Notice banner: info, success, error.
 - Job card: running with progress, succeeded, failed with error detail,
   cancelled, with collapsible-looking log area.
@@ -140,3 +141,12 @@ The gallery renders every fixture without a Unity CLI and is the fastest way to
 review loading/error/modal/job states against Figma. `cargo test -p unity-hub-ui`
 also constructs every fixture, so a broken screen fails CI without opening a
 window.
+
+Environment variables for review:
+
+- `GALLERY_FIXTURE=<index>` opens a specific fixture.
+- `GALLERY_TEXT_SCALE=1.5` renders every fixture at a larger text size.
+- `GALLERY_HEIGHT=<px>` opens a taller window.
+- `GALLERY_SCREENSHOTS=<dir>` captures every fixture from inside the gallery
+  window as raw RGBA (`NN-WxH.rgba`) and exits. Convert one with
+  `magick -size WxH -depth 8 rgba:<file> out.png`.
