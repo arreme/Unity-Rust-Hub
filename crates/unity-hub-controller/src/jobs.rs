@@ -9,7 +9,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde_json::Value;
 use unity_core::envelope::CliEnvelope;
 use unity_core::errors::{code_for_exit_code, message_for_exit_code};
-use unity_core::{CommandSpec, UnityError};
+use unity_core::{scrub_appimage_env, CommandSpec, UnityError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JobState {
@@ -100,6 +100,7 @@ impl JobManager {
         );
 
         let mut command = Command::new(&spec.program);
+        scrub_appimage_env(&mut command);
         command
             .args(&spec.args)
             .stdin(Stdio::null())
@@ -530,5 +531,57 @@ mod tests {
         assert_eq!(error.code, "COMMAND_FAILED");
         assert_eq!(error.message, "The Unity CLI command failed.");
         assert_eq!(error.exit_code, Some(6));
+    }
+
+    /// Update jobs are CLI children like any other: inheriting the GUI's AppImage
+    /// variables makes `unity self-update` install a CLI AppImage over the GUI.
+    #[cfg(unix)]
+    #[test]
+    fn jobs_do_not_inherit_the_gui_appimage_environment() {
+        struct Restore;
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                std::env::remove_var("APPIMAGE");
+            }
+        }
+
+        std::env::set_var("APPIMAGE", "/tmp/UnityRustHub-test.AppImage");
+        let _restore = Restore;
+
+        let dir =
+            std::env::temp_dir().join(format!("unity-rust-hub-job-env-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let target = dir.join("appimage.txt");
+        let spec = CommandSpec::new(
+            "sh",
+            vec![
+                "-c".to_string(),
+                format!(
+                    "printf '%s' \"${{APPIMAGE-unset}}\" > '{}'",
+                    target.display()
+                ),
+            ],
+        );
+
+        let manager = JobManager::new();
+        let started = manager.start("probe", spec).expect("job should start");
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let finished = manager.poll().iter().any(|event| {
+                event.job_id == started.id
+                    && matches!(event.state, JobState::Succeeded | JobState::Failed)
+            });
+            if finished {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "job did not finish");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        let written = std::fs::read_to_string(&target).expect("child should write its env");
+        std::fs::remove_dir_all(&dir).ok();
+
+        assert_eq!(written, "unset");
     }
 }

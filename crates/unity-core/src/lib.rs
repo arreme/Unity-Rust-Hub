@@ -13,4 +13,4 @@ pub mod runner;
 pub mod versions;
 
 pub use errors::UnityError;
-pub use runner::{CommandSpec, Executed, UnityCli};
+pub use runner::{scrub_appimage_env, CommandSpec, Executed, UnityCli};

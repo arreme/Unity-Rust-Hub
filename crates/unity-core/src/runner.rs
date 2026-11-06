@@ -23,6 +23,20 @@ use crate::versions::{
 /// opts out. Users can still use the CLI directly with their own preference.
 pub const DO_NOT_TRACK_ENV: &str = "DO_NOT_TRACK";
 
+/// Variables the AppImage runtime exports into the process it starts. They
+/// describe the AppImage that owns the *current* process, which for the GUI is
+/// the GUI's own AppImage. The GUI runs `unity` as a plain installed binary, so
+/// these must never reach a CLI child: `unity self-update` reads `APPIMAGE` and
+/// installs the new CLI AppImage over that path, replacing the GUI binary.
+pub const APPIMAGE_ENV_VARS: [&str; 4] = ["APPIMAGE", "APPDIR", "OWD", "ARGV0"];
+
+/// Strips [`APPIMAGE_ENV_VARS`] from a child's inherited environment.
+pub fn scrub_appimage_env(command: &mut Command) {
+    for key in APPIMAGE_ENV_VARS {
+        command.env_remove(key);
+    }
+}
+
 /// Reads are expected to finish quickly. A hung CLI process must not hold the
 /// single reader worker forever.
 pub const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(30);
@@ -514,6 +528,7 @@ fn spawn_error(spec: &CommandSpec, err: std::io::Error) -> UnityError {
 /// stdout/stderr are drained on dedicated threads while the supervisor polls.
 fn run_command(spec: &CommandSpec, timeout: Duration) -> Result<std::process::Output, UnityError> {
     let mut command = Command::new(&spec.program);
+    scrub_appimage_env(&mut command);
     command
         .args(&spec.args)
         .stdin(Stdio::null())
@@ -1217,5 +1232,41 @@ mod tests {
         assert!(!executed.envelope.success);
         assert!(executed.envelope.data.is_some());
         assert!(cli.execute(&spec).is_err());
+    }
+
+    /// The AppImage runtime exports APPIMAGE/APPDIR/OWD/ARGV0 for the AppImage
+    /// that owns the GUI process. A CLI child that inherits them believes it runs
+    /// from that AppImage, so `unity self-update` installs a CLI AppImage over
+    /// the GUI binary and the GUI stops starting.
+    #[cfg(unix)]
+    #[test]
+    fn cli_children_do_not_inherit_the_gui_appimage_environment() {
+        const VARS: [&str; 4] = ["APPIMAGE", "APPDIR", "OWD", "ARGV0"];
+
+        struct Restore;
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                for key in VARS {
+                    std::env::remove_var(key);
+                }
+            }
+        }
+
+        for key in VARS {
+            std::env::set_var(key, format!("/tmp/unity-rust-hub-test-{key}"));
+        }
+        let _restore = Restore;
+
+        let spec = CommandSpec::new(
+            "sh",
+            svec(&[
+                "-c",
+                r#"printf '%s|%s|%s|%s' "${APPIMAGE-unset}" "${APPDIR-unset}" "${OWD-unset}" "${ARGV0-unset}""#,
+            ]),
+        );
+        let output = run_command(&spec, Duration::from_secs(10)).expect("sh should run");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+
+        assert_eq!(stdout, "unset|unset|unset|unset");
     }
 }
