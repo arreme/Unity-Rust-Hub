@@ -444,6 +444,7 @@ pub enum Message {
     DismissNotice,
     RunErrorAction(ErrorActionVm),
     CopyDiagnosticsReport,
+    LoadDoctor,
     CopyDiagnoseReport(DiagnoseTopic),
     DismissAdvisory(String),
     CopyAdvisoryCommand(String),
@@ -527,6 +528,7 @@ impl From<UiAction> for Message {
             UiAction::DismissNotice => Self::DismissNotice,
             UiAction::RunErrorAction(action) => Self::RunErrorAction(action),
             UiAction::CopyDiagnosticsReport => Self::CopyDiagnosticsReport,
+            UiAction::LoadDoctor => Self::LoadDoctor,
             UiAction::CopyDiagnoseReport(topic) => Self::CopyDiagnoseReport(topic),
             UiAction::DismissAdvisory(id) => Self::DismissAdvisory(id),
             UiAction::CopyAdvisoryCommand(id) => Self::CopyAdvisoryCommand(id),
@@ -733,6 +735,7 @@ impl App {
                 self.ensure_page(page)
             }
             Message::Refresh => self.refresh_page(),
+            Message::LoadDoctor => self.load_doctor_now(),
             Message::StatusLoaded(result) => {
                 let previous_version = self.cli_version_key();
                 let installed = match result {
@@ -2208,16 +2211,12 @@ impl App {
         )
     }
 
-    /// Starts every Diagnostics read that is missing (or all of them on a
-    /// refresh). Each section owns its `Loadable`, so one slow report never
-    /// holds back the doctor checks or the environment paths.
+    /// Starts the automatic Diagnostics reads. `unity doctor` is deliberately
+    /// excluded: its credential probe can trigger a polkit password prompt, so
+    /// it runs only through the explicit `LoadDoctor` action or a Retry.
     fn load_diagnostics_page(&mut self, force: bool) -> Task<Message> {
         let mut tasks = Vec::new();
 
-        if self.doctor.should_start(force) {
-            self.doctor.begin();
-            tasks.push(load_doctor(self.cli.clone()));
-        }
         if self.environment.should_start(force) {
             self.environment.begin();
             tasks.push(load_environment(self.cli.clone()));
@@ -2236,6 +2235,16 @@ impl App {
         }
 
         Task::batch(tasks)
+    }
+
+    /// Runs `unity doctor` only on an explicit request. Its credential probe
+    /// can trigger polkit, so a page navigation or Refresh must not start it.
+    fn load_doctor_now(&mut self) -> Task<Message> {
+        if self.doctor.loading {
+            return Task::none();
+        }
+        self.doctor.begin();
+        load_doctor(self.cli.clone())
     }
 
     /// Refreshes the running-Editor list unless a read is already in flight.
@@ -2953,6 +2962,10 @@ impl App {
         } else if let Some(error) = &self.doctor.error {
             out.push_str("\n== Unity doctor ==\n");
             push_unavailable(&mut out, error);
+        } else {
+            out.push_str(
+                "\n== Unity doctor ==\nNot run. Use Run doctor on the Diagnostics page; it can ask for polkit authorization.\n",
+            );
         }
 
         if let Some(environment) = &self.environment.data {
@@ -6076,6 +6089,18 @@ mod tests {
     }
 
     #[test]
+    fn combined_report_names_doctor_as_not_run_when_the_opt_in_read_is_idle() {
+        let (mut app, _) = App::boot();
+        app.environment.data = Some(environment_info());
+
+        let report = app.diagnostics_report_text();
+
+        assert!(report.contains("== Unity doctor =="));
+        assert!(report.contains("Not run."));
+        assert!(!report.contains("Raw report:"));
+    }
+
+    #[test]
     fn combined_report_contains_doctor_environment_and_proxy() {
         let (mut app, _) = App::boot();
         app.doctor.data = Some(doctor_read());
@@ -6104,15 +6129,45 @@ mod tests {
     }
 
     #[test]
-    fn opening_diagnostics_starts_every_section_without_waiting() {
+    fn opening_diagnostics_starts_automatic_sections_but_not_doctor() {
         let (mut app, _) = App::boot();
         let _task = app.update(Message::Navigate(Page::Diagnostics));
 
-        assert!(app.doctor.loading);
+        // unity doctor's credential probe can trigger a polkit prompt, so it
+        // is opt-in instead of part of the automatic page load.
+        assert!(
+            !app.doctor.loading,
+            "unity doctor must not run automatically"
+        );
         assert!(app.environment.loading);
         assert!(app.diagnose_proxy.loading);
         assert!(app.diagnose_accelerator.loading);
         assert!(app.diagnose_update.loading);
+    }
+
+    #[test]
+    fn load_doctor_action_starts_the_opt_in_read() {
+        let (mut app, _) = App::boot();
+        app.page = Page::Diagnostics;
+
+        let _task = app.update(Message::from(UiAction::LoadDoctor));
+
+        assert!(app.doctor.loading, "the explicit action must start doctor");
+    }
+
+    #[test]
+    fn refreshing_diagnostics_does_not_rerun_doctor() {
+        let (mut app, _) = App::boot();
+        app.page = Page::Diagnostics;
+        app.doctor.data = Some(doctor_read());
+
+        let _task = app.update(Message::Refresh);
+
+        assert!(
+            !app.doctor.loading,
+            "the page refresh must not re-run the credential probe"
+        );
+        assert!(app.environment.loading);
     }
 
     #[test]

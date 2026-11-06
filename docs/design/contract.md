@@ -132,18 +132,21 @@ fixture when a new state needs review.
 ### Diagnostics
 
 - Page header: title/subtitle, Refresh, and Copy report. Copy is disabled until
-  at least one of doctor, environment, or proxy has data.
+  at least one of doctor, environment, or proxy has data. Refresh re-runs the
+  automatic section reads but never `unity doctor`.
 - Every section has its own load state, so one slow or failed read never gates
   the others. Each failure renders the shared error treatment and its own Retry;
   Retry re-runs only that section.
-- Doctor card (`unity doctor`): platform/architecture, runtime, Node, CLI
-  version, install path, log directory, auth/license summaries, and the check
-  list. Checks use pass/warn/fail/info/unknown styling, a humanized label from
-  the check `id` (CLI message, then `messageKey`, then a generic label as
-  fallbacks), and a detail line built from the CLI's `params`. A support-safe
-  raw report is visible in a scrollable inset: known credential fields are
-  replaced with `***` and proxy URLs lose their user-info. Loading, error +
-  Retry, empty, and loaded.
+- Doctor card (`unity doctor`): **opt-in**, because doctor's credential probe
+  can trigger a polkit password prompt. The idle card explains that and offers
+  Run doctor; a loaded card offers Refresh doctor. Platform/architecture,
+  runtime, Node, CLI version, install path, log directory, auth/license
+  summaries, and the check list. Checks use pass/warn/fail/info/unknown
+  styling, a humanized label from the check `id` (CLI message, then
+  `messageKey`, then a generic label as fallbacks), and a detail line built
+  from the CLI's `params`. A support-safe raw report is visible in a scrollable
+  inset: known credential fields are replaced with `***` and proxy URLs lose
+  their user-info. Loading, error + Retry, empty, and loaded.
 - Environment card (`unity env`): user data path, Editor install path, download
   cache, config path, CLI and Hub versions, plus the resolved proxy URL, source,
   auth source, and no-proxy list. A missing proxy section is stated explicitly.
@@ -299,15 +302,17 @@ last segment is the only available text. `detail` renders `params` as
 `Humanized key: value` pairs, preserving the CLI's values verbatim.
 
 Actions: `UiAction::CopyDiagnosticsReport` (combined plain text),
-`UiAction::CopyDiagnoseReport(DiagnoseTopic)` (one redacted report), and
-`UiAction::Refresh` (re-runs all five section reads). Retry uses the same
+`UiAction::CopyDiagnoseReport(DiagnoseTopic)` (one redacted report),
+`UiAction::LoadDoctor` (explicitly runs or refreshes `unity doctor`), and
+`UiAction::Refresh` (re-runs the automatic section reads; it does not run
+doctor). Retry uses the same
 `ErrorActionKind::Retry("read:doctor" | "read:environment" |
 "read:diagnose-proxy" | "read:diagnose-accelerator" | "read:diagnose-update")`
 targets as every other read.
 
 Gallery fixtures: `Diagnostics`, `Diagnostics · not loaded`,
-`Diagnostics · loading`, `Diagnostics · partial failure`,
-`Diagnostics · fully failed`.
+`Diagnostics · doctor not run`, `Diagnostics · loading`,
+`Diagnostics · partial failure`, `Diagnostics · fully failed`.
 
 ## Error contract
 

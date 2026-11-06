@@ -102,7 +102,9 @@ update target.
 - **Changelog** — `unity changelog` rendered as sections with readable bullet points and
   a focused heuristic for **possible breaking changes**, plus a raw Markdown view.
 - **Diagnostics** — a read-only answer to "can this machine build?" from `unity doctor`,
-  `unity env`, and the redacted `unity diagnose proxy|accelerator|update` reports. Doctor
+  `unity env`, and the redacted `unity diagnose proxy|accelerator|update` reports.
+  `unity doctor` runs only when you click **Run doctor**, because its credential
+  probe can trigger a polkit password prompt; the other reads load automatically. Doctor
   checks carry pass/warn/fail/info styling and human-readable labels derived from the check
   id (the localization key is the fallback), and a support-safe raw report stays visible:
   known credential fields are masked and proxy URLs lose their user-info. Environment

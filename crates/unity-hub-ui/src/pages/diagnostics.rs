@@ -7,8 +7,8 @@ use unity_hub_model::{
 };
 
 use crate::components::{
-    badge, caption, card_with, detail_column, detail_mono, empty, error_text, hint, icon_button,
-    loading, mono, page_header, refresh_button, scroll, ButtonKind, COMPACT,
+    badge, button, caption, card_with, detail_column, detail_mono, empty, error_text, hint,
+    icon_button, loading, mono, page_header, refresh_button, scroll, ButtonKind, COMPACT,
 };
 use crate::fonts;
 use crate::icons::{self, icon};
@@ -50,19 +50,38 @@ fn doctor_section(state: &LoadState<DoctorVm>) -> Element<'_, UiAction> {
     let summary = state
         .data()
         .map(check_summary)
-        .unwrap_or_else(|| hint("Waiting for `unity doctor`"));
+        .unwrap_or_else(|| hint("Not run"));
 
-    card_with(
-        "CLI checks",
-        summary,
+    let mut header = row![summary].spacing(8).align_y(Center);
+    match state {
+        LoadState::Idle => {
+            header = header
+                .push(button("Run doctor", ButtonKind::Secondary).on_press(UiAction::LoadDoctor));
+        }
+        LoadState::Ready(_) => {
+            header = header.push(
+                button("Refresh doctor", ButtonKind::Secondary).on_press(UiAction::LoadDoctor),
+            );
+        }
+        _ => {}
+    }
+
+    let body = if matches!(state, LoadState::Idle) {
+        empty(
+            "CLI checks are not run",
+            "`unity doctor` probes the credential store and can trigger a polkit password prompt. Run it only when you need the full report.",
+        )
+    } else {
         section_body(
             state,
             "Reading `unity doctor`…",
-            "CLI checks are not loaded",
-            "Open this page to read the CLI's own system report.",
+            "CLI checks are not run",
+            "`unity doctor` probes the credential store and can trigger a polkit password prompt. Run it only when you need the full report.",
             doctor_body,
-        ),
-    )
+        )
+    };
+
+    card_with("CLI checks", header.into(), body)
 }
 
 fn environment_section(state: &LoadState<EnvironmentVm>) -> Element<'_, UiAction> {

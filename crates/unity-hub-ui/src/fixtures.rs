@@ -83,6 +83,10 @@ pub fn all() -> Vec<Fixture> {
             view_model: diagnostics_idle(),
         },
         Fixture {
+            name: "Diagnostics · doctor not run",
+            view_model: diagnostics_doctor_not_run(),
+        },
+        Fixture {
             name: "Diagnostics · loading",
             view_model: diagnostics_loading(),
         },
@@ -902,6 +906,22 @@ fn diagnostics_idle() -> ViewModel {
             accelerator_report: LoadState::Idle,
             update_report: LoadState::Idle,
             can_copy: false,
+        }),
+    )
+}
+
+/// The page's normal state: the automatic reads have loaded, while
+/// `unity doctor` waits for an explicit Run because its probe can prompt.
+fn diagnostics_doctor_not_run() -> ViewModel {
+    base(
+        Page::Diagnostics,
+        PageVm::Diagnostics(DiagnosticsVm {
+            doctor: LoadState::Idle,
+            environment: LoadState::Ready(environment_fixture()),
+            proxy_report: LoadState::Ready(diagnose_fixture(DiagnoseTopic::Proxy)),
+            accelerator_report: LoadState::Ready(diagnose_fixture(DiagnoseTopic::Accelerator)),
+            update_report: LoadState::Ready(diagnose_fixture(DiagnoseTopic::Update)),
+            can_copy: true,
         }),
     )
 }

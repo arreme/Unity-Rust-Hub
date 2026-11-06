@@ -25,6 +25,10 @@ pub enum UiAction {
     /// Copies the combined diagnostics report (doctor + env + proxy) as plain
     /// text. Reads only; nothing on that page mutates the machine.
     CopyDiagnosticsReport,
+    /// Runs `unity doctor` on demand. It is deliberately not part of the
+    /// automatic Diagnostics load because its credential probe can trigger a
+    /// polkit password prompt.
+    LoadDoctor,
     /// Copies one redacted `unity diagnose` report.
     CopyDiagnoseReport(DiagnoseTopic),
     DismissJob,
