@@ -138,17 +138,24 @@ fn changelog_body(vm: &ChangelogVm) -> Element<'_, UiAction> {
         .collect::<Vec<&ChangelogSectionVm>>();
 
     if sections.is_empty() {
-        body = body.push(notice(
-            Tone::Info,
-            icons::INFO,
+        let empty = if vm.app_impact_only {
             column![
                 text("No entry names a command, flag, error code or exit code this app uses.")
                     .size(font::BODY_LARGE)
                     .font(fonts::MEDIUM),
                 hint("Turn off “Affects this app” to read the full release notes."),
             ]
-            .spacing(3),
-        ));
+            .spacing(3)
+        } else {
+            column![
+                text("The CLI returned no release-note entries.")
+                    .size(font::BODY_LARGE)
+                    .font(fonts::MEDIUM),
+                hint("Try another CLI version, or use the raw Markdown view."),
+            ]
+            .spacing(3)
+        };
+        body = body.push(notice(Tone::Info, icons::INFO, empty));
     } else {
         // Sections sit two per row.
         for pair in sections.chunks(2) {

@@ -701,7 +701,7 @@ fn flag_token() -> &'static Regex {
 
 fn error_code_token() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\b").expect("valid regex"))
+    RE.get_or_init(|| Regex::new(r"\b[A-Z][A-Z0-9_]{2,}\b").expect("valid regex"))
 }
 
 fn exit_code_token() -> &'static Regex {
@@ -751,13 +751,7 @@ fn classify_entry(raw: &str) -> EntrySignals {
         signals.docs_kind = DocsTopicKind::ScriptReference;
     }
 
-    let backticked_command = signals.docs_kind == DocsTopicKind::Cli
-        || backtick_span().captures_iter(raw).any(|capture| {
-            capture
-                .get(1)
-                .map(|span| surface::command_path(&span_tokens(span.as_str())).is_some())
-                .unwrap_or(false)
-        });
+    let backticked_command = signals.docs_kind == DocsTopicKind::Cli;
     signals.app_impact = backticked_command
         || mentions_used_command(raw)
         || mentions_used_flag(raw)
@@ -1060,6 +1054,8 @@ mod tests {
             "- `--format json` carries the new field.",
             "- It now exits 7 (`VCS_PROVIDER_UNREACHABLE`).",
             "- It exits 2 instead of 1.",
+            "- The CLI reports TIMEOUT when the Editor stops answering.",
+            "- The target is UNAVAILABLE while it loads.",
         ] {
             assert!(
                 classify_entry(relevant).app_impact,

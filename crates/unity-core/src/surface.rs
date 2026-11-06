@@ -389,25 +389,6 @@ pub fn command_path(tokens: &[&str]) -> Option<String> {
     Some(path)
 }
 
-/// The first command token in `tokens`, for prose such as
-/// "`unity install` now ...". Kept separate from [`command_path`] because the
-/// docs topic wants the subcommand while the app-impact check only needs to
-/// know the command is in the registry.
-pub fn first_command(tokens: &[&str]) -> Option<&'static str> {
-    let mut tokens = tokens;
-    if tokens
-        .first()
-        .is_some_and(|token| token.eq_ignore_ascii_case("unity"))
-    {
-        tokens = &tokens[1..];
-    }
-    let name = *tokens.first()?;
-    COMMANDS
-        .iter()
-        .find(|command| command.name == name)
-        .map(|command| command.name)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

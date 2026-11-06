@@ -102,7 +102,13 @@ impl DocsPage {
     }
 }
 
-fn is_safe_docs_url(url: &str) -> bool {
+/// The single URL-safety policy shared by the CLI adapter and the OS opener.
+///
+/// Only HTTP(S) links may reach a browser: a docs lookup returns URLs from the
+/// CLI, and a future CLI or a corrupted answer must not turn into `file://` or
+/// an application scheme the user did not click intentionally. The controller
+/// calls this same predicate before spawning a platform opener.
+pub fn is_safe_docs_url(url: &str) -> bool {
     let lower = url.to_ascii_lowercase();
     if !(lower.starts_with("https://") || lower.starts_with("http://")) {
         return false;

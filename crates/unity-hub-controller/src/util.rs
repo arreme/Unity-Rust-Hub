@@ -131,19 +131,14 @@ pub struct OpenerCommand {
     pub args: Vec<String>,
 }
 
-/// Only HTTP(S) links may reach the OS opener. A docs lookup returns URLs from
-/// the CLI, and a future CLI or a corrupted answer must not turn into
-/// `file://` or an application scheme the user did not click intentionally.
-fn is_openable_url(url: &str) -> bool {
-    let lower = url.to_ascii_lowercase();
-    (lower.starts_with("https://") || lower.starts_with("http://"))
-        && !url.chars().any(char::is_control)
-}
-
 /// The ordered candidates for opening `url`. Linux tries the desktop opener
 /// first and then two standard fallbacks; Windows and macOS have one each.
+///
+/// The HTTP(S)-only rule is `unity_core::docs::is_safe_docs_url`, the same
+/// predicate the adapter uses before handing a URL to the view model, so the
+/// trust boundary has one definition.
 pub fn opener_commands(url: &str) -> Result<Vec<OpenerCommand>, String> {
-    if !is_openable_url(url) {
+    if !unity_core::docs::is_safe_docs_url(url) {
         return Err("Only http(s) links can be opened.".to_string());
     }
 
@@ -200,7 +195,15 @@ pub fn open_external_url(url: &str) -> Result<(), String> {
             .stderr(Stdio::null())
             .spawn()
         {
-            Ok(_) => return Ok(()),
+            Ok(mut child) => {
+                // The opener is fire-and-forget, but its child must be reaped
+                // or every click leaves a zombie on Unix. Wait on a detached
+                // thread so the click still returns immediately.
+                std::thread::spawn(move || {
+                    let _ = child.wait();
+                });
+                return Ok(());
+            }
             Err(error) => last_error = Some(format!("{}: {error}", candidate.program)),
         }
     }
