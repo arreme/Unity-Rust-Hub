@@ -6,16 +6,18 @@ pub enum Page {
     Overview,
     Editors,
     Projects,
+    Skills,
     Diagnostics,
     Changelog,
     Settings,
 }
 
 impl Page {
-    pub const ALL: [Page; 6] = [
+    pub const ALL: [Page; 7] = [
         Page::Overview,
         Page::Editors,
         Page::Projects,
+        Page::Skills,
         Page::Diagnostics,
         Page::Changelog,
         Page::Settings,
@@ -219,6 +221,7 @@ pub enum PageVm {
     Overview(OverviewVm),
     Editors(EditorsVm),
     Projects(ProjectsVm),
+    Skills(SkillsVm),
     Diagnostics(DiagnosticsVm),
     Changelog(ChangelogVm),
     Settings(SettingsVm),
@@ -529,6 +532,162 @@ pub struct ProjectRowVm {
     pub short_path: String,
     pub modified: String,
     pub badges: Vec<BadgeVm>,
+}
+
+// ---------------------------------------------------------------------------
+// Skills
+
+/// The Unity agent skill: supported clients, the CLI's tracked installs, and
+/// the explicit install/refresh actions.
+///
+/// The screen is read-first. `clients` and `installs` are independent reads, so
+/// a slow or failed list never hides the other. `result` is the last streamed
+/// run's terminal rows, kept verbatim: `skipped` and `conflict` are never
+/// collapsed into a success state.
+#[derive(Debug, Clone)]
+pub struct SkillsVm {
+    pub clients: LoadState<Vec<SkillClientVm>>,
+    pub installs: LoadState<Vec<SkillInstallVm>>,
+    pub install: SkillInstallOptionsVm,
+    /// The last refresh's outcome rows, when a job has finished.
+    pub result: Option<SkillRunVm>,
+    /// "Preview refresh (dry run)" until the first preview lands, then
+    /// "Refresh now". The first refresh click is always a `--dry-run`.
+    pub refresh_label: String,
+    /// Explains the dry-run default and what the refresh command will do.
+    pub refresh_hint: String,
+    /// The exact `unity skill refresh` command the next click runs.
+    pub refresh_command: String,
+    /// The project the app will let `--local` write into, when one is known.
+    pub project_context: Option<String>,
+    /// True when `--local` can be offered at all.
+    pub local_available: bool,
+    /// Why `--local` is unavailable; never shown while `local_available`.
+    pub local_disabled_reason: Option<String>,
+    /// A running job disables every mutation control; the job card owns Cancel.
+    pub job_running: bool,
+}
+
+/// One supported AI client from `unity skill install --list`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillClientVm {
+    /// The client id used in the command, e.g. `claude-code`.
+    pub client: String,
+    /// A display label for the id.
+    pub label: String,
+    /// The path the CLI reports for this client's skill.
+    pub path: String,
+    /// The CLI's installed/absent verdict.
+    pub installed: bool,
+}
+
+/// One tracked install from `unity skills --format json`, verbatim.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillInstallVm {
+    pub path: String,
+    pub client: String,
+    pub skill: String,
+    pub status: String,
+}
+
+/// The install card's options and the exact command they produce.
+#[derive(Debug, Clone)]
+pub struct SkillInstallOptionsVm {
+    /// `--local`: write into the current project. Only honoured when a project
+    /// context is known.
+    pub local: bool,
+    /// `--yes`: replace an outdated copy instead of letting the CLI skip it.
+    pub overwrite: bool,
+    /// `--dry-run`: preview the install rows and change nothing.
+    pub dry_run: bool,
+    /// The optional `--skill <name>` filter; empty installs every skill.
+    pub skill_input: String,
+    /// A validation message for `skill_input`, when it is not a skill name.
+    pub skill_input_error: Option<String>,
+    /// The exact `unity skill install --all` command the button runs.
+    pub all_command: String,
+}
+
+/// One finished `unity skill install`/`refresh` run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillRunVm {
+    /// `true` when the run carried `--dry-run`.
+    pub dry_run: bool,
+    /// One row per tracked install, in CLI order.
+    pub rows: Vec<SkillOutcomeRowVm>,
+    /// Set when at least one row is a `conflict` the CLI left alone.
+    pub force: Option<SkillForceVm>,
+}
+
+/// The `--force` offer that follows a `conflict` row.
+///
+/// The offer only exists after the explanation is present: the CLI did not
+/// write that copy, so `--force` takes ownership of it and replaces it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillForceVm {
+    pub explanation: String,
+    /// The exact command the force action would run.
+    pub command: String,
+    /// Names the scope ("the `cursor` install" / "the refresh").
+    pub scope: String,
+}
+
+/// One outcome row, verbatim from the CLI.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillOutcomeRowVm {
+    pub path: String,
+    pub client: String,
+    pub skill: String,
+    pub outcome: SkillOutcomeVm,
+    /// The CLI's `skipReason`, when it gave one.
+    pub skip_reason: Option<String>,
+}
+
+/// The documented beta.17 outcomes plus an explicit unknown state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SkillOutcomeVm {
+    Refreshed,
+    UpToDate,
+    Pruned,
+    Skipped,
+    Conflict,
+    WouldUpdate,
+    WouldSkip,
+    WouldPrune,
+    /// A word this build does not know yet; shown verbatim.
+    Unknown(String),
+}
+
+impl SkillOutcomeVm {
+    /// The CLI's own word, used as the row label.
+    pub fn label(&self) -> &str {
+        match self {
+            Self::Refreshed => "refreshed",
+            Self::UpToDate => "up-to-date",
+            Self::Pruned => "pruned",
+            Self::Skipped => "skipped",
+            Self::Conflict => "conflict",
+            Self::WouldUpdate => "would-update",
+            Self::WouldSkip => "would-skip",
+            Self::WouldPrune => "would-prune",
+            Self::Unknown(value) => value,
+        }
+    }
+
+    pub fn tone(&self) -> Tone {
+        match self {
+            Self::Refreshed | Self::UpToDate => Tone::Success,
+            Self::Pruned | Self::WouldPrune => Tone::Info,
+            Self::Skipped | Self::WouldSkip => Tone::Warning,
+            Self::Conflict => Tone::Danger,
+            Self::WouldUpdate => Tone::Accent,
+            Self::Unknown(_) => Tone::Neutral,
+        }
+    }
+
+    pub fn is_conflict(&self) -> bool {
+        matches!(self, Self::Conflict)
+    }
 }
 
 // ---------------------------------------------------------------------------

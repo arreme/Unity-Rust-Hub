@@ -97,6 +97,30 @@ pub fn format_iso(value: Option<&str>) -> String {
         .unwrap_or_else(|| "—".to_string())
 }
 
+/// Walks up from `start` looking for a Unity project root.
+///
+/// A Unity project is identified by `ProjectSettings/ProjectVersion.txt`, the
+/// file the Editor itself writes. The app never guesses a project from a folder
+/// name: without that marker, `--local` has no honest context and stays off.
+pub fn detect_unity_project(start: &std::path::Path) -> Option<std::path::PathBuf> {
+    start
+        .ancestors()
+        .find(|directory| {
+            directory
+                .join("ProjectSettings")
+                .join("ProjectVersion.txt")
+                .is_file()
+        })
+        .map(std::path::Path::to_path_buf)
+}
+
+/// The project context of this process, if it was launched from a Unity project
+/// (or one of its subfolders).
+pub fn project_context() -> Option<String> {
+    let directory = std::env::current_dir().ok()?;
+    detect_unity_project(&directory).map(|path| path.display().to_string())
+}
+
 pub fn short_path(path: &str, max: usize) -> Cow<'_, str> {
     if path.chars().count() <= max {
         return Cow::Borrowed(path);
@@ -219,6 +243,31 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
+
+    #[test]
+    fn project_context_requires_the_editor_marker_and_walks_up() {
+        let root = std::env::temp_dir().join(format!(
+            "unity-rust-hub-project-context-{}",
+            std::process::id()
+        ));
+        let project = root.join("Game");
+        let nested = project.join("Assets");
+        std::fs::create_dir_all(&nested).unwrap();
+
+        assert_eq!(detect_unity_project(&nested), None);
+
+        std::fs::create_dir_all(project.join("ProjectSettings")).unwrap();
+        std::fs::write(
+            project.join("ProjectSettings").join("ProjectVersion.txt"),
+            "m_EditorVersion: 6000.3.15f1\n",
+        )
+        .unwrap();
+
+        assert_eq!(detect_unity_project(&nested), Some(project.clone()));
+        assert_eq!(detect_unity_project(&project), Some(project));
+
+        std::fs::remove_dir_all(root).ok();
+    }
 
     #[test]
     fn blocking_reads_are_serialized() {

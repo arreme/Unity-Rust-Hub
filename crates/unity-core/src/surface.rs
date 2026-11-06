@@ -44,6 +44,7 @@ pub mod command {
     pub const STATUS: &str = "status";
     pub const PLUGIN: &str = "plugin";
     pub const SKILL: &str = "skill";
+    pub const SKILLS: &str = "skills";
     pub const TEMPLATES: &str = "templates";
     pub const CLOUD: &str = "cloud";
     pub const BUILD: &str = "build";
@@ -122,6 +123,9 @@ pub mod flag {
     pub const EDITOR_VERSION: &str = "--editor-version";
     pub const PROJECT_PATH: &str = "--project-path";
     pub const GIT_TOKEN_FROM_STDIN: &str = "--git-token-from-stdin";
+    pub const LIST: &str = "--list";
+    pub const LOCAL: &str = "--local";
+    pub const SKILL_NAME: &str = "--skill";
 }
 
 /// Stable CLI error codes the app turns into remediation actions. The codes
@@ -260,6 +264,10 @@ pub const COMMANDS: &[CommandSurface] = &[
         subcommands: &[subcommand::INSTALL, subcommand::REFRESH],
     },
     CommandSurface {
+        name: command::SKILLS,
+        subcommands: &[],
+    },
+    CommandSurface {
         name: command::TEMPLATES,
         subcommands: &[],
     },
@@ -317,6 +325,9 @@ pub const FLAGS: &[&str] = &[
     flag::EDITOR_VERSION,
     flag::PROJECT_PATH,
     flag::GIT_TOKEN_FROM_STDIN,
+    flag::LIST,
+    flag::LOCAL,
+    flag::SKILL_NAME,
 ];
 
 /// Stable error codes the app maps to a remediation action.
@@ -411,6 +422,17 @@ mod tests {
             command_path(&["unity", "projects", "audit", "/tmp/Game"]).as_deref(),
             Some("projects audit")
         );
+        assert_eq!(
+            command_path(&["unity", "skill", "install", "cursor"]).as_deref(),
+            Some("skill install")
+        );
+        assert_eq!(
+            command_path(&["unity", "skills"]).as_deref(),
+            Some("skills")
+        );
+        for flag in [flag::LIST, flag::LOCAL, flag::SKILL_NAME] {
+            assert!(is_flag(flag), "{flag} must be in the surface registry");
+        }
     }
 
     #[test]

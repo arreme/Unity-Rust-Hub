@@ -20,5 +20,5 @@ pub use docs::{DocsLookup, DocsPage, DocsScope};
 pub use errors::UnityError;
 pub use runner::{
     scrub_appimage_env, CommandSpec, DiagnoseTopic, DoctorRead, EditorVerifyRead, Executed,
-    InstallOptions, ModuleInstallOptions, UnityCli,
+    InstallOptions, ModuleInstallOptions, SkillInstallOptions, SkillRefreshOptions, UnityCli,
 };

@@ -723,9 +723,267 @@ pub struct PreviewModule {
     pub installed_size: u64,
 }
 
+/// One tracked agent-skill install from `unity skills --format json`.
+///
+/// Every field is a plain string because the CLI sends the install path, the
+/// client id, the skill name, and a status for older and newer betas alike. The
+/// unknown fields are kept so a newer status the app does not model yet is never
+/// silently dropped.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TrackedSkillInstall {
+    #[serde(default, deserialize_with = "default_string")]
+    pub path: String,
+    #[serde(default, deserialize_with = "default_string")]
+    pub client: String,
+    #[serde(default, deserialize_with = "default_string")]
+    pub skill: String,
+    #[serde(default, deserialize_with = "default_string")]
+    pub status: String,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+/// One supported client from `unity skill install --list --format json`.
+///
+/// `installed` is optional because some betas only send a `status` string and
+/// others only send the boolean. [`SkillClientInfo::is_installed`] accepts both
+/// without guessing: an unrecognized status stays absent.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillClientInfo {
+    #[serde(default, alias = "id", deserialize_with = "default_string")]
+    pub client: String,
+    #[serde(default, deserialize_with = "default_string")]
+    pub path: String,
+    #[serde(default, deserialize_with = "default_string")]
+    pub status: String,
+    #[serde(default)]
+    pub installed: Option<bool>,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+impl SkillClientInfo {
+    /// The client's install path, as the CLI reported it.
+    pub fn install_path(&self) -> &str {
+        &self.path
+    }
+
+    /// Whether the CLI reports this client's skill as installed. The explicit
+    /// boolean wins; otherwise the documented status words do.
+    pub fn is_installed(&self) -> bool {
+        if let Some(installed) = self.installed {
+            return installed;
+        }
+        matches!(
+            self.status.trim().to_ascii_lowercase().as_str(),
+            "installed" | "present" | "current" | "up-to-date"
+        )
+    }
+}
+
+/// One row of the terminal result frame of `unity skill refresh` or
+/// `unity skill install`.
+///
+/// `status` is the CLI's own outcome word (`refreshed`, `up-to-date`,
+/// `pruned`, `skipped`, `conflict`, or a `would-*` preview). `outcome()`
+/// recognizes exactly those documented words and keeps anything else verbatim.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillRefreshRow {
+    #[serde(default, deserialize_with = "default_string")]
+    pub path: String,
+    #[serde(default, deserialize_with = "default_string")]
+    pub client: String,
+    #[serde(default, deserialize_with = "default_string")]
+    pub skill: String,
+    /// The outcome word. `outcome` is accepted as an alias for older betas.
+    #[serde(default, alias = "outcome", deserialize_with = "default_string")]
+    pub status: String,
+    /// Why a row was left alone or pruned. `reason` is accepted as an alias.
+    #[serde(default, alias = "reason", deserialize_with = "optional_text")]
+    pub skip_reason: Option<String>,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+impl SkillRefreshRow {
+    pub fn outcome(&self) -> SkillOutcome {
+        SkillOutcome::parse(&self.status)
+    }
+
+    /// The CLI's own skip reason, kept verbatim. An empty string is treated as
+    /// "the CLI gave no reason" rather than shown as a blank line.
+    pub fn reason(&self) -> Option<&str> {
+        self.skip_reason
+            .as_deref()
+            .map(str::trim)
+            .filter(|reason| !reason.is_empty())
+    }
+}
+
+/// The documented beta.17 skill outcomes, including its dry-run previews.
+///
+/// The adapter deliberately models these as an enum: the view layer must never
+/// collapse `skipped` or `conflict` into a success state, and a future outcome
+/// word stays visible through [`SkillOutcome::Unknown`] instead of failing the
+/// whole result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SkillOutcome {
+    Refreshed,
+    UpToDate,
+    Pruned,
+    Skipped,
+    Conflict,
+    WouldUpdate,
+    WouldSkip,
+    WouldPrune,
+    Unknown(String),
+}
+
+impl SkillOutcome {
+    /// Parses one outcome word. Separators are normalized so `up_to_date` and
+    /// `up-to-date` agree; matching is otherwise exact.
+    pub fn parse(value: &str) -> Self {
+        let normalized = value.trim().to_ascii_lowercase().replace('_', "-");
+        match normalized.as_str() {
+            "refreshed" => Self::Refreshed,
+            "up-to-date" | "uptodate" => Self::UpToDate,
+            "pruned" => Self::Pruned,
+            "skipped" => Self::Skipped,
+            "conflict" => Self::Conflict,
+            "would-update" => Self::WouldUpdate,
+            "would-skip" => Self::WouldSkip,
+            "would-prune" => Self::WouldPrune,
+            _ => Self::Unknown(value.trim().to_string()),
+        }
+    }
+
+    /// The CLI's own word, suitable for a verbatim row label.
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Refreshed => "refreshed",
+            Self::UpToDate => "up-to-date",
+            Self::Pruned => "pruned",
+            Self::Skipped => "skipped",
+            Self::Conflict => "conflict",
+            Self::WouldUpdate => "would-update",
+            Self::WouldSkip => "would-skip",
+            Self::WouldPrune => "would-prune",
+            Self::Unknown(value) => value,
+        }
+    }
+
+    /// True for the three `--dry-run` preview words.
+    pub fn is_preview(&self) -> bool {
+        matches!(self, Self::WouldUpdate | Self::WouldSkip | Self::WouldPrune)
+    }
+
+    pub fn is_conflict(&self) -> bool {
+        matches!(self, Self::Conflict)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tracked_skill_installs_parse_items_and_tolerate_nulls() {
+        let installs: Vec<TrackedSkillInstall> = serde_json::from_value(serde_json::json!([
+            {
+                "path": "/home/ada/.claude/skills/unity",
+                "client": "claude-code",
+                "skill": "unity-cli",
+                "status": "installed"
+            },
+            {
+                "path": null,
+                "client": "cursor",
+                "skill": null,
+                "status": null,
+                "futureField": true
+            }
+        ]))
+        .expect("tracked installs parse");
+
+        assert_eq!(installs.len(), 2);
+        assert_eq!(installs[0].client, "claude-code");
+        assert_eq!(installs[0].status, "installed");
+        assert_eq!(installs[1].path, "");
+        assert_eq!(installs[1].skill, "");
+        assert_eq!(installs[1].status, "");
+        assert!(installs[1].extra.contains_key("futureField"));
+    }
+
+    #[test]
+    fn skill_clients_accept_boolean_or_status_and_keep_the_path() {
+        let clients: Vec<SkillClientInfo> = serde_json::from_value(serde_json::json!([
+            { "client": "claude-code", "path": "/home/ada/.claude/skills", "installed": true },
+            { "id": "cursor", "path": "/home/ada/.cursor/skills", "status": "absent" },
+            { "client": "codex", "path": "/home/ada/.codex/skills", "status": "installed" },
+            { "client": "grok", "path": null, "installed": null }
+        ]))
+        .expect("clients parse");
+
+        assert!(clients[0].is_installed());
+        assert_eq!(clients[0].install_path(), "/home/ada/.claude/skills");
+        assert!(!clients[1].is_installed());
+        assert_eq!(clients[1].client, "cursor");
+        assert!(clients[2].is_installed());
+        assert!(!clients[3].is_installed());
+        assert_eq!(clients[3].path, "");
+    }
+
+    #[test]
+    fn refresh_rows_parse_every_documented_outcome_verbatim() {
+        let rows: Vec<SkillRefreshRow> = serde_json::from_value(serde_json::json!([
+            { "path": "/a", "client": "claude-code", "skill": "unity-cli", "status": "refreshed" },
+            { "path": "/b", "client": "cursor", "skill": "unity-cli", "status": "up-to-date" },
+            { "path": "/c", "client": "codex", "skill": "unity-cli", "status": "pruned", "skipReason": "The skill no longer exists upstream." },
+            { "path": "/d", "client": "windsurf", "skill": "unity-cli", "status": "skipped", "skipReason": "The copy is older and --yes was not passed." },
+            { "path": "/e", "client": "vscode", "skill": "unity-cli", "status": "conflict", "reason": "The CLI did not write this copy." },
+            { "path": "/f", "client": "cline", "skill": "unity-cli", "status": "would-update" },
+            { "path": "/g", "client": "grok", "skill": "unity-cli", "status": "would_skip" },
+            { "path": "/h", "client": "opencode", "skill": "unity-cli", "outcome": "would-prune" }
+        ]))
+        .expect("refresh rows parse");
+
+        let outcomes: Vec<SkillOutcome> = rows.iter().map(SkillRefreshRow::outcome).collect();
+        assert_eq!(outcomes[0], SkillOutcome::Refreshed);
+        assert_eq!(outcomes[1], SkillOutcome::UpToDate);
+        assert_eq!(outcomes[2], SkillOutcome::Pruned);
+        assert_eq!(outcomes[3], SkillOutcome::Skipped);
+        assert_eq!(outcomes[4], SkillOutcome::Conflict);
+        assert_eq!(outcomes[5], SkillOutcome::WouldUpdate);
+        assert_eq!(outcomes[6], SkillOutcome::WouldSkip);
+        assert_eq!(outcomes[7], SkillOutcome::WouldPrune);
+
+        assert_eq!(
+            rows[2].reason(),
+            Some("The skill no longer exists upstream.")
+        );
+        assert_eq!(
+            rows[3].reason(),
+            Some("The copy is older and --yes was not passed.")
+        );
+        assert_eq!(rows[4].reason(), Some("The CLI did not write this copy."));
+        assert_eq!(rows[0].reason(), None);
+    }
+
+    #[test]
+    fn unknown_skill_outcomes_stay_verbatim_and_are_never_previews() {
+        let outcome = SkillOutcome::parse("reinstalled");
+        assert_eq!(outcome, SkillOutcome::Unknown("reinstalled".to_string()));
+        assert_eq!(outcome.as_str(), "reinstalled");
+        assert!(!outcome.is_preview());
+        assert!(!outcome.is_conflict());
+
+        assert_eq!(SkillOutcome::parse("").as_str(), "");
+        assert!(SkillOutcome::WouldUpdate.is_preview());
+        assert!(SkillOutcome::Conflict.is_conflict());
+    }
 
     #[test]
     fn doctor_report_keeps_checks_and_tolerates_evolving_shapes() {

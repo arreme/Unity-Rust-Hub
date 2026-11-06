@@ -113,6 +113,29 @@ pub enum UiAction {
     UpgradeTargetChanged(String),
     UpgradeConfirmed(bool),
     StartUpgrade,
+    /// Installs the Unity agent skill to one client (the stable client id).
+    /// The current install options apply; the client is a token, never a row
+    /// index.
+    InstallSkill(String),
+    /// Installs the skill to every supported client (`--all`).
+    InstallAllSkills,
+    /// `--local`: write into the current project. Ignored by the controller
+    /// when no project context is known.
+    SkillLocalToggled(bool),
+    /// `--yes`: replace an outdated copy instead of letting the CLI skip it.
+    SkillOverwriteToggled(bool),
+    /// `--dry-run` for an install.
+    SkillDryRunToggled(bool),
+    /// Types the optional `--skill <name>` filter.
+    SkillNameChanged(String),
+    /// Runs the next refresh. The first click after opening the page is a
+    /// dry run; later clicks apply.
+    StartSkillRefresh,
+    /// Runs an explicit `--dry-run` refresh, even after a real refresh.
+    PreviewSkillRefresh,
+    /// Re-runs the last skill install/refresh with `--force` after a conflict
+    /// row explained that the CLI did not write that copy.
+    ForceSkillLastRun,
     ChangelogTargetChanged(String),
     LoadChangelog,
     ToggleRawChangelog,

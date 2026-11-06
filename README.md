@@ -115,6 +115,18 @@ update target.
   render pipeline, build target, cloud/VCS badges, an Open action, and a guarded upgrade
   dialog. "Editor not installed" matches both version and architecture, and a target
   version with two builds is explained rather than silently resolved.
+- **Skills** — the Unity agent skill across the AI clients the CLI supports. The
+  page reads `unity skill install --list` for each client's label, install path, and
+  installed/absent status, plus `unity skills` for every copy the CLI tracks. Install
+  one client or `--all`, with `--local`, `--skill <name>`, `--yes`, and `--dry-run`;
+  `--local` is offered only when the Hub was launched from a Unity project, and is
+  disabled with an explanation otherwise. A refresh reports one row per tracked
+  install with the CLI's own `refreshed`, `up-to-date`, `pruned`, `skipped`, or
+  `conflict` outcome (and `would-update`/`would-skip`/`would-prune` under `--dry-run`),
+  never collapsing a skip or conflict into success. The first refresh click is a dry
+  run; the next click applies. A conflict row explains that the CLI did not write that
+  copy and only then offers `--force`. Installed status is re-read after every job, so
+  a fresh install appears without restarting the app.
 - **Changelog** — `unity changelog` rendered as sections with readable bullet points, a
   focused heuristic for **possible breaking changes**, and a raw Markdown view. Every
   entry's backticked command or class is a docs candidate: **Docs** resolves

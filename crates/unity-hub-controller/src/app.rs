@@ -14,11 +14,13 @@ use unity_core::errors::{redact_proxy, remediation_for, RemediationKind};
 use unity_core::models::{
     AuthStatus, CliStatus, CliUpdateInfo, DoctorCheck, Editor, EnvironmentInfo, EnvironmentProxy,
     InstallPreview, LicenseStatus, Module, Project, PruneCandidate, PruneReport, Release,
-    RunningEditor, RunningEditors, VerifyComponent,
+    RunningEditor, RunningEditors, SkillClientInfo, SkillRefreshRow, TrackedSkillInstall,
+    VerifyComponent,
 };
 use unity_core::{
     AdvisoryOrigin, CliAdvisory, CommandSpec, DiagnoseTopic as CliDiagnose, DoctorRead,
-    EditorVerifyRead, InstallOptions, ModuleInstallOptions, UnityCli, UnityError,
+    EditorVerifyRead, InstallOptions, ModuleInstallOptions, SkillInstallOptions,
+    SkillRefreshOptions, UnityCli, UnityError,
 };
 use unity_hub_model::{
     AccountCardVm, AdvisoryVm, ArchitectureOptionVm, AuthVm, BadgeVm, BreakingChangeVm,
@@ -30,15 +32,16 @@ use unity_hub_model::{
     LicenseRowVm, LicenseVm, LoadState, ModalVm, ModuleOptionVm, NoticeVm, OverviewVm, Page,
     PageVm, ProjectRowVm, ProjectsVm, ProxyVm, PruneCandidateVm, PruneEditorsVm, PruneReportVm,
     ReleaseRowVm, ResumeInstallVm, RollbackCliVm, RunningEditorVm, SectionKind, SettingsVm,
-    ShellVm, TextScaleOptionVm, Tone, UiAction, UiError, UpdateVm, UpgradeProjectVm, VerifyCheckVm,
-    VerifyEditorVm, VerifyResultVm, ViewModel,
+    ShellVm, SkillClientVm, SkillForceVm, SkillInstallOptionsVm, SkillInstallVm, SkillOutcomeRowVm,
+    SkillOutcomeVm, SkillRunVm, SkillsVm, TextScaleOptionVm, Tone, UiAction, UiError, UpdateVm,
+    UpgradeProjectVm, VerifyCheckVm, VerifyEditorVm, VerifyResultVm, ViewModel,
 };
 
 use crate::jobs::{JobManager, JobStarted, JobState, StreamKind};
 use crate::settings::{self, AppSettings, TextSize};
 use crate::util::{
-    error_text, format_bytes, format_epoch_millis, format_iso, open_external_url, run_blocking,
-    short_path,
+    error_text, format_bytes, format_epoch_millis, format_iso, open_external_url, project_context,
+    run_blocking, short_path,
 };
 
 #[derive(Debug, Clone)]
@@ -129,6 +132,8 @@ pub enum ReadKind {
     EditorVerify,
     CliChangelog,
     CliDryRun,
+    SkillClients,
+    SkillInstalls,
 }
 
 impl ReadKind {
@@ -156,6 +161,8 @@ impl ReadKind {
             Self::EditorVerify => "read:editor-verify",
             Self::CliChangelog => "read:cli-changelog",
             Self::CliDryRun => "read:cli-dry-run",
+            Self::SkillClients => "read:skill-clients",
+            Self::SkillInstalls => "read:skill-installs",
         }
     }
 }
@@ -402,6 +409,54 @@ pub struct ResumeOffer {
     pub reason: String,
 }
 
+/// What one skill install/refresh job was asked to do.
+///
+/// Kept after the job so a `conflict` row can offer `--force` without the user
+/// having to reconstruct the form. The scope is the exact request, not a row
+/// index: a refresh between the click and the force action cannot retarget it.
+#[derive(Debug, Clone)]
+pub struct SkillRun {
+    pub scope: SkillScope,
+    pub dry_run: bool,
+    pub force: bool,
+    /// The project context `--local` was checked against at start time.
+    pub project_context: Option<String>,
+}
+
+impl SkillRun {
+    fn scope_local(&self) -> bool {
+        self.scope.local()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum SkillScope {
+    Install {
+        client: Option<String>,
+        all: bool,
+        local: bool,
+        skill: Option<String>,
+        yes: bool,
+    },
+    Refresh {
+        yes: bool,
+    },
+}
+
+impl SkillScope {
+    /// True when the run carried `--local`.
+    fn local(&self) -> bool {
+        matches!(self, Self::Install { local: true, .. })
+    }
+}
+
+/// One finished run's terminal rows, before they become the view model.
+#[derive(Debug, Clone)]
+pub struct SkillResult {
+    pub rows: Vec<SkillRefreshRow>,
+    pub dry_run: bool,
+}
+
 /// Session cache key for a docs lookup: topic, loaded changelog version, and
 /// the resolved scope. The package name is part of `DocsScope::Package`, so
 /// two package lookups never share an answer.
@@ -470,6 +525,28 @@ pub struct App {
     pub diagnose_proxy: Loadable<String>,
     pub diagnose_accelerator: Loadable<String>,
     pub diagnose_update: Loadable<String>,
+    /// Supported AI clients from `unity skill install --list`.
+    pub skill_clients: Loadable<Vec<SkillClientInfo>>,
+    /// Tracked skill installs from `unity skills`.
+    pub skill_installs: Loadable<Vec<TrackedSkillInstall>>,
+    /// `--local`: write into the current project.
+    pub skill_install_local: bool,
+    /// `--yes`: replace an outdated copy instead of letting the CLI skip it.
+    pub skill_install_overwrite: bool,
+    /// `--dry-run` for an install.
+    pub skill_install_dry_run: bool,
+    /// The optional `--skill <name>` filter.
+    pub skill_install_skill: String,
+    /// False until a dry-run refresh has landed. While false, the first
+    /// refresh click is a dry run; after a preview, clicks apply.
+    pub skill_refresh_previewed: bool,
+    /// The last run's terminal rows, kept verbatim.
+    pub skill_result: Option<SkillResult>,
+    /// The exact request the last skill job started with, for `--force`.
+    pub skill_last_run: Option<SkillRun>,
+    /// The Unity project `--local` may write into, when the app was launched
+    /// from one. `None` disables the option with an explanation.
+    pub project_context: Option<String>,
     pub modules: Loadable<Vec<Module>>,
     pub dialog_modules: Loadable<Vec<Module>>,
     pub modal: Modal,
@@ -592,6 +669,15 @@ pub enum Message {
     UpgradeTargetChanged(String),
     UpgradeConfirmed(bool),
     StartUpgrade,
+    InstallSkill(String),
+    InstallAllSkills,
+    SkillLocalToggled(bool),
+    SkillOverwriteToggled(bool),
+    SkillDryRunToggled(bool),
+    SkillNameChanged(String),
+    StartSkillRefresh,
+    PreviewSkillRefresh,
+    ForceSkillLastRun,
     ChangelogTargetChanged(String),
     LoadChangelog,
     ToggleRawChangelog,
@@ -634,6 +720,8 @@ pub enum Message {
     DiagnoseProxyLoaded(Result<String, UnityError>),
     DiagnoseAcceleratorLoaded(Result<String, UnityError>),
     DiagnoseUpdateLoaded(Result<String, UnityError>),
+    SkillClientsLoaded(Result<Vec<SkillClientInfo>, UnityError>),
+    SkillInstallsLoaded(Result<Vec<TrackedSkillInstall>, UnityError>),
     PruneLoaded(Result<PruneReport, UnityError>),
     VerifyLoaded(Result<EditorVerifyRead, UnityError>),
     PollJobs,
@@ -725,6 +813,15 @@ impl From<UiAction> for Message {
             UiAction::UpgradeTargetChanged(version) => Self::UpgradeTargetChanged(version),
             UiAction::UpgradeConfirmed(value) => Self::UpgradeConfirmed(value),
             UiAction::StartUpgrade => Self::StartUpgrade,
+            UiAction::InstallSkill(client) => Self::InstallSkill(client),
+            UiAction::InstallAllSkills => Self::InstallAllSkills,
+            UiAction::SkillLocalToggled(value) => Self::SkillLocalToggled(value),
+            UiAction::SkillOverwriteToggled(value) => Self::SkillOverwriteToggled(value),
+            UiAction::SkillDryRunToggled(value) => Self::SkillDryRunToggled(value),
+            UiAction::SkillNameChanged(value) => Self::SkillNameChanged(value),
+            UiAction::StartSkillRefresh => Self::StartSkillRefresh,
+            UiAction::PreviewSkillRefresh => Self::PreviewSkillRefresh,
+            UiAction::ForceSkillLastRun => Self::ForceSkillLastRun,
             UiAction::ChangelogTargetChanged(target) => Self::ChangelogTargetChanged(target),
             UiAction::LoadChangelog => Self::LoadChangelog,
             UiAction::ToggleRawChangelog => Self::ToggleRawChangelog,
@@ -802,6 +899,16 @@ impl App {
             diagnose_proxy: Loadable::default(),
             diagnose_accelerator: Loadable::default(),
             diagnose_update: Loadable::default(),
+            skill_clients: Loadable::default(),
+            skill_installs: Loadable::default(),
+            skill_install_local: false,
+            skill_install_overwrite: false,
+            skill_install_dry_run: false,
+            skill_install_skill: String::new(),
+            skill_refresh_previewed: false,
+            skill_result: None,
+            skill_last_run: None,
+            project_context: project_context(),
             modules: Loadable::default(),
             dialog_modules: Loadable::default(),
             modal: Modal::None,
@@ -1226,6 +1333,65 @@ impl App {
                 self.note_diagnose_result(ReadKind::DiagnoseUpdate, result);
                 Task::none()
             }
+            Message::SkillClientsLoaded(result) => {
+                match result {
+                    Ok(clients) => {
+                        self.skill_clients.succeeded(clients);
+                        self.clear_retry(ReadKind::SkillClients);
+                    }
+                    Err(error) => {
+                        self.skill_clients.failed(error);
+                        self.note_read_failed(ReadKind::SkillClients);
+                    }
+                }
+                Task::none()
+            }
+            Message::SkillInstallsLoaded(result) => {
+                match result {
+                    Ok(installs) => {
+                        self.skill_installs.succeeded(installs);
+                        self.clear_retry(ReadKind::SkillInstalls);
+                    }
+                    Err(error) => {
+                        self.skill_installs.failed(error);
+                        self.note_read_failed(ReadKind::SkillInstalls);
+                    }
+                }
+                Task::none()
+            }
+            Message::InstallSkill(client) => self.start_skill_install(Some(client), false),
+            Message::InstallAllSkills => self.start_skill_install(None, true),
+            Message::SkillLocalToggled(value) => {
+                if value && self.project_context.is_none() {
+                    // The UI hides the control, but the controller is the trust
+                    // boundary: a stray action must not enable `--local`.
+                    self.skill_install_local = false;
+                    self.notice = Some(Notice::error(
+                        "`--local` needs a Unity project context. Launch the Hub from a project folder, then try again.",
+                    ));
+                } else {
+                    self.skill_install_local = value;
+                }
+                Task::none()
+            }
+            Message::SkillOverwriteToggled(value) => {
+                self.skill_install_overwrite = value;
+                Task::none()
+            }
+            Message::SkillDryRunToggled(value) => {
+                self.skill_install_dry_run = value;
+                Task::none()
+            }
+            Message::SkillNameChanged(value) => {
+                self.skill_install_skill = value;
+                Task::none()
+            }
+            Message::StartSkillRefresh => {
+                let dry_run = self.next_skill_refresh_dry_run();
+                self.start_skill_refresh(dry_run)
+            }
+            Message::PreviewSkillRefresh => self.start_skill_refresh(true),
+            Message::ForceSkillLastRun => self.force_skill_last_run(),
             Message::PruneLoaded(result) => {
                 match result {
                     Ok(report) => {
@@ -2374,6 +2540,14 @@ impl App {
                 self.diagnose_update.begin();
                 load_diagnose(self.cli.clone(), CliDiagnose::Update)
             }
+            RetryRequest::Read(ReadKind::SkillClients) => {
+                self.skill_clients.begin();
+                load_skill_clients(self.cli.clone())
+            }
+            RetryRequest::Read(ReadKind::SkillInstalls) => {
+                self.skill_installs.begin();
+                load_skill_installs(self.cli.clone())
+            }
             RetryRequest::Read(ReadKind::Prune) => {
                 self.prune.begin();
                 Task::perform(
@@ -2458,6 +2632,13 @@ impl App {
                 )
             }
         }
+    }
+
+    fn job_running(&self) -> bool {
+        self.active_job
+            .as_ref()
+            .map(ActiveJob::is_running)
+            .unwrap_or(false)
     }
 
     fn start_job(&mut self, kind: &str, spec: CommandSpec) -> bool {
@@ -2590,11 +2771,16 @@ impl App {
             self.note_editor_install_outcome(&kind, state, error.as_ref(), result.as_ref());
         }
 
+        if kind == "skill-install" || kind == "skill-refresh" {
+            self.note_skill_outcome(&kind, state, result.as_ref());
+        }
+
         match kind.as_str() {
             "cli-install" | "cli-update" | "cli-rollback" => {
                 Task::batch(vec![self.refresh_status(), self.load_overview_data(true)])
             }
             "editor-install" | "module-install" | "editor-default" => self.load_editors_page(true),
+            "skill-install" | "skill-refresh" => self.load_skills_page(true),
             "editor-prune" | "editor-prune-missing" => {
                 if let Some(error) = &error {
                     self.prune_error = Some(error.clone());
@@ -2745,6 +2931,368 @@ impl App {
         load_doctor(self.cli.clone())
     }
 
+    /// Starts the two Skills reads. They are independent so a failed client
+    /// list never hides the tracked installs (and the reverse).
+    fn load_skills_page(&mut self, force: bool) -> Task<Message> {
+        let mut tasks = Vec::new();
+
+        if self.skill_clients.should_start(force) {
+            self.skill_clients.begin();
+            tasks.push(load_skill_clients(self.cli.clone()));
+        }
+        if self.skill_installs.should_start(force) {
+            self.skill_installs.begin();
+            tasks.push(load_skill_installs(self.cli.clone()));
+        }
+
+        Task::batch(tasks)
+    }
+
+    /// Runs `unity skill install` as a streamed job.
+    ///
+    /// `--local` is checked again here: the controller never trusts a form flag
+    /// that has no project context, even if the UI emits it.
+    fn start_skill_install(&mut self, client: Option<String>, all: bool) -> Task<Message> {
+        if self.job_running() {
+            self.notice = Some(Notice::error("Another job is already running."));
+            return Task::none();
+        }
+        if self.skill_install_local && self.project_context.is_none() {
+            self.notice = Some(Notice::error(
+                "`--local` needs a Unity project context. Launch the Hub from a project folder, then try again.",
+            ));
+            return Task::none();
+        }
+
+        let options = SkillInstallOptions {
+            client: client.clone(),
+            all,
+            local: self.skill_install_local,
+            skill: trimmed_option(&self.skill_install_skill),
+            yes: self.skill_install_overwrite,
+            dry_run: self.skill_install_dry_run,
+            force: false,
+        };
+        let spec = match self.cli.skill_install_spec(&options) {
+            Ok(spec) => spec,
+            Err(error) => {
+                self.notice = Some(Notice::error(error_text(&error)));
+                return Task::none();
+            }
+        };
+
+        self.skill_last_run = Some(SkillRun {
+            scope: SkillScope::Install {
+                client,
+                all,
+                local: options.local,
+                skill: options.skill.clone(),
+                yes: options.yes,
+            },
+            dry_run: options.dry_run,
+            force: false,
+            project_context: self.project_context.clone(),
+        });
+        self.skill_result = None;
+        let _ = self.start_job("skill-install", spec);
+        Task::none()
+    }
+
+    /// Runs `unity skill refresh` as a streamed job.
+    ///
+    /// `--yes` is always present: the click is the confirmation and a GUI child
+    /// has no terminal. `--dry-run` is the caller's decision; the page's first
+    /// refresh click always sets it.
+    fn start_skill_refresh(&mut self, dry_run: bool) -> Task<Message> {
+        if self.job_running() {
+            self.notice = Some(Notice::error("Another job is already running."));
+            return Task::none();
+        }
+
+        let options = SkillRefreshOptions {
+            yes: true,
+            dry_run,
+            force: false,
+        };
+        let spec = match self.cli.skill_refresh_spec(&options) {
+            Ok(spec) => spec,
+            Err(error) => {
+                self.notice = Some(Notice::error(error_text(&error)));
+                return Task::none();
+            }
+        };
+
+        self.skill_last_run = Some(SkillRun {
+            scope: SkillScope::Refresh { yes: true },
+            dry_run,
+            force: false,
+            project_context: self.project_context.clone(),
+        });
+        self.skill_result = None;
+        let _ = self.start_job("skill-refresh", spec);
+        Task::none()
+    }
+
+    /// Repeats the last skill run with `--force`. Only reachable from the
+    /// `conflict` offer, which carries the explanation first.
+    fn force_skill_last_run(&mut self) -> Task<Message> {
+        let Some(run) = self.skill_last_run.clone() else {
+            self.notice = Some(Notice::info(
+                "Run an install or refresh first; there is nothing to force.",
+            ));
+            return Task::none();
+        };
+        if self.job_running() {
+            self.notice = Some(Notice::error("Another job is already running."));
+            return Task::none();
+        }
+        if run.scope_local() && run.project_context.is_none() {
+            self.notice = Some(Notice::error(
+                "`--local` needs a Unity project context. Launch the Hub from a project folder, then try again.",
+            ));
+            return Task::none();
+        }
+
+        let (kind, spec, scope) = match &run.scope {
+            SkillScope::Install {
+                client,
+                all,
+                local,
+                skill,
+                yes,
+            } => {
+                let options = SkillInstallOptions {
+                    client: client.clone(),
+                    all: *all,
+                    local: *local,
+                    skill: skill.clone(),
+                    yes: *yes,
+                    dry_run: false,
+                    force: true,
+                };
+                (
+                    "skill-install",
+                    self.cli.skill_install_spec(&options),
+                    run.scope.clone(),
+                )
+            }
+            SkillScope::Refresh { yes } => (
+                "skill-refresh",
+                self.cli.skill_refresh_spec(&SkillRefreshOptions {
+                    yes: *yes,
+                    dry_run: false,
+                    force: true,
+                }),
+                run.scope.clone(),
+            ),
+        };
+        let spec = match spec {
+            Ok(spec) => spec,
+            Err(error) => {
+                self.notice = Some(Notice::error(error_text(&error)));
+                return Task::none();
+            }
+        };
+
+        self.skill_last_run = Some(SkillRun {
+            scope,
+            dry_run: false,
+            force: true,
+            project_context: run.project_context,
+        });
+        self.skill_result = None;
+        let _ = self.start_job(kind, spec);
+        Task::none()
+    }
+
+    /// Stores a finished skill job's terminal rows. A failed job keeps the
+    /// previous rows and lets the job card own the error.
+    fn note_skill_outcome(&mut self, kind: &str, state: JobState, result: Option<&Value>) {
+        if state != JobState::Succeeded {
+            return;
+        }
+        let dry_run = self
+            .skill_last_run
+            .as_ref()
+            .map(|run| run.dry_run)
+            .unwrap_or(false);
+        let rows = result
+            .map(|value| skill_rows_from_result(value, self.skill_last_run.as_ref()))
+            .unwrap_or_default();
+        self.skill_result = Some(SkillResult { rows, dry_run });
+        if kind == "skill-refresh" && dry_run {
+            // The preview landed: the next refresh click applies for real.
+            self.skill_refresh_previewed = true;
+        }
+    }
+
+    fn skills_vm(&self) -> SkillsVm {
+        let job_running = self.job_running();
+        let local_available = self.project_context.is_some();
+        let local_disabled_reason = (!local_available).then(|| {
+            "`--local` writes into the current project. The Hub was not launched from a Unity project, so it has no project context to write into.".to_string()
+        });
+        let skill_input_error =
+            unity_core::versions::validate_skill_name(&self.skill_install_skill)
+                .err()
+                .map(|error| error.message);
+        let all_options = self.skill_install_options(None, true);
+        let all_command = self.command_preview(
+            self.cli.skill_install_spec(&all_options),
+            "unity skill install --all",
+        );
+
+        let next_dry_run = self.next_skill_refresh_dry_run();
+        let refresh_command = self.command_preview(
+            self.cli.skill_refresh_spec(&SkillRefreshOptions {
+                yes: true,
+                dry_run: next_dry_run,
+                force: false,
+            }),
+            "unity skill refresh",
+        );
+
+        SkillsVm {
+            clients: self.load_state(ReadKind::SkillClients, &self.skill_clients, |clients| {
+                clients.iter().map(skill_client_vm).collect()
+            }),
+            installs: self.load_state(ReadKind::SkillInstalls, &self.skill_installs, |installs| {
+                installs
+                    .iter()
+                    .map(|install| SkillInstallVm {
+                        path: install.path.clone(),
+                        client: install.client.clone(),
+                        skill: install.skill.clone(),
+                        status: install.status.clone(),
+                    })
+                    .collect()
+            }),
+            install: SkillInstallOptionsVm {
+                local: self.skill_install_local && local_available,
+                overwrite: self.skill_install_overwrite,
+                dry_run: self.skill_install_dry_run,
+                skill_input: self.skill_install_skill.clone(),
+                skill_input_error,
+                all_command,
+            },
+            result: self
+                .skill_result
+                .as_ref()
+                .map(|result| self.skill_run_vm(result)),
+            refresh_label: if next_dry_run {
+                "Preview refresh (dry run)".to_string()
+            } else {
+                "Refresh now".to_string()
+            },
+            refresh_hint: if next_dry_run {
+                "The first refresh is a dry run: it changes nothing and labels every row would-*."
+                    .to_string()
+            } else {
+                "The next refresh applies for real and reports one row per tracked install."
+                    .to_string()
+            },
+            refresh_command,
+            project_context: self.project_context.clone(),
+            local_available,
+            local_disabled_reason,
+            job_running,
+        }
+    }
+
+    /// The first refresh click after opening the page is a dry run; once a
+    /// preview has landed, the next click applies.
+    fn next_skill_refresh_dry_run(&self) -> bool {
+        !self.skill_refresh_previewed
+    }
+
+    fn skill_install_options(&self, client: Option<String>, all: bool) -> SkillInstallOptions {
+        SkillInstallOptions {
+            client,
+            all,
+            local: self.skill_install_local,
+            skill: trimmed_option(&self.skill_install_skill),
+            yes: self.skill_install_overwrite,
+            dry_run: self.skill_install_dry_run,
+            force: false,
+        }
+    }
+
+    fn skill_run_vm(&self, result: &SkillResult) -> SkillRunVm {
+        let rows: Vec<SkillOutcomeRowVm> = result.rows.iter().map(skill_outcome_row_vm).collect();
+        let force = rows
+            .iter()
+            .any(|row| row.outcome.is_conflict())
+            .then(|| self.skill_force_vm());
+        SkillRunVm {
+            dry_run: result.dry_run,
+            rows,
+            force,
+        }
+    }
+
+    /// The `--force` offer, built from the exact request the last job ran.
+    ///
+    /// The explanation is part of the offer: the button never appears without
+    /// saying that the CLI did not write the conflicting copy.
+    fn skill_force_vm(&self) -> SkillForceVm {
+        let Some(run) = &self.skill_last_run else {
+            return SkillForceVm {
+                explanation: "The Unity CLI did not write that copy, so it left it alone. `--force` takes ownership of it and replaces it with the CLI's own. Only run it if you know who wrote it.".to_string(),
+                command: String::new(),
+                scope: "conflict row".to_string(),
+            };
+        };
+
+        let (scope, command) = match &run.scope {
+            SkillScope::Install {
+                client,
+                all,
+                local,
+                skill,
+                yes,
+            } => {
+                let options = SkillInstallOptions {
+                    client: client.clone(),
+                    all: *all,
+                    local: *local,
+                    skill: skill.clone(),
+                    yes: *yes,
+                    dry_run: false,
+                    force: true,
+                };
+                let scope = match client {
+                    Some(client) => format!("`{client}`"),
+                    None if *all => "the `--all` install".to_string(),
+                    None => "the install".to_string(),
+                };
+                let command = self.command_preview(
+                    self.cli.skill_install_spec(&options),
+                    "unity skill install --force",
+                );
+                (scope, command)
+            }
+            SkillScope::Refresh { yes } => {
+                let command = self.command_preview(
+                    self.cli.skill_refresh_spec(&SkillRefreshOptions {
+                        yes: *yes,
+                        dry_run: false,
+                        force: true,
+                    }),
+                    "unity skill refresh --force",
+                );
+                ("the refresh".to_string(), command)
+            }
+        };
+
+        SkillForceVm {
+            explanation: format!(
+                "The Unity CLI did not write the {scope} copy, so it left it alone rather than overwrite it. `--force` takes ownership of that copy and replaces it with the CLI's own. Only run it if you know who wrote it."
+            ),
+            command,
+            scope,
+        }
+    }
+
     /// Refreshes the running-Editor list unless a read is already in flight.
     fn refresh_running_editors(&mut self) -> Task<Message> {
         if self.running.loading {
@@ -2767,6 +3315,7 @@ impl App {
             Page::Overview => self.load_overview_data(false),
             Page::Editors => self.load_editors_page(false),
             Page::Projects => self.load_projects_page(false),
+            Page::Skills => self.load_skills_page(false),
             Page::Diagnostics => self.load_diagnostics_page(false),
             Page::Changelog => self.load_changelog_page(false),
             _ => Task::none(),
@@ -2780,6 +3329,7 @@ impl App {
             }
             Page::Editors => self.load_editors_page(true),
             Page::Projects => self.load_projects_page(true),
+            Page::Skills => self.load_skills_page(true),
             Page::Diagnostics => self.load_diagnostics_page(true),
             Page::Changelog => self.load_changelog_page(true),
             Page::Settings => self.refresh_status(),
@@ -2795,6 +3345,7 @@ impl App {
                 Page::Overview => PageVm::Overview(self.overview_vm()),
                 Page::Editors => PageVm::Editors(self.editors_vm()),
                 Page::Projects => PageVm::Projects(self.projects_vm()),
+                Page::Skills => PageVm::Skills(self.skills_vm()),
                 Page::Diagnostics => PageVm::Diagnostics(self.diagnostics_vm()),
                 Page::Changelog => PageVm::Changelog(self.changelog_vm()),
                 Page::Settings => PageVm::Settings(self.settings_vm()),
@@ -5211,6 +5762,124 @@ fn verify_status(status: &str) -> CheckStatus {
     }
 }
 
+fn skill_client_vm(client: &SkillClientInfo) -> SkillClientVm {
+    SkillClientVm {
+        client: client.client.clone(),
+        label: skill_client_label(&client.client),
+        path: client.path.clone(),
+        installed: client.is_installed(),
+    }
+}
+
+fn skill_client_label(client: &str) -> String {
+    match client {
+        "claude-code" => "Claude Code".to_string(),
+        "claude-desktop" => "Claude Desktop".to_string(),
+        "grok" => "Grok".to_string(),
+        "cursor" => "Cursor".to_string(),
+        "windsurf" => "Windsurf".to_string(),
+        "vscode" => "VS Code".to_string(),
+        "cline" => "Cline".to_string(),
+        "codex" => "Codex".to_string(),
+        "opencode" => "OpenCode".to_string(),
+        "antigravity" => "Antigravity".to_string(),
+        "qwen" => "Qwen".to_string(),
+        "" => "Unknown client".to_string(),
+        other => humanize_identifier(other),
+    }
+}
+
+fn skill_outcome_row_vm(row: &SkillRefreshRow) -> SkillOutcomeRowVm {
+    SkillOutcomeRowVm {
+        path: row.path.clone(),
+        client: row.client.clone(),
+        skill: row.skill.clone(),
+        outcome: skill_outcome_vm(row.outcome()),
+        skip_reason: row.reason().map(str::to_string),
+    }
+}
+
+fn skill_outcome_vm(outcome: unity_core::models::SkillOutcome) -> SkillOutcomeVm {
+    use unity_core::models::SkillOutcome as Cli;
+    match outcome {
+        Cli::Refreshed => SkillOutcomeVm::Refreshed,
+        Cli::UpToDate => SkillOutcomeVm::UpToDate,
+        Cli::Pruned => SkillOutcomeVm::Pruned,
+        Cli::Skipped => SkillOutcomeVm::Skipped,
+        Cli::Conflict => SkillOutcomeVm::Conflict,
+        Cli::WouldUpdate => SkillOutcomeVm::WouldUpdate,
+        Cli::WouldSkip => SkillOutcomeVm::WouldSkip,
+        Cli::WouldPrune => SkillOutcomeVm::WouldPrune,
+        Cli::Unknown(value) => SkillOutcomeVm::Unknown(value),
+    }
+}
+
+/// Extracts the outcome rows from a streamed terminal frame.
+///
+/// The documented shape is `data.items[]`. Older betas answer a single-object
+/// frame with `skipped: true` instead, so that flag is mapped to a single
+/// `skipped` row using the request's client/skill for identity. Nothing is
+/// invented: every field comes from the CLI frame or the request the user
+/// clicked.
+fn skill_rows_from_result(value: &Value, run: Option<&SkillRun>) -> Vec<SkillRefreshRow> {
+    let data = value.get("data").cloned().unwrap_or(Value::Null);
+    let parsed: Vec<SkillRefreshRow> =
+        unity_core::envelope::parse_items(Some(data.clone()), &["items"]).unwrap_or_default();
+    if !parsed.is_empty() {
+        return parsed;
+    }
+    // An explicit empty `items` array is a real answer ("nothing tracked").
+    if data.get("items").is_some() {
+        return Vec::new();
+    }
+
+    let Some(object) = data.as_object() else {
+        return Vec::new();
+    };
+
+    let skipped = object
+        .get("skipped")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let status = ["status", "outcome", "result"]
+        .iter()
+        .find_map(|key| object.get(*key).and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|status| !status.is_empty())
+        .map(str::to_string)
+        .or_else(|| skipped.then(|| "skipped".to_string()));
+    let Some(status) = status else {
+        return Vec::new();
+    };
+
+    let (client, skill) = match run.map(|run| &run.scope) {
+        Some(SkillScope::Install { client, skill, .. }) => (
+            client.clone().unwrap_or_default(),
+            skill.clone().unwrap_or_default(),
+        ),
+        _ => (String::new(), String::new()),
+    };
+    let skip_reason = ["skipReason", "reason", "message"]
+        .iter()
+        .find_map(|key| object.get(*key).and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|reason| !reason.is_empty())
+        .map(str::to_string);
+
+    vec![SkillRefreshRow {
+        path: object
+            .get("path")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        client,
+        skill,
+        status,
+        skip_reason,
+        extra: Map::new(),
+    }]
+}
+
 fn editor_row_vm(editor: &Editor) -> EditorRowVm {
     EditorRowVm {
         version: editor.version.clone(),
@@ -5404,6 +6073,20 @@ fn load_environment(cli: UnityCli) -> Task<Message> {
     Task::perform(
         run_blocking(move || cli.environment()),
         Message::EnvironmentLoaded,
+    )
+}
+
+fn load_skill_clients(cli: UnityCli) -> Task<Message> {
+    Task::perform(
+        run_blocking(move || cli.skill_clients()),
+        Message::SkillClientsLoaded,
+    )
+}
+
+fn load_skill_installs(cli: UnityCli) -> Task<Message> {
+    Task::perform(
+        run_blocking(move || cli.skills()),
+        Message::SkillInstallsLoaded,
     )
 }
 
@@ -7933,6 +8616,359 @@ mod tests {
             EntryDocsVm::Failed { message, .. } if message.contains("docs index")
         ));
         assert!(matches!(&entries[3].docs, EntryDocsVm::Unavailable));
+    }
+
+    #[test]
+    fn skills_vm_maps_clients_installs_and_every_outcome_row() {
+        let mut app = connected_app("1.0.0-beta.17");
+        app.page = Page::Skills;
+        app.project_context = Some("/home/ada/Games/Orbital".to_string());
+        app.skill_clients.data = Some(vec![
+            SkillClientInfo {
+                client: "claude-code".to_string(),
+                path: "/home/ada/.claude/skills".to_string(),
+                installed: Some(true),
+                ..SkillClientInfo::default()
+            },
+            SkillClientInfo {
+                client: "cursor".to_string(),
+                path: "/home/ada/.cursor/skills".to_string(),
+                status: "absent".to_string(),
+                ..SkillClientInfo::default()
+            },
+        ]);
+        app.skill_installs.data = Some(vec![TrackedSkillInstall {
+            path: "/home/ada/.claude/skills/unity-cli/SKILL.md".to_string(),
+            client: "claude-code".to_string(),
+            skill: "unity-cli".to_string(),
+            status: "installed".to_string(),
+            ..TrackedSkillInstall::default()
+        }]);
+        let statuses = [
+            "refreshed",
+            "up-to-date",
+            "pruned",
+            "skipped",
+            "conflict",
+            "would-update",
+            "would-skip",
+            "would-prune",
+        ];
+        app.skill_result = Some(SkillResult {
+            dry_run: true,
+            rows: statuses
+                .iter()
+                .enumerate()
+                .map(|(index, status)| skill_row(status, (index == 3).then_some("Outdated copy.")))
+                .collect(),
+        });
+
+        let vm = app.view_model();
+        let PageVm::Skills(skills) = &vm.page else {
+            panic!("expected the Skills page");
+        };
+
+        let clients = skills.clients.data().expect("clients");
+        assert_eq!(clients[0].label, "Claude Code");
+        assert_eq!(clients[0].client, "claude-code");
+        assert_eq!(clients[0].path, "/home/ada/.claude/skills");
+        assert!(clients[0].installed);
+        assert!(!clients[1].installed);
+
+        let installs = skills.installs.data().expect("installs");
+        assert_eq!(installs[0].skill, "unity-cli");
+        assert_eq!(installs[0].status, "installed");
+
+        assert!(skills.local_available);
+        let result = skills.result.as_ref().expect("result");
+        assert!(result.dry_run);
+        assert_eq!(
+            result
+                .rows
+                .iter()
+                .map(|row| row.outcome.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                SkillOutcomeVm::Refreshed,
+                SkillOutcomeVm::UpToDate,
+                SkillOutcomeVm::Pruned,
+                SkillOutcomeVm::Skipped,
+                SkillOutcomeVm::Conflict,
+                SkillOutcomeVm::WouldUpdate,
+                SkillOutcomeVm::WouldSkip,
+                SkillOutcomeVm::WouldPrune,
+            ]
+        );
+        assert_eq!(
+            result.rows[3].skip_reason.as_deref(),
+            Some("Outdated copy.")
+        );
+        // A dry-run row is labelled with the CLI's own would-* word.
+        assert_eq!(result.rows[5].outcome.label(), "would-update");
+        assert!(result.force.is_some(), "a conflict must offer --force");
+        assert_eq!(skills.refresh_label, "Preview refresh (dry run)");
+    }
+
+    #[test]
+    fn local_option_is_gated_on_a_known_project_context() {
+        let mut app = connected_app("1.0.0-beta.17");
+        app.page = Page::Skills;
+        app.project_context = None;
+        app.skill_install_local = false;
+
+        let _ = app.update(Message::SkillLocalToggled(true));
+        assert!(!app.skill_install_local);
+        assert!(app.notice.is_some());
+
+        let vm = app.view_model();
+        let PageVm::Skills(skills) = &vm.page else {
+            panic!("expected the Skills page");
+        };
+        assert!(!skills.local_available);
+        assert!(skills
+            .local_disabled_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("project")));
+
+        app.notice = None;
+        app.project_context = Some("/home/ada/Games/Orbital".to_string());
+        let _ = app.update(Message::SkillLocalToggled(true));
+        assert!(app.skill_install_local);
+        assert!(app.notice.is_none());
+
+        let vm = app.view_model();
+        let PageVm::Skills(skills) = &vm.page else {
+            panic!("expected the Skills page");
+        };
+        assert!(skills.local_available);
+        assert!(skills.install.local);
+        assert_eq!(
+            skills.project_context.as_deref(),
+            Some("/home/ada/Games/Orbital")
+        );
+    }
+
+    #[test]
+    fn the_first_refresh_click_is_a_dry_run_that_labels_would_rows() {
+        let mut app = connected_app("1.0.0-beta.17");
+        app.page = Page::Skills;
+        assert!(app.next_skill_refresh_dry_run());
+
+        app.skill_last_run = Some(SkillRun {
+            scope: SkillScope::Refresh { yes: true },
+            dry_run: true,
+            force: false,
+            project_context: None,
+        });
+        let frame = serde_json::json!({
+            "type": "result",
+            "success": true,
+            "data": {
+                "items": [
+                    { "path": "/a", "client": "cursor", "skill": "unity-cli", "status": "would-update" },
+                    { "path": "/b", "client": "codex", "skill": "unity-cli", "status": "would-skip", "skipReason": "Outdated copy." }
+                ]
+            }
+        });
+        app.note_skill_outcome("skill-refresh", JobState::Succeeded, Some(&frame));
+
+        assert!(!app.next_skill_refresh_dry_run());
+        let result = app.skill_result.as_ref().expect("result");
+        assert!(result.dry_run);
+        assert_eq!(result.rows.len(), 2);
+        assert_eq!(
+            result.rows[0].outcome(),
+            unity_core::models::SkillOutcome::WouldUpdate
+        );
+        assert_eq!(
+            result.rows[1].outcome(),
+            unity_core::models::SkillOutcome::WouldSkip
+        );
+
+        let vm = app.view_model();
+        let PageVm::Skills(skills) = &vm.page else {
+            panic!("expected the Skills page");
+        };
+        assert_eq!(skills.refresh_label, "Refresh now");
+        let result = skills.result.as_ref().expect("result");
+        assert_eq!(result.rows[0].outcome, SkillOutcomeVm::WouldUpdate);
+        assert_eq!(result.rows[1].outcome, SkillOutcomeVm::WouldSkip);
+        assert_eq!(
+            result.rows[1].skip_reason.as_deref(),
+            Some("Outdated copy.")
+        );
+    }
+
+    #[test]
+    fn skill_rows_parse_items_and_the_single_skipped_frame() {
+        let frame = serde_json::json!({
+            "type": "result",
+            "success": true,
+            "data": {
+                "items": [
+                    { "path": "/a", "client": "cursor", "skill": "unity-cli", "status": "refreshed" },
+                    { "path": "/b", "client": "codex", "skill": "unity-cli", "outcome": "up-to-date" }
+                ]
+            }
+        });
+        let rows = skill_rows_from_result(&frame, None);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            rows[0].outcome(),
+            unity_core::models::SkillOutcome::Refreshed
+        );
+        assert_eq!(
+            rows[1].outcome(),
+            unity_core::models::SkillOutcome::UpToDate
+        );
+
+        let skipped = serde_json::json!({
+            "type": "result",
+            "success": true,
+            "data": { "skipped": true, "skipReason": "The copy is older." }
+        });
+        let run = SkillRun {
+            scope: SkillScope::Install {
+                client: Some("cursor".to_string()),
+                all: false,
+                local: false,
+                skill: Some("unity-cli".to_string()),
+                yes: false,
+            },
+            dry_run: false,
+            force: false,
+            project_context: None,
+        };
+        let rows = skill_rows_from_result(&skipped, Some(&run));
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].client, "cursor");
+        assert_eq!(rows[0].skill, "unity-cli");
+        assert_eq!(rows[0].outcome(), unity_core::models::SkillOutcome::Skipped);
+        assert_eq!(rows[0].reason(), Some("The copy is older."));
+
+        // An explicit empty items array is the CLI saying "nothing tracked",
+        // not a reason to invent a row.
+        let empty = serde_json::json!({ "data": { "items": [] } });
+        assert!(skill_rows_from_result(&empty, Some(&run)).is_empty());
+    }
+
+    #[test]
+    fn skill_force_is_only_offered_after_a_conflict_and_names_the_request() {
+        let mut app = connected_app("1.0.0-beta.17");
+        app.page = Page::Skills;
+        app.skill_last_run = Some(SkillRun {
+            scope: SkillScope::Install {
+                client: Some("vscode".to_string()),
+                all: false,
+                local: false,
+                skill: Some("unity-cli".to_string()),
+                yes: true,
+            },
+            dry_run: false,
+            force: false,
+            project_context: None,
+        });
+
+        app.skill_result = Some(SkillResult {
+            dry_run: false,
+            rows: vec![skill_row("refreshed", None)],
+        });
+        let vm = app.view_model();
+        let PageVm::Skills(skills) = &vm.page else {
+            panic!("expected the Skills page");
+        };
+        assert!(skills.result.as_ref().expect("result").force.is_none());
+
+        app.skill_result = Some(SkillResult {
+            dry_run: false,
+            rows: vec![skill_row("conflict", Some("Not written by the CLI."))],
+        });
+        let vm = app.view_model();
+        let PageVm::Skills(skills) = &vm.page else {
+            panic!("expected the Skills page");
+        };
+        let force = skills
+            .result
+            .as_ref()
+            .expect("result")
+            .force
+            .as_ref()
+            .expect("force offer");
+        assert!(force.explanation.contains("did not write"));
+        assert!(force.command.contains("--force"));
+        assert!(force.command.contains("vscode"));
+        assert_eq!(force.scope, "`vscode`");
+    }
+
+    #[test]
+    fn every_skill_read_has_its_own_retry_target() {
+        let mut app = connected_app("1.0.0-beta.17");
+        app.page = Page::Skills;
+        app.skill_clients.error = Some(UnityError::new("TIMEOUT", "The read timed out."));
+        app.skill_installs.error = Some(UnityError::new("TIMEOUT", "The read timed out."));
+        app.note_read_failed(ReadKind::SkillClients);
+        app.note_read_failed(ReadKind::SkillInstalls);
+
+        let vm = app.view_model();
+        let PageVm::Skills(skills) = &vm.page else {
+            panic!("expected the Skills page");
+        };
+        assert_eq!(
+            retry_kind(&skills.clients),
+            &ErrorActionKind::Retry("read:skill-clients".to_string())
+        );
+        assert_eq!(
+            retry_kind(&skills.installs),
+            &ErrorActionKind::Retry("read:skill-installs".to_string())
+        );
+    }
+
+    #[test]
+    fn a_finished_skill_job_reloads_the_reads_without_a_restart() {
+        let mut app = connected_app("1.0.0-beta.17");
+        app.page = Page::Skills;
+        app.skill_last_run = Some(SkillRun {
+            scope: SkillScope::Refresh { yes: true },
+            dry_run: false,
+            force: false,
+            project_context: None,
+        });
+        let frame = serde_json::json!({
+            "type": "result",
+            "success": true,
+            "data": {
+                "items": [
+                    { "path": "/a", "client": "cursor", "skill": "unity-cli", "status": "refreshed" }
+                ]
+            }
+        });
+
+        let _ = app.handle_finished_job(
+            "skill-refresh".to_string(),
+            JobState::Succeeded,
+            None,
+            Some(frame),
+        );
+
+        assert_eq!(
+            app.skill_result.as_ref().expect("result").rows[0].outcome(),
+            unity_core::models::SkillOutcome::Refreshed
+        );
+        // Both reads are restarted so the new status is reflected on the next
+        // frame without an app restart.
+        assert!(app.skill_clients.loading);
+        assert!(app.skill_installs.loading);
+    }
+
+    fn skill_row(status: &str, reason: Option<&str>) -> SkillRefreshRow {
+        SkillRefreshRow {
+            path: "/home/ada/.cursor/skills/unity-cli/SKILL.md".to_string(),
+            client: "cursor".to_string(),
+            skill: "unity-cli".to_string(),
+            status: status.to_string(),
+            skip_reason: reason.map(str::to_string),
+            ..SkillRefreshRow::default()
+        }
     }
 
     #[test]

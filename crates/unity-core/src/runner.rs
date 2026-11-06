@@ -13,13 +13,15 @@ use crate::errors::{code_for_exit_code, message_for_exit_code, UnityError};
 use crate::models::{
     AuthStatus, CliStatus, CliUpdateInfo, CliVersion, DoctorReport, Editor, EditorInfo,
     EnvironmentInfo, InstallPath, LicenseStatus, Module, PipelineEditors, Project, PruneReport,
-    RawChangelog, Release, RunningEditor, RunningEditors, VerifyReport,
+    RawChangelog, Release, RunningEditor, RunningEditors, SkillClientInfo, TrackedSkillInstall,
+    VerifyReport,
 };
 use crate::surface;
 use crate::versions::{
     validate_architecture, validate_cli_version, validate_docs_package, validate_docs_topic,
     validate_download_directory, validate_editor_version, validate_module_id,
-    validate_project_path, validate_release_stream, validate_update_channel,
+    validate_project_path, validate_release_stream, validate_skill_client, validate_skill_name,
+    validate_update_channel,
 };
 
 /// The standard opt-out signal. The CLI's analytics/update callback adds a
@@ -116,6 +118,35 @@ pub struct ModuleInstallOptions {
     pub retries: Option<u32>,
     /// `-d` / `--download-directory`: add modules to a portable install.
     pub download_directory: Option<String>,
+}
+
+/// The options of one `unity skill install` run.
+///
+/// `client` and `all` are mutually exclusive; exactly one is required for a
+/// mutation. Every flag is off by default, so an untouched install is the
+/// client positional followed only by the standard machine flags. `yes` is the
+/// CLI's "replace an outdated copy" consent and is never implied by the app.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SkillInstallOptions {
+    pub client: Option<String>,
+    pub all: bool,
+    pub local: bool,
+    pub skill: Option<String>,
+    pub yes: bool,
+    pub dry_run: bool,
+    pub force: bool,
+}
+
+/// The options of one `unity skill refresh` run.
+///
+/// `yes` is always passed by the GUI because the click is the confirmation and
+/// a child with no terminal must never prompt. `dry_run` previews the outcome
+/// rows and changes nothing.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SkillRefreshOptions {
+    pub yes: bool,
+    pub dry_run: bool,
+    pub force: bool,
 }
 
 impl UnityCli {
@@ -334,6 +365,44 @@ impl UnityCli {
         ]);
         let executed = self.run_args(&parts, "json")?;
         parse_data(executed.envelope)
+    }
+
+    /// Reads `unity skills --format json`: every skill install the CLI tracks.
+    pub fn skills(&self) -> Result<Vec<TrackedSkillInstall>, UnityError> {
+        let executed = self.run_args(&svec(&[surface::command::SKILLS]), "json")?;
+        parse_items(executed.envelope.data, &["items"])
+    }
+
+    /// Builds the `unity skill install --list` read. It takes no user input.
+    pub fn skill_clients_spec(&self) -> Result<CommandSpec, UnityError> {
+        self.spec(&skill_clients_parts(), "json")
+    }
+
+    /// Reads the supported clients, their install paths, and their status.
+    ///
+    /// `--list` is a read even though it lives on the `install` subcommand; it
+    /// changes nothing.
+    pub fn skill_clients(&self) -> Result<Vec<SkillClientInfo>, UnityError> {
+        let executed = self.run_args(&skill_clients_parts(), "json")?;
+        parse_items(executed.envelope.data, &["items"])
+    }
+
+    /// Builds `unity skill install [client|--all] [options]` as a streamed job.
+    pub fn skill_install_spec(
+        &self,
+        options: &SkillInstallOptions,
+    ) -> Result<CommandSpec, UnityError> {
+        let parts = skill_install_parts(options)?;
+        self.spec(&parts, "ndjson")
+    }
+
+    /// Builds `unity skill refresh [--yes] [--dry-run] [--force]` as a job.
+    pub fn skill_refresh_spec(
+        &self,
+        options: &SkillRefreshOptions,
+    ) -> Result<CommandSpec, UnityError> {
+        let parts = skill_refresh_parts(options);
+        self.spec(&parts, "ndjson")
     }
 
     pub fn projects(&self) -> Result<Vec<Project>, UnityError> {
@@ -1292,6 +1361,70 @@ fn modules_parts(version: &str, architecture: Option<&str>) -> Result<Vec<String
     let mut parts = svec(&[surface::command::MODULES, version]);
     append_architecture(&mut parts, architecture)?;
     Ok(parts)
+}
+
+fn skill_clients_parts() -> Vec<String> {
+    svec(&[
+        surface::command::SKILL,
+        surface::subcommand::INSTALL,
+        surface::flag::LIST,
+    ])
+}
+
+/// Builds the complete `unity skill install` argv.
+///
+/// The client positional (or `--all`) comes first, then the options in the order
+/// the CLI reference documents them. No user token is ever interpolated into a
+/// shell string.
+fn skill_install_parts(options: &SkillInstallOptions) -> Result<Vec<String>, UnityError> {
+    if options.client.is_some() && options.all {
+        return Err(UnityError::invalid_input(
+            "Choose one AI client or install to all clients, not both.",
+        ));
+    }
+    if options.client.is_none() && !options.all {
+        return Err(UnityError::invalid_input(
+            "Choose an AI client, or use --all to install to every supported client.",
+        ));
+    }
+
+    let mut parts = svec(&[surface::command::SKILL, surface::subcommand::INSTALL]);
+    if let Some(client) = &options.client {
+        parts.push(validate_skill_client(client)?);
+    }
+    if options.all {
+        parts.push(surface::flag::ALL.to_string());
+    }
+    if options.local {
+        parts.push(surface::flag::LOCAL.to_string());
+    }
+    if let Some(skill) = validate_skill_name(options.skill.as_deref().unwrap_or_default())? {
+        parts.extend([surface::flag::SKILL_NAME.to_string(), skill]);
+    }
+    if options.yes {
+        parts.push(surface::flag::YES.to_string());
+    }
+    if options.dry_run {
+        parts.push(surface::flag::DRY_RUN.to_string());
+    }
+    if options.force {
+        parts.push(surface::flag::FORCE.to_string());
+    }
+    Ok(parts)
+}
+
+fn skill_refresh_parts(options: &SkillRefreshOptions) -> Vec<String> {
+    let mut parts = svec(&[surface::command::SKILL, surface::subcommand::REFRESH]);
+    if options.yes {
+        parts.push(surface::flag::YES.to_string());
+    }
+    if options.dry_run {
+        parts.push(surface::flag::DRY_RUN.to_string());
+    }
+    if options.force {
+        parts.push(surface::flag::FORCE.to_string());
+    }
+    parts
 }
 
 pub fn install_parts(
@@ -2485,6 +2618,150 @@ mod tests {
         assert!(cli
             .docs_spec(&DocsLookup::new("Start").with_scope(DocsScope::Package(String::new())))
             .is_err());
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn skill_argv_is_exact_and_validates_every_user_token() {
+        let path =
+            std::env::temp_dir().join(format!("unity-rust-hub-skill-test-{}", std::process::id()));
+        std::fs::write(&path, b"test").unwrap();
+        let cli = UnityCli::new();
+        cli.set_override_path(Some(path.clone()));
+
+        // A read has no user input at all.
+        let clients = cli.skill_clients_spec().unwrap();
+        assert_eq!(
+            clients.args,
+            svec(&[
+                "skill",
+                "install",
+                "--list",
+                "--format",
+                "json",
+                "--no-pager",
+                "--no-banner",
+                "--non-interactive",
+            ])
+        );
+
+        // The untouched single-client install keeps the client first and adds
+        // no optional flag.
+        let single = cli
+            .skill_install_spec(&SkillInstallOptions {
+                client: Some("claude-code".to_string()),
+                ..SkillInstallOptions::default()
+            })
+            .unwrap();
+        assert_eq!(
+            single.args,
+            svec(&[
+                "skill",
+                "install",
+                "claude-code",
+                "--format",
+                "ndjson",
+                "--no-pager",
+                "--no-banner",
+                "--non-interactive",
+            ])
+        );
+
+        // Every documented option in its documented order.
+        let full = cli
+            .skill_install_spec(&SkillInstallOptions {
+                client: Some("cursor".to_string()),
+                all: false,
+                local: true,
+                skill: Some("unity-cli".to_string()),
+                yes: true,
+                dry_run: true,
+                force: true,
+            })
+            .unwrap();
+        assert_eq!(
+            full.args,
+            svec(&[
+                "skill",
+                "install",
+                "cursor",
+                "--local",
+                "--skill",
+                "unity-cli",
+                "--yes",
+                "--dry-run",
+                "--force",
+                "--format",
+                "ndjson",
+                "--no-pager",
+                "--no-banner",
+                "--non-interactive",
+            ])
+        );
+
+        let all = cli
+            .skill_install_spec(&SkillInstallOptions {
+                all: true,
+                dry_run: true,
+                ..SkillInstallOptions::default()
+            })
+            .unwrap();
+        assert_eq!(&all.args[..4], &["skill", "install", "--all", "--dry-run"]);
+
+        let refresh = cli
+            .skill_refresh_spec(&SkillRefreshOptions {
+                yes: true,
+                dry_run: true,
+                force: false,
+            })
+            .unwrap();
+        assert_eq!(
+            refresh.args,
+            svec(&[
+                "skill",
+                "refresh",
+                "--yes",
+                "--dry-run",
+                "--format",
+                "ndjson",
+                "--no-pager",
+                "--no-banner",
+                "--non-interactive",
+            ])
+        );
+
+        // A client token or an all flag is required, and both together are
+        // refused before they reach the CLI.
+        assert!(cli
+            .skill_install_spec(&SkillInstallOptions::default())
+            .is_err());
+        assert!(cli
+            .skill_install_spec(&SkillInstallOptions {
+                client: Some("cursor".to_string()),
+                all: true,
+                ..SkillInstallOptions::default()
+            })
+            .is_err());
+        for client in ["--force", "Claude Code", "cursor; rm -rf /", ""] {
+            assert!(
+                cli.skill_install_spec(&SkillInstallOptions {
+                    client: Some(client.to_string()),
+                    ..SkillInstallOptions::default()
+                })
+                .is_err(),
+                "{client} must never reach argv"
+            );
+        }
+        for skill in ["--force", "two words", "slash/name"] {
+            assert!(cli
+                .skill_install_spec(&SkillInstallOptions {
+                    client: Some("cursor".to_string()),
+                    skill: Some(skill.to_string()),
+                    ..SkillInstallOptions::default()
+                })
+                .is_err());
+        }
+
         std::fs::remove_file(path).ok();
     }
 

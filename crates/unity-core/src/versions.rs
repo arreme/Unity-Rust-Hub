@@ -233,6 +233,70 @@ pub fn validate_download_directory(input: &str) -> Result<Option<String>, UnityE
     Ok(Some(value.to_string()))
 }
 
+/// The agent-skill clients the CLI documents for `unity skill install`.
+///
+/// This list is display metadata and test vocabulary only: a client token is
+/// validated by shape, so a newer CLI that adds a client still works without an
+/// adapter release.
+pub const SKILL_CLIENTS: [&str; 11] = [
+    "claude-code",
+    "claude-desktop",
+    "grok",
+    "cursor",
+    "windsurf",
+    "vscode",
+    "cline",
+    "codex",
+    "opencode",
+    "antigravity",
+    "qwen",
+];
+
+fn skill_client() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"^[a-z0-9][a-z0-9-]{0,31}$").expect("valid regex"))
+}
+
+/// Validates the optional client positional of `unity skill install`.
+///
+/// The token is a lowercase client id such as `claude-code`. It must never look
+/// like a flag, so an empty value and anything outside the documented shape are
+/// refused before they reach argv.
+pub fn validate_skill_client(input: &str) -> Result<String, UnityError> {
+    let value = input.trim();
+    if value.is_empty() {
+        return Err(UnityError::invalid_input(
+            "Choose an AI client, or install to every supported client.",
+        ));
+    }
+    if !skill_client().is_match(value) {
+        return Err(UnityError::invalid_input(format!(
+            "`{value}` is not a Unity skill client id. Use one of the ids from `unity skill install --list`."
+        )));
+    }
+    Ok(value.to_string())
+}
+
+fn skill_name() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$").expect("valid regex"))
+}
+
+/// Validates `--skill <name>`. An empty field means "every skill the CLI
+/// installs", so it is left out of the command.
+pub fn validate_skill_name(input: &str) -> Result<Option<String>, UnityError> {
+    let value = input.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    if !skill_name().is_match(value) {
+        return Err(UnityError::invalid_input(format!(
+            "`{value}` is not a Unity skill name. Leave it empty to install every skill."
+        )));
+    }
+    Ok(Some(value.to_string()))
+}
+
 /// Validates a project path that must exist and be a directory.
 pub fn validate_project_path(path: &str) -> Result<std::path::PathBuf, UnityError> {
     let value = path.trim();
@@ -359,6 +423,32 @@ mod tests {
         }
         for value in ["--accept-eula", "android;id", "$(id)", ""] {
             assert!(validate_module_id(value).is_err(), "{value} should fail");
+        }
+    }
+
+    #[test]
+    fn validates_skill_clients_and_names() {
+        for client in SKILL_CLIENTS {
+            assert_eq!(validate_skill_client(client).unwrap(), client);
+        }
+        assert!(validate_skill_client(" future-client ").is_ok());
+        for value in ["", "--all", "Claude Code", "claude_code", "$(id)"] {
+            assert!(
+                validate_skill_client(value).is_err(),
+                "{value} must be refused"
+            );
+        }
+
+        assert_eq!(
+            validate_skill_name(" unity-cli ").unwrap().as_deref(),
+            Some("unity-cli")
+        );
+        assert_eq!(validate_skill_name("").unwrap(), None);
+        for value in ["--force", "with space", "slash/name", "$(id)"] {
+            assert!(
+                validate_skill_name(value).is_err(),
+                "{value} must be refused"
+            );
         }
     }
 

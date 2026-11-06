@@ -12,9 +12,10 @@ use unity_hub_model::{
     InstallAdvancedVm, InstallCliVm, InstallEditorVm, JobLogVm, JobPhase, JobVm, LicenseRowVm,
     LicenseVm, LoadState, ModalVm, ModuleOptionVm, NoticeVm, OverviewVm, Page, PageVm,
     ProjectRowVm, ProjectsVm, ProxyVm, PruneCandidateVm, PruneEditorsVm, PruneReportVm,
-    ReleaseRowVm, RollbackCliVm, RunningEditorVm, SectionKind, SettingsVm, ShellVm,
-    TextScaleOptionVm, Tone, UiError, UpdateVm, UpgradeProjectVm, VerifyCheckVm, VerifyEditorVm,
-    VerifyResultVm, ViewModel,
+    ReleaseRowVm, RollbackCliVm, RunningEditorVm, SectionKind, SettingsVm, ShellVm, SkillClientVm,
+    SkillForceVm, SkillInstallOptionsVm, SkillInstallVm, SkillOutcomeRowVm, SkillOutcomeVm,
+    SkillRunVm, SkillsVm, TextScaleOptionVm, Tone, UiError, UpdateVm, UpgradeProjectVm,
+    VerifyCheckVm, VerifyEditorVm, VerifyResultVm, ViewModel,
 };
 
 pub struct Fixture {
@@ -91,6 +92,34 @@ pub fn all() -> Vec<Fixture> {
         Fixture {
             name: "Projects",
             view_model: projects(),
+        },
+        Fixture {
+            name: "Skills",
+            view_model: skills(),
+        },
+        Fixture {
+            name: "Skills · empty",
+            view_model: skills_empty(),
+        },
+        Fixture {
+            name: "Skills · installed",
+            view_model: skills_installed(),
+        },
+        Fixture {
+            name: "Skills · dry run",
+            view_model: skills_dry_run(),
+        },
+        Fixture {
+            name: "Skills · conflict",
+            view_model: skills_conflict(),
+        },
+        Fixture {
+            name: "Skills · loading",
+            view_model: skills_loading(),
+        },
+        Fixture {
+            name: "Skills · error",
+            view_model: skills_error(),
         },
         Fixture {
             name: "Diagnostics",
@@ -1082,6 +1111,305 @@ fn diagnose_fixture(topic: DiagnoseTopic) -> DiagnoseReportVm {
         topic,
         text: text.to_string(),
     }
+}
+
+fn skill_client(client: &str, label: &str, path: &str, installed: bool) -> SkillClientVm {
+    SkillClientVm {
+        client: client.to_string(),
+        label: label.to_string(),
+        path: path.to_string(),
+        installed,
+    }
+}
+
+fn skill_install(path: &str, client: &str, skill: &str, status: &str) -> SkillInstallVm {
+    SkillInstallVm {
+        path: path.to_string(),
+        client: client.to_string(),
+        skill: skill.to_string(),
+        status: status.to_string(),
+    }
+}
+
+fn skill_outcome(
+    path: &str,
+    client: &str,
+    skill: &str,
+    outcome: SkillOutcomeVm,
+    reason: Option<&str>,
+) -> SkillOutcomeRowVm {
+    SkillOutcomeRowVm {
+        path: path.to_string(),
+        client: client.to_string(),
+        skill: skill.to_string(),
+        outcome,
+        skip_reason: reason.map(str::to_string),
+    }
+}
+
+fn skills_options() -> SkillInstallOptionsVm {
+    SkillInstallOptionsVm {
+        local: false,
+        overwrite: false,
+        dry_run: false,
+        skill_input: String::new(),
+        skill_input_error: None,
+        all_command:
+            "unity skill install --all --format ndjson --no-pager --no-banner --non-interactive"
+                .to_string(),
+    }
+}
+
+fn skills_vm(
+    clients: LoadState<Vec<SkillClientVm>>,
+    installs: LoadState<Vec<SkillInstallVm>>,
+    result: Option<SkillRunVm>,
+) -> SkillsVm {
+    SkillsVm {
+        clients,
+        installs,
+        install: skills_options(),
+        result,
+        refresh_label: "Preview refresh (dry run)".to_string(),
+        refresh_hint:
+            "The first refresh is a dry run: it changes nothing and labels every row would-*."
+                .to_string(),
+        refresh_command:
+            "unity skill refresh --yes --dry-run --format ndjson --no-pager --no-banner --non-interactive"
+                .to_string(),
+        project_context: Some("/home/ada/Games/Orbital".to_string()),
+        local_available: true,
+        local_disabled_reason: None,
+        job_running: false,
+    }
+}
+
+fn skills() -> ViewModel {
+    base(
+        Page::Skills,
+        PageVm::Skills(skills_vm(
+            LoadState::Ready(vec![
+                skill_client(
+                    "claude-code",
+                    "Claude Code",
+                    "/home/ada/.claude/skills",
+                    true,
+                ),
+                skill_client("cursor", "Cursor", "/home/ada/.cursor/skills", true),
+                skill_client("codex", "Codex", "/home/ada/.codex/skills", false),
+                skill_client(
+                    "claude-desktop",
+                    "Claude Desktop",
+                    "/home/ada/Library/Application Support/Claude/skills",
+                    false,
+                ),
+            ]),
+            LoadState::Ready(vec![
+                skill_install(
+                    "/home/ada/.claude/skills/unity-cli/SKILL.md",
+                    "claude-code",
+                    "unity-cli",
+                    "installed",
+                ),
+                skill_install(
+                    "/home/ada/.cursor/skills/unity-new-project/SKILL.md",
+                    "cursor",
+                    "new-unity-project",
+                    "installed",
+                ),
+            ]),
+            None,
+        )),
+    )
+}
+
+fn skills_empty() -> ViewModel {
+    let mut vm = skills();
+    if let PageVm::Skills(skills) = &mut vm.page {
+        skills.clients = LoadState::Ready(vec![
+            skill_client(
+                "claude-code",
+                "Claude Code",
+                "/home/ada/.claude/skills",
+                false,
+            ),
+            skill_client("cursor", "Cursor", "/home/ada/.cursor/skills", false),
+        ]);
+        skills.installs = LoadState::Ready(Vec::new());
+        skills.project_context = None;
+        skills.local_available = false;
+        skills.local_disabled_reason = Some(
+            "`--local` writes into the current project. The Hub was not launched from a Unity project, so it has no project context to write into."
+                .to_string(),
+        );
+    }
+    vm
+}
+
+fn skills_installed() -> ViewModel {
+    let mut vm = skills();
+    if let PageVm::Skills(skills) = &mut vm.page {
+        if let LoadState::Ready(clients) = &mut skills.clients {
+            for client in clients {
+                client.installed = true;
+            }
+        }
+        skills.result = Some(SkillRunVm {
+            dry_run: false,
+            rows: vec![
+                skill_outcome(
+                    "/home/ada/.claude/skills/unity-cli/SKILL.md",
+                    "claude-code",
+                    "unity-cli",
+                    SkillOutcomeVm::Refreshed,
+                    None,
+                ),
+                skill_outcome(
+                    "/home/ada/.cursor/skills/unity-new-project/SKILL.md",
+                    "cursor",
+                    "new-unity-project",
+                    SkillOutcomeVm::UpToDate,
+                    None,
+                ),
+                skill_outcome(
+                    "/home/ada/.codex/skills/unity-cli/SKILL.md",
+                    "codex",
+                    "unity-cli",
+                    SkillOutcomeVm::Pruned,
+                    Some("The skill no longer exists upstream."),
+                ),
+                skill_outcome(
+                    "/home/ada/.windsurf/skills/unity-cli/SKILL.md",
+                    "windsurf",
+                    "unity-cli",
+                    SkillOutcomeVm::Skipped,
+                    Some("The copy is older and --yes was not passed."),
+                ),
+            ],
+            force: None,
+        });
+        skills.refresh_label = "Refresh now".to_string();
+        skills.refresh_hint =
+            "The next refresh applies for real and reports one row per tracked install."
+                .to_string();
+        skills.refresh_command =
+            "unity skill refresh --yes --format ndjson --no-pager --no-banner --non-interactive"
+                .to_string();
+    }
+    vm
+}
+
+fn skills_dry_run() -> ViewModel {
+    let mut vm = skills();
+    if let PageVm::Skills(skills) = &mut vm.page {
+        skills.result = Some(SkillRunVm {
+            dry_run: true,
+            rows: vec![
+                skill_outcome(
+                    "/home/ada/.claude/skills/unity-cli/SKILL.md",
+                    "claude-code",
+                    "unity-cli",
+                    SkillOutcomeVm::WouldUpdate,
+                    None,
+                ),
+                skill_outcome(
+                    "/home/ada/.cursor/skills/unity-new-project/SKILL.md",
+                    "cursor",
+                    "new-unity-project",
+                    SkillOutcomeVm::WouldSkip,
+                    Some("The copy is older and --yes was not passed."),
+                ),
+                skill_outcome(
+                    "/home/ada/.codex/skills/unity-cli/SKILL.md",
+                    "codex",
+                    "unity-cli",
+                    SkillOutcomeVm::WouldPrune,
+                    Some("The skill is no longer installed for this client."),
+                ),
+            ],
+            force: None,
+        });
+    }
+    vm
+}
+
+fn skills_conflict() -> ViewModel {
+    let mut vm = skills();
+    if let PageVm::Skills(skills) = &mut vm.page {
+        skills.result = Some(SkillRunVm {
+            dry_run: false,
+            rows: vec![
+                skill_outcome(
+                    "/home/ada/.claude/skills/unity-cli/SKILL.md",
+                    "claude-code",
+                    "unity-cli",
+                    SkillOutcomeVm::Refreshed,
+                    None,
+                ),
+                skill_outcome(
+                    "/home/ada/.vscode/skills/unity-cli/SKILL.md",
+                    "vscode",
+                    "unity-cli",
+                    SkillOutcomeVm::Conflict,
+                    Some("The CLI did not write this copy."),
+                ),
+            ],
+            force: Some(SkillForceVm {
+                explanation: "The Unity CLI did not write the `vscode` copy, so it left it alone rather than overwrite it. `--force` takes ownership of that copy and replaces it with the CLI's own. Only run it if you know who wrote it."
+                    .to_string(),
+                command: "unity skill install vscode --force --format ndjson --no-pager --no-banner --non-interactive".to_string(),
+                scope: "`vscode`".to_string(),
+            }),
+        });
+    }
+    vm
+}
+
+fn skills_loading() -> ViewModel {
+    let mut vm = skills();
+    if let PageVm::Skills(skills) = &mut vm.page {
+        skills.clients = LoadState::Loading { previous: None };
+        skills.installs = LoadState::Loading {
+            previous: Some(Vec::new()),
+        };
+    }
+    vm
+}
+
+fn skills_error() -> ViewModel {
+    let mut vm = skills();
+    if let PageVm::Skills(skills) = &mut vm.page {
+        skills.clients = LoadState::Failed {
+            error: UiError {
+                code: "UNEXPECTED_OUTPUT".to_string(),
+                message: "Could not parse the supported clients list.".to_string(),
+                detail: Some("`unity skill install --list` returned an unknown shape.".to_string()),
+                action: Some(ErrorActionVm {
+                    label: "Retry".to_string(),
+                    command: None,
+                    kind: ErrorActionKind::Retry("read:skill-clients".to_string()),
+                }),
+            },
+            previous: None,
+        };
+        skills.installs = LoadState::Failed {
+            error: UiError {
+                code: "NETWORK_UNREACHABLE".to_string(),
+                message: "A Unity service could not be reached.".to_string(),
+                detail: Some(
+                    "Retry when the connection is back; the tracked installs read is independent of the client list."
+                        .to_string(),
+                ),
+                action: Some(ErrorActionVm {
+                    label: "Retry".to_string(),
+                    command: None,
+                    kind: ErrorActionKind::Retry("read:skill-installs".to_string()),
+                }),
+            },
+            previous: None,
+        };
+    }
+    vm
 }
 
 fn diagnostics() -> ViewModel {

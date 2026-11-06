@@ -58,8 +58,8 @@ fixture when a new state needs review.
 
 ### Shell
 
-- Sidebar navigation (6 destinations: Overview, Editors, Projects, Diagnostics,
-  Changelog, Settings), active state.
+- Sidebar navigation (7 destinations: Overview, Editors, Projects, Skills,
+  Diagnostics, Changelog, Settings), active state.
 - Sidebar footer: CLI status (checking / connected with version / missing).
 - Page header: title, subtitle, and actions (Refresh on Overview, Editors,
   Projects; Refresh plus Copy report on Diagnostics).
@@ -148,6 +148,33 @@ fixture when a new state needs review.
   with no architecture falls back to a version match.
 - Pipeline badge or empty, long title, long path, modified date.
 - Row actions: Open, Change version.
+
+### Skills
+
+- Page header: title/subtitle and Reload (re-reads both lists).
+- Supported clients card (`unity skill install --list`): one row per AI client
+  with its display label, client id, install path, installed/absent badge, and
+  an Install button for that client. Loading, error + Retry, empty, and loaded.
+- Tracked installs card (`unity skills`): one row per CLI-tracked copy with the
+  skill name, client badge, path, and the CLI's status. Loading, error + Retry,
+  empty, and loaded.
+- Install options card: `--local` (only when a project context is known, with an
+  explanation when it is not), `--yes` (replace an outdated copy), `--dry-run`,
+  and the optional `--skill <name>` field with its validation line. The exact
+  `unity skill install --all` command is shown above the Install to all clients
+  button.
+- Refresh card: the dry-run default is stated, the exact `unity skill refresh`
+  command is shown, and the primary button is "Preview refresh (dry run)" until
+  a preview lands, then "Refresh now". Preview again stays available.
+- Last run card: one row per tracked install, in CLI order, with the CLI's
+  outcome word (`refreshed`, `up-to-date`, `pruned`, `skipped`, `conflict`, or
+  `would-update`/`would-skip`/`would-prune` under `--dry-run`) and the
+  `skipReason` when present. An unknown outcome word is shown verbatim.
+- Conflict offer: after a `conflict` row, a danger callout explains that the CLI
+  did not write that copy and shows the exact `--force` command. The Take
+  ownership button exists only after that explanation.
+- A running skill job disables every install/refresh/force control; the shell
+  job card owns progress, the raw NDJSON log, and Cancel.
 
 ### Diagnostics
 
@@ -446,6 +473,70 @@ targets as every other read.
 Gallery fixtures: `Diagnostics`, `Diagnostics · not loaded`,
 `Diagnostics · doctor not run`, `Diagnostics · loading`,
 `Diagnostics · partial failure`, `Diagnostics · fully failed`.
+
+## Skills contract
+
+`SkillsVm` is the read-first surface for the Unity agent skill:
+
+- `clients: LoadState<Vec<SkillClientVm>>` — `SkillClientVm { client, label,
+  path, installed }` from `unity skill install --list`. `installed` accepts the
+  CLI's boolean or its documented status words; an unrecognized status stays
+  absent.
+- `installs: LoadState<Vec<SkillInstallVm>>` — `SkillInstallVm { path, client,
+  skill, status }` from `unity skills`, shown verbatim.
+- `install: SkillInstallOptionsVm` — `local`, `overwrite` (`--yes`),
+  `dry_run`, `skill_input` (`--skill`), `skill_input_error`, and the exact
+  `all_command`.
+- `result: Option<SkillRunVm>` — `SkillRunVm { dry_run, rows, force }`;
+  `SkillOutcomeRowVm { path, client, skill, outcome, skip_reason }`.
+  `SkillOutcomeVm` is `Refreshed | UpToDate | Pruned | Skipped | Conflict |
+  WouldUpdate | WouldSkip | WouldPrune | Unknown(String)`. `Skipped` and
+  `Conflict` are distinct tones and are never collapsed into success.
+- `SkillForceVm { explanation, command, scope }` exists only when a result has a
+  `conflict` row. The explanation states that the CLI did not write that copy
+  before the `--force` button is drawn.
+- `refresh_label`, `refresh_hint`, and `refresh_command` describe the next
+  refresh click. The first click after opening the page is a `--dry-run`; after
+  a preview lands, the next click applies. `PreviewSkillRefresh` re-runs a
+  preview at any time.
+- `project_context`, `local_available`, `local_disabled_reason` gate `--local`.
+  The context is the process working directory when it (or an ancestor) holds
+  `ProjectSettings/ProjectVersion.txt`; without it the checkbox is replaced by
+  an explanation.
+- `job_running` disables every mutation control; the controller refuses a
+  concurrent job.
+
+Adapter surface (`unity-core::runner`):
+
+- `skills()` reads `unity skills --format json` and parses `data.items[]`.
+- `skill_clients()` reads `unity skill install --list --format json`.
+- `skill_install_spec(&SkillInstallOptions)` builds
+  `unity skill install [client|--all] [--local] [--skill <name>] [--yes]
+  [--dry-run] [--force]` as an NDJSON job.
+- `skill_refresh_spec(&SkillRefreshOptions)` builds
+  `unity skill refresh [--yes] [--dry-run] [--force]` as an NDJSON job. The
+  controller always passes `--yes` because the click is the confirmation and a
+  child has no terminal.
+- Every token is validated in `unity-core::versions` before it reaches argv:
+  `validate_skill_client` accepts the documented client-id shape and
+  `validate_skill_name` accepts a single skill token. The new `skills` command,
+  `--list`, `--local`, and `--skill` are registered in
+  `unity-core::surface`, so the changelog app-impact filter stays derived from
+  the adapter.
+
+Actions: `InstallSkill(client)`, `InstallAllSkills`, `SkillLocalToggled(bool)`,
+`SkillOverwriteToggled(bool)`, `SkillDryRunToggled(bool)`,
+`SkillNameChanged(String)`, `StartSkillRefresh`, `PreviewSkillRefresh`, and
+`ForceSkillLastRun`. The controller keeps the exact request the last job ran, so
+Force repeats that client/scope rather than whatever the form contains later.
+
+Both reads use `read:skill-clients` and `read:skill-installs` retry targets. A
+finished `skill-install`/`skill-refresh` job parses its terminal frame's
+`data.items[]` (or the single-object `skipped: true` answer) and reloads both
+reads, so the new status is visible without an app restart.
+
+Gallery fixtures: `Skills`, `Skills · empty`, `Skills · installed`,
+`Skills · dry run`, `Skills · conflict`, `Skills · loading`, `Skills · error`.
 
 ## Error contract
 
