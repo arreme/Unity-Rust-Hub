@@ -9,13 +9,15 @@ use serde_json::Value;
 use crate::envelope::{parse_data, parse_envelope, parse_items, ValueEnvelope};
 use crate::errors::{message_for_exit_code, UnityError};
 use crate::models::{
-    AuthStatus, CliStatus, CliUpdateInfo, CliVersion, Editor, EditorInfo, InstallPath,
-    LicenseStatus, Module, PipelineEditors, Project, RawChangelog, Release, RunningEditor,
-    RunningEditors,
+    AuthStatus, CliStatus, CliUpdateInfo, CliVersion, CreateProjectOptions, Editor, EditorInfo,
+    InstallPath, LicenseStatus, Module, PipelineEditors, Project, RawChangelog, Release,
+    RunningEditor, RunningEditors, StatusInstance, TemplateBrief, TemplateCreateOptions,
+    TemplateFilter, TemplateInfo, TemplatePackOptions,
 };
 use crate::versions::{
-    validate_cli_version, validate_editor_version, validate_module_id, validate_project_path,
-    validate_release_stream,
+    validate_archive_path, validate_cli_version, validate_editor_version, validate_module_id,
+    validate_output_dir, validate_package_id, validate_project_name, validate_project_path,
+    validate_release_stream, validate_template_id, validate_template_version,
 };
 
 /// The standard opt-out signal. The CLI's analytics/update callback adds a
@@ -227,6 +229,12 @@ impl UnityCli {
         if let Ok(pipeline) = self.pipeline_editors() {
             merge_pipeline_editors(&mut running, pipeline);
         }
+        // `unity status` adds state, frame count, and player-loop ticking. It
+        // exits 12 with STATUS_NO_INSTANCES when nothing is connected, which is
+        // a normal empty result rather than a failed read.
+        if let Ok(status) = self.status_instances() {
+            merge_status_instances(&mut running, status);
+        }
         Ok(running)
     }
 
@@ -281,6 +289,72 @@ impl UnityCli {
     pub fn projects(&self) -> Result<Vec<Project>, UnityError> {
         let executed = self.run_args(&projects_parts(), "json")?;
         parse_items(executed.envelope.data, &[])
+    }
+
+    /// Lists templates for one Editor version.
+    pub fn templates(
+        &self,
+        editor_version: &str,
+        filter: TemplateFilter,
+        installed_only: bool,
+    ) -> Result<Vec<TemplateBrief>, UnityError> {
+        let parts = templates_parts(editor_version, filter, installed_only)?;
+        let executed = self.run_args(&parts, "json")?;
+        parse_items(executed.envelope.data, &[])
+    }
+
+    pub fn template_info(
+        &self,
+        editor_version: &str,
+        name: &str,
+    ) -> Result<TemplateInfo, UnityError> {
+        validate_editor_version(editor_version)?;
+        validate_template_id(name)?;
+        let parts = svec(&[
+            "templates",
+            "info",
+            name,
+            "--editor-version",
+            editor_version,
+        ]);
+        let executed = self.run_args(&parts, "json")?;
+        parse_data(executed.envelope)
+    }
+
+    /// `unity templates create` installs a registered template and streams
+    /// NDJSON progress.
+    pub fn templates_create_spec(
+        &self,
+        options: &TemplateCreateOptions,
+    ) -> Result<CommandSpec, UnityError> {
+        let parts = templates_create_parts(options)?;
+        self.spec(&parts, "ndjson")
+    }
+
+    /// `unity templates pack` writes a portable `.tgz` and registers nothing.
+    pub fn templates_pack_spec(
+        &self,
+        options: &TemplatePackOptions,
+    ) -> Result<CommandSpec, UnityError> {
+        let parts = templates_pack_parts(options)?;
+        self.spec(&parts, "ndjson")
+    }
+
+    /// `unity projects create`, always local-only (`--no-cloud`).
+    pub fn create_project_spec(
+        &self,
+        options: &CreateProjectOptions,
+    ) -> Result<CommandSpec, UnityError> {
+        let parts = create_project_parts(options)?;
+        self.spec(&parts, "ndjson")
+    }
+
+    /// `unity status`: one row per connected Editor. Exit 12 with
+    /// `STATUS_NO_INSTANCES` is the normal "nothing running" result.
+    pub fn status_instances(&self) -> Result<Vec<StatusInstance>, UnityError> {
+        let spec = self.spec(&svec(&["status"]), "json")?;
+        let executed = self.execute_envelope(&spec)?;
+        status_instances_from_envelope(&executed.envelope, &executed.stderr, executed.exit_code)
     }
 
     /// Opens a project with its registered Editor version. The command returns
@@ -517,8 +591,80 @@ fn merge_pipeline_editors(running: &mut RunningEditors, pipeline: PipelineEditor
             if instance.dialog.is_some() {
                 target.dialog = instance.dialog.clone();
             }
+            if instance.state.is_some() {
+                target.state = instance.state.clone();
+            }
+            if instance.frame_count.is_some() {
+                target.frame_count = instance.frame_count;
+            }
+            if instance.player_loop_ticking.is_some() {
+                target.player_loop_ticking = instance.player_loop_ticking;
+            }
         } else {
             running.instances.push(instance.into_running_editor());
+        }
+    }
+    running.count = running.instances.len();
+}
+
+fn merge_status_instances(running: &mut RunningEditors, status: Vec<StatusInstance>) {
+    for instance in status {
+        let position = instance
+            .pid
+            .and_then(|pid| {
+                running
+                    .instances
+                    .iter()
+                    .position(|candidate| candidate.pid == Some(pid))
+            })
+            .or_else(|| {
+                instance.project_path.as_deref().and_then(|path| {
+                    running.instances.iter().position(|candidate| {
+                        candidate
+                            .project_path
+                            .as_deref()
+                            .is_some_and(|candidate| same_project_path(candidate, path))
+                    })
+                })
+            });
+
+        if let Some(index) = position {
+            let target = &mut running.instances[index];
+            if target.project_path.is_none() {
+                target.project_path = instance.project_path.clone();
+            }
+            if target.editor_version.is_none() {
+                target.editor_version = instance.editor_version.clone();
+            }
+            if target.pid.is_none() {
+                target.pid = instance.pid;
+            }
+            if target.port.is_none() {
+                target.port = instance.port;
+            }
+            target.state = instance.state.clone();
+            target.frame_count = instance.frame_count;
+            target.player_loop_ticking = instance.player_loop_ticking;
+            if instance.safe_mode.is_some() {
+                target.safe_mode = instance.safe_mode.clone();
+            }
+            if instance.dialog.is_some() {
+                target.dialog = instance.dialog.clone();
+            }
+        } else {
+            running.instances.push(RunningEditor {
+                project_path: instance.project_path,
+                editor_version: instance.editor_version,
+                pid: instance.pid,
+                port: instance.port,
+                state: instance.state,
+                frame_count: instance.frame_count,
+                player_loop_ticking: instance.player_loop_ticking,
+                safe_mode: instance.safe_mode,
+                dialog: instance.dialog,
+                extra: instance.extra,
+                ..RunningEditor::default()
+            });
         }
     }
     running.count = running.instances.len();
@@ -528,6 +674,24 @@ fn same_project_path(left: &str, right: &str) -> bool {
     let left = left.trim().trim_end_matches(['/', '\\']);
     let right = right.trim().trim_end_matches(['/', '\\']);
     left == right || (cfg!(windows) && left.eq_ignore_ascii_case(right))
+}
+
+fn status_instances_from_envelope(
+    envelope: &ValueEnvelope,
+    stderr: &str,
+    exit_code: Option<i32>,
+) -> Result<Vec<StatusInstance>, UnityError> {
+    if !envelope.success {
+        let empty = envelope
+            .errors
+            .iter()
+            .any(|error| error.code == "STATUS_NO_INSTANCES");
+        if empty {
+            return Ok(Vec::new());
+        }
+        return Err(envelope_error(envelope, stderr, exit_code));
+    }
+    parse_items(envelope.data.clone(), &["instances"])
 }
 
 fn envelope_error(envelope: &ValueEnvelope, stderr: &str, exit_code: Option<i32>) -> UnityError {
@@ -837,6 +1001,140 @@ fn modules_parts(version: &str) -> Result<Vec<String>, UnityError> {
 
 fn projects_parts() -> Vec<String> {
     svec(&["projects", "--all"])
+}
+
+fn templates_parts(
+    editor_version: &str,
+    filter: TemplateFilter,
+    installed_only: bool,
+) -> Result<Vec<String>, UnityError> {
+    validate_editor_version(editor_version)?;
+    let mut parts = svec(&["templates", "--editor-version", editor_version, "--brief"]);
+    if filter != TemplateFilter::All {
+        parts.extend(svec(&["--type", filter.cli_value()]));
+    }
+    if installed_only {
+        parts.push("--installed".to_string());
+    }
+    Ok(parts)
+}
+
+fn templates_create_parts(options: &TemplateCreateOptions) -> Result<Vec<String>, UnityError> {
+    let project = validate_project_path(&options.project_path)?;
+    validate_package_id(&options.name)?;
+    let display_name = options.display_name.trim();
+    if display_name.is_empty() {
+        return Err(UnityError::invalid_input("Enter a template display name."));
+    }
+    validate_template_version(&options.version)?;
+    let output_dir = validate_output_dir(&options.output_dir)?;
+    let project = project.to_string_lossy().into_owned();
+    let output_dir = output_dir.to_string_lossy().into_owned();
+
+    let mut parts = svec(&["templates", "create", &project]);
+    parts.extend(svec(&["--name", options.name.trim()]));
+    parts.extend(svec(&["--display-name", display_name]));
+    if !options.description.trim().is_empty() {
+        parts.extend(svec(&["--description", options.description.trim()]));
+    }
+    if !options.version.trim().is_empty() {
+        parts.extend(svec(&["--version", options.version.trim()]));
+    }
+    parts.extend(svec(&["--output-dir", &output_dir]));
+    if options.overwrite {
+        parts.push("--overwrite".to_string());
+    }
+    Ok(parts)
+}
+
+fn templates_pack_parts(options: &TemplatePackOptions) -> Result<Vec<String>, UnityError> {
+    let project = validate_project_path(&options.project_path)?;
+    let output = validate_archive_path(&options.output)?;
+    if absolute_for_compare(&output).starts_with(absolute_for_compare(&project)) {
+        return Err(UnityError::invalid_input(
+            "The archive destination cannot be inside the project being packed.",
+        ));
+    }
+    if !options.name.trim().is_empty() {
+        validate_package_id(&options.name)?;
+        if options.display_name.trim().is_empty() {
+            return Err(UnityError::invalid_input(
+                "Enter a template display name, or clear the package id.",
+            ));
+        }
+        validate_template_version(&options.version)?;
+    }
+
+    let project = project.to_string_lossy().into_owned();
+    let output = output.to_string_lossy().into_owned();
+
+    let mut parts = svec(&["templates", "pack", &project]);
+    parts.extend(svec(&["--output", &output]));
+    if !options.name.trim().is_empty() {
+        parts.extend(svec(&["--name", options.name.trim()]));
+        parts.extend(svec(&["--display-name", options.display_name.trim()]));
+        if !options.description.trim().is_empty() {
+            parts.extend(svec(&["--description", options.description.trim()]));
+        }
+        if !options.version.trim().is_empty() {
+            parts.extend(svec(&["--version", options.version.trim()]));
+        }
+    }
+    if options.overwrite {
+        parts.push("--overwrite".to_string());
+    }
+    Ok(parts)
+}
+
+fn create_project_parts(options: &CreateProjectOptions) -> Result<Vec<String>, UnityError> {
+    validate_project_name(&options.name)?;
+    let output_dir = validate_output_dir(&options.output_dir)?;
+    validate_editor_version(&options.editor_version)?;
+    validate_template_id(&options.template)?;
+    let architecture = options.architecture.trim();
+    if !matches!(architecture, "x86_64" | "arm64") {
+        return Err(UnityError::invalid_input(
+            "Choose the x86_64 or arm64 Editor architecture.",
+        ));
+    }
+
+    let output_dir = output_dir.to_string_lossy().into_owned();
+    let mut parts = svec(&[
+        "projects",
+        "create",
+        options.name.trim(),
+        "--output-dir",
+        &output_dir,
+        "--editor-version",
+        options.editor_version.trim(),
+        "--template",
+        options.template.trim(),
+        "--architecture",
+        architecture,
+        // The GUI must never link a new project to Cloud implicitly.
+        "--no-cloud",
+    ]);
+    if options.open {
+        parts.push("--open".to_string());
+    }
+    if options.bare {
+        parts.push("--bare".to_string());
+    }
+    Ok(parts)
+}
+
+fn absolute_for_compare(path: &std::path::Path) -> std::path::PathBuf {
+    if let Ok(path) = path.canonicalize() {
+        return path;
+    }
+    if let Some(file_name) = path.file_name() {
+        if let Some(parent) = path.parent() {
+            if let Ok(parent) = parent.canonicalize() {
+                return parent.join(file_name);
+            }
+        }
+    }
+    std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn open_project_parts(path: &str) -> Result<Vec<String>, UnityError> {
@@ -1301,5 +1599,222 @@ mod tests {
         assert!(!executed.envelope.success);
         assert!(executed.envelope.data.is_some());
         assert!(cli.execute(&spec).is_err());
+    }
+
+    fn envelope(value: Value) -> ValueEnvelope {
+        serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn templates_use_the_brief_listing_with_the_editor_version() {
+        let parts = templates_parts("6000.3.15f1", TemplateFilter::Core, true).unwrap();
+        assert_eq!(parts[0], "templates");
+        assert!(parts.contains(&"--brief".to_string()));
+        assert!(parts.contains(&"--editor-version".to_string()));
+        assert!(parts
+            .windows(2)
+            .any(|pair| pair == ["--editor-version", "6000.3.15f1"]));
+        assert!(parts.windows(2).any(|pair| pair == ["--type", "core"]));
+        assert!(parts.contains(&"--installed".to_string()));
+    }
+
+    #[test]
+    fn template_listing_without_a_filter_omits_the_type_flag() {
+        let parts = templates_parts("6000.3.15f1", TemplateFilter::All, false).unwrap();
+        assert!(!parts.contains(&"--type".to_string()));
+        assert!(!parts.contains(&"--installed".to_string()));
+    }
+
+    #[test]
+    fn template_info_tolerates_a_missing_render_pipeline() {
+        let info: TemplateInfo = serde_json::from_value(serde_json::json!({
+            "name": "com.unity.template.universal-2d",
+            "displayName": "Universal 2D",
+            "version": "6.1.2",
+            "status": "READY"
+        }))
+        .unwrap();
+        assert_eq!(info.render_pipeline_label(), None);
+        assert!(info.is_installed());
+    }
+
+    #[test]
+    fn template_info_keeps_a_blank_render_pipeline_as_none() {
+        let info: TemplateInfo = serde_json::from_value(serde_json::json!({
+            "name": "com.unity.template.universal-2d",
+            "renderPipeline": "  "
+        }))
+        .unwrap();
+        assert_eq!(info.render_pipeline_label(), None);
+    }
+
+    #[test]
+    fn create_project_always_passes_no_cloud_and_output_dir() {
+        let dir = std::env::temp_dir();
+        let options = CreateProjectOptions {
+            name: "MyGame".to_string(),
+            output_dir: dir.to_string_lossy().into_owned(),
+            editor_version: "6000.3.15f1".to_string(),
+            template: "com.unity.template.urp-blank".to_string(),
+            architecture: "x86_64".to_string(),
+            open: false,
+            bare: false,
+        };
+        let parts = create_project_parts(&options).unwrap();
+        assert_eq!(parts[0], "projects");
+        assert_eq!(parts[1], "create");
+        assert_eq!(parts[2], "MyGame");
+        assert!(parts.contains(&"--no-cloud".to_string()));
+        assert!(parts.contains(&"--output-dir".to_string()));
+        assert!(!parts.contains(&"--path".to_string()));
+        assert!(!parts.contains(&"--open".to_string()));
+    }
+
+    #[test]
+    fn create_project_passes_open_only_when_requested() {
+        let options = CreateProjectOptions {
+            name: "MyGame".to_string(),
+            output_dir: std::env::temp_dir().to_string_lossy().into_owned(),
+            editor_version: "6000.3.15f1".to_string(),
+            template: "3d".to_string(),
+            architecture: "arm64".to_string(),
+            open: true,
+            bare: true,
+        };
+        let parts = create_project_parts(&options).unwrap();
+        assert!(parts.contains(&"--open".to_string()));
+        assert!(parts.contains(&"--bare".to_string()));
+    }
+
+    #[test]
+    fn create_project_rejects_an_unknown_architecture() {
+        let options = CreateProjectOptions {
+            name: "MyGame".to_string(),
+            output_dir: std::env::temp_dir().to_string_lossy().into_owned(),
+            editor_version: "6000.3.15f1".to_string(),
+            template: "3d".to_string(),
+            architecture: "ppc".to_string(),
+            ..CreateProjectOptions::default()
+        };
+        assert!(create_project_parts(&options).is_err());
+    }
+
+    #[test]
+    fn pack_refuses_a_destination_inside_the_source_project() {
+        let project =
+            std::env::temp_dir().join(format!("unity-rust-hub-pack-test-{}", std::process::id()));
+        std::fs::create_dir_all(&project).unwrap();
+        let options = TemplatePackOptions {
+            project_path: project.to_string_lossy().into_owned(),
+            output: project.join("out.tgz").to_string_lossy().into_owned(),
+            ..TemplatePackOptions::default()
+        };
+        let result = templates_pack_parts(&options);
+        std::fs::remove_dir_all(&project).ok();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn templates_create_validates_before_the_cli_runs() {
+        let options = TemplateCreateOptions {
+            project_path: std::env::temp_dir().to_string_lossy().into_owned(),
+            name: "not a package id".to_string(),
+            display_name: "Game".to_string(),
+            output_dir: std::env::temp_dir().to_string_lossy().into_owned(),
+            ..TemplateCreateOptions::default()
+        };
+        assert!(templates_create_parts(&options).is_err());
+    }
+
+    #[test]
+    fn status_exit_12_no_instances_is_an_empty_list_not_an_error() {
+        let envelope = envelope(serde_json::json!({
+            "success": false,
+            "data": { "count": 0, "instances": [] },
+            "errors": [{
+                "code": "STATUS_NO_INSTANCES",
+                "message": "No Unity Editor instances found with the Pipeline package installed."
+            }]
+        }));
+        let instances = status_instances_from_envelope(&envelope, "", Some(12)).unwrap();
+        assert!(instances.is_empty());
+    }
+
+    #[test]
+    fn other_status_failures_stay_errors() {
+        let envelope = envelope(serde_json::json!({
+            "success": false,
+            "errors": [{ "code": "NETWORK_UNREACHABLE", "message": "offline" }]
+        }));
+        assert!(status_instances_from_envelope(&envelope, "", Some(7)).is_err());
+    }
+
+    #[test]
+    fn status_merges_by_pid_and_updates_the_live_fields() {
+        let mut running = RunningEditors {
+            count: 1,
+            instances: vec![RunningEditor {
+                project_path: Some("/tmp/Game".to_string()),
+                pid: Some(42),
+                phase: Some("loading project".to_string()),
+                ..RunningEditor::default()
+            }],
+        };
+        let status = vec![StatusInstance {
+            project_path: Some("/tmp/Game".to_string()),
+            pid: Some(42),
+            state: Some("ready".to_string()),
+            frame_count: Some(1200),
+            player_loop_ticking: Some(true),
+            ..StatusInstance::default()
+        }];
+
+        merge_status_instances(&mut running, status);
+
+        assert_eq!(running.count, 1);
+        assert_eq!(running.instances[0].state.as_deref(), Some("ready"));
+        assert_eq!(running.instances[0].frame_count, Some(1200));
+        assert_eq!(running.instances[0].player_loop_ticking, Some(true));
+        assert_eq!(
+            running.instances[0].phase.as_deref(),
+            Some("loading project")
+        );
+    }
+
+    #[test]
+    fn status_adds_editors_missing_from_the_running_list() {
+        let mut running = RunningEditors::default();
+        let status = vec![StatusInstance {
+            project_path: Some("/tmp/Game".to_string()),
+            pid: Some(7),
+            state: Some("unreachable".to_string()),
+            ..StatusInstance::default()
+        }];
+
+        merge_status_instances(&mut running, status);
+
+        assert_eq!(running.count, 1);
+        assert_eq!(running.instances[0].state.as_deref(), Some("unreachable"));
+    }
+
+    #[test]
+    fn status_merges_by_path_when_pids_are_missing() {
+        let mut running = RunningEditors {
+            count: 1,
+            instances: vec![RunningEditor {
+                project_path: Some("/tmp/Game/".to_string()),
+                ..RunningEditor::default()
+            }],
+        };
+        let status = vec![StatusInstance {
+            project_path: Some("/tmp/Game".to_string()),
+            state: Some("starting".to_string()),
+            ..StatusInstance::default()
+        }];
+
+        merge_status_instances(&mut running, status);
+
+        assert_eq!(running.instances.len(), 1);
+        assert_eq!(running.instances[0].state.as_deref(), Some("starting"));
     }
 }

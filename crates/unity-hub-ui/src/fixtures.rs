@@ -7,9 +7,12 @@ use unity_hub_model::{
     AccountCardVm, AuthVm, BadgeVm, BreakingChangeVm, ChangelogDataVm, ChangelogSectionVm,
     ChangelogVm, CliCardVm, CliConnectionVm, CliDetailsVm, EditorModulesVm, EditorRowVm, EditorsVm,
     InstallCliVm, InstallEditorVm, JobPhase, JobVm, LicenseRowVm, LicenseVm, LoadState, ModalVm,
-    ModuleOptionVm, OverviewVm, Page, PageVm, ProjectRowVm, ProjectsVm, ReleaseRowVm,
-    RemoveProjectVm, RunningEditorVm, SectionKind, SettingsVm, ShellVm, TextScaleOptionVm, Tone,
-    UiError, UpdateVm, UpgradeProjectVm, ViewModel,
+    ModuleOptionVm, NewProjectEditorVm, NewProjectPreflightState, NewProjectPreflightVm,
+    NewProjectResultVm, NewProjectStep, NewProjectVm, OverviewVm, Page, PageVm, ProcessMetricsVm,
+    ProcessRowVm, ProcessesVm, ProjectRowVm, ProjectsVm, ReleaseRowVm, RemoveProjectVm,
+    RunningEditorVm, SectionKind, SettingsVm, ShellVm, TemplateAuthoringMode, TemplateAuthoringVm,
+    TemplateDetailVm, TemplateFormVm, TemplateKindFilter, TemplateRowVm, TemplatesVm,
+    TextScaleOptionVm, Tone, UiError, UpdateVm, UpgradeProjectVm, ViewModel,
 };
 
 pub struct Fixture {
@@ -38,6 +41,70 @@ pub fn all() -> Vec<Fixture> {
         Fixture {
             name: "Projects",
             view_model: projects(),
+        },
+        Fixture {
+            name: "Templates",
+            view_model: templates(),
+        },
+        Fixture {
+            name: "Templates · empty",
+            view_model: templates_empty(),
+        },
+        Fixture {
+            name: "Templates · error",
+            view_model: templates_error(),
+        },
+        Fixture {
+            name: "Processes",
+            view_model: processes(),
+        },
+        Fixture {
+            name: "Processes · empty",
+            view_model: processes_empty(),
+        },
+        Fixture {
+            name: "Processes · unreachable",
+            view_model: processes_unreachable(),
+        },
+        Fixture {
+            name: "Processes · metrics unknown",
+            view_model: processes_metrics_unknown(),
+        },
+        Fixture {
+            name: "New project · blocked",
+            view_model: new_project_blocked(),
+        },
+        Fixture {
+            name: "New project · details",
+            view_model: new_project(NewProjectStep::Details),
+        },
+        Fixture {
+            name: "New project · editor",
+            view_model: new_project(NewProjectStep::Editor),
+        },
+        Fixture {
+            name: "New project · template",
+            view_model: new_project(NewProjectStep::Template),
+        },
+        Fixture {
+            name: "New project · review",
+            view_model: new_project(NewProjectStep::Review),
+        },
+        Fixture {
+            name: "New project · result",
+            view_model: new_project(NewProjectStep::Result),
+        },
+        Fixture {
+            name: "New project · partial",
+            view_model: new_project_partial(),
+        },
+        Fixture {
+            name: "Modal · template create",
+            view_model: template_authoring(TemplateAuthoringMode::Create, false),
+        },
+        Fixture {
+            name: "Modal · template pack",
+            view_model: template_authoring(TemplateAuthoringMode::Pack, true),
         },
         Fixture {
             name: "Changelog",
@@ -519,5 +586,337 @@ fn job_failed() -> ViewModel {
         }),
         logs: "! Editor 6000.3.0f1 is not installed.\n".into(),
     });
+    vm
+}
+
+fn template_rows() -> Vec<TemplateRowVm> {
+    vec![
+        TemplateRowVm {
+            name: "com.unity.template.urp-blank".to_string(),
+            display_name: "Universal 3D".to_string(),
+            kind: "CORE".to_string(),
+            version: "17.1.0".to_string(),
+            status: "ready".to_string(),
+            status_tone: Tone::Success,
+            installed: true,
+            pipeline: Some("URP".to_string()),
+        },
+        TemplateRowVm {
+            name: "com.unity.template.universal-2d".to_string(),
+            display_name: "Universal 2D".to_string(),
+            kind: "CORE".to_string(),
+            version: "6.1.2".to_string(),
+            status: "ready".to_string(),
+            status_tone: Tone::Success,
+            installed: true,
+            pipeline: Some("URP · 2D".to_string()),
+        },
+        TemplateRowVm {
+            name: "com.unity.template.hdrp-blank".to_string(),
+            display_name: "High Definition 3D".to_string(),
+            kind: "CORE".to_string(),
+            version: "17.1.1".to_string(),
+            status: "upgradable".to_string(),
+            status_tone: Tone::Warning,
+            installed: true,
+            pipeline: Some("HDRP".to_string()),
+        },
+        TemplateRowVm {
+            name: "com.unity.template.mixed-reality".to_string(),
+            display_name: "Mixed Reality (MR)".to_string(),
+            kind: "CORE".to_string(),
+            version: "3.0.0".to_string(),
+            status: "downloadable".to_string(),
+            status_tone: Tone::Info,
+            installed: false,
+            pipeline: None,
+        },
+    ]
+}
+
+fn template_detail() -> TemplateDetailVm {
+    TemplateDetailVm {
+        name: "com.unity.template.urp-blank".to_string(),
+        display_name: "Universal 3D".to_string(),
+        description: "The URP blank template includes the settings and assets you need to start creating with the Universal Render Pipeline.".to_string(),
+        kind: "CORE".to_string(),
+        version: "17.1.0".to_string(),
+        status: "READY".to_string(),
+        installed: true,
+        render_pipeline: Some("URP".to_string()),
+        packages: vec![
+            "com.unity.render-pipelines.universal 17.0.4".to_string(),
+            "com.unity.ugui 2.0.0".to_string(),
+            "com.unity.inputsystem 1.14.2".to_string(),
+        ],
+        previous_versions: vec!["17.0.9".to_string(), "17.0.8".to_string()],
+    }
+}
+
+fn templates() -> ViewModel {
+    base(
+        Page::Templates,
+        PageVm::Templates(TemplatesVm {
+            editors: LoadState::Ready(vec!["6000.3.15f1".to_string(), "6000.6.6f1".to_string()]),
+            selected_editor: Some("6000.3.15f1".to_string()),
+            filter: TemplateKindFilter::All,
+            installed_only: false,
+            list: LoadState::Ready(template_rows()),
+            detail: Some(template_detail()),
+            detail_loading: false,
+            detail_error: None,
+        }),
+    )
+}
+
+fn templates_empty() -> ViewModel {
+    base(
+        Page::Templates,
+        PageVm::Templates(TemplatesVm {
+            editors: LoadState::Ready(vec!["6000.3.15f1".to_string()]),
+            selected_editor: Some("6000.3.15f1".to_string()),
+            filter: TemplateKindFilter::Custom,
+            installed_only: true,
+            list: LoadState::Ready(Vec::new()),
+            detail: None,
+            detail_loading: false,
+            detail_error: None,
+        }),
+    )
+}
+
+fn templates_error() -> ViewModel {
+    base(
+        Page::Templates,
+        PageVm::Templates(TemplatesVm {
+            editors: LoadState::Ready(vec!["6000.3.15f1".to_string()]),
+            selected_editor: Some("6000.3.15f1".to_string()),
+            filter: TemplateKindFilter::All,
+            installed_only: false,
+            list: LoadState::Failed {
+                error: UiError {
+                    message: "Could not read templates.".to_string(),
+                    detail: Some("The CLI returned an unexpected document.".to_string()),
+                },
+                previous: None,
+            },
+            detail: None,
+            detail_loading: false,
+            detail_error: None,
+        }),
+    )
+}
+
+fn process_rows() -> Vec<ProcessRowVm> {
+    vec![
+        ProcessRowVm {
+            project_path: "/home/ada/Games/Orbital".to_string(),
+            project_name: "Orbital".to_string(),
+            editor_version: "6000.3.15f1".to_string(),
+            pid: Some("4242".to_string()),
+            port: Some("7800".to_string()),
+            state: "ready".to_string(),
+            state_tone: Tone::Success,
+            phase: Some("play mode".to_string()),
+            play_mode: true,
+            frame_count: Some("18420".to_string()),
+            pipeline_version: Some("0.9.1-exp.1".to_string()),
+            safe_mode: false,
+            dialog: None,
+            metrics: Some(ProcessMetricsVm {
+                cpu: "12.4%".to_string(),
+                memory: "1.8 GB".to_string(),
+                uptime: "2h 14m".to_string(),
+            }),
+        },
+        ProcessRowVm {
+            project_path: "/home/ada/Tools/LevelKit".to_string(),
+            project_name: "LevelKit".to_string(),
+            editor_version: "2022.3.62f1".to_string(),
+            pid: Some("5151".to_string()),
+            port: None,
+            state: "starting".to_string(),
+            state_tone: Tone::Info,
+            phase: Some("loading project".to_string()),
+            play_mode: false,
+            frame_count: Some("12".to_string()),
+            pipeline_version: None,
+            safe_mode: true,
+            dialog: Some("Save changes?".to_string()),
+            metrics: Some(ProcessMetricsVm {
+                cpu: "—".to_string(),
+                memory: "640 MB".to_string(),
+                uptime: "18s".to_string(),
+            }),
+        },
+    ]
+}
+
+fn processes() -> ViewModel {
+    base(
+        Page::Processes,
+        PageVm::Processes(ProcessesVm {
+            rows: LoadState::Ready(process_rows()),
+            metrics_enabled: true,
+            pipeline_available: true,
+            last_refreshed: Some("14:32:08".to_string()),
+        }),
+    )
+}
+
+fn processes_empty() -> ViewModel {
+    base(
+        Page::Processes,
+        PageVm::Processes(ProcessesVm {
+            rows: LoadState::Ready(Vec::new()),
+            metrics_enabled: false,
+            pipeline_available: false,
+            last_refreshed: Some("14:32:08".to_string()),
+        }),
+    )
+}
+
+fn processes_unreachable() -> ViewModel {
+    let mut rows = process_rows();
+    rows[1].state = "unreachable".to_string();
+    rows[1].state_tone = Tone::Danger;
+    rows[1].phase = None;
+    base(
+        Page::Processes,
+        PageVm::Processes(ProcessesVm {
+            rows: LoadState::Ready(rows),
+            metrics_enabled: false,
+            pipeline_available: false,
+            last_refreshed: Some("14:32:08".to_string()),
+        }),
+    )
+}
+
+fn processes_metrics_unknown() -> ViewModel {
+    let mut rows = process_rows();
+    for row in &mut rows {
+        row.metrics = None;
+    }
+    base(
+        Page::Processes,
+        PageVm::Processes(ProcessesVm {
+            rows: LoadState::Ready(rows),
+            metrics_enabled: true,
+            pipeline_available: true,
+            last_refreshed: Some("14:32:08".to_string()),
+        }),
+    )
+}
+
+fn new_project_blocked() -> ViewModel {
+    let mut vm = new_project(NewProjectStep::Details);
+    if let Some(ModalVm::NewProject(state)) = &mut vm.modal {
+        state.preflight = NewProjectPreflightVm {
+            state: NewProjectPreflightState::Blocked,
+            license_ok: false,
+            message: Some(
+                "Unity reports no active license. Sign in and activate a license before creating a project."
+                    .to_string(),
+            ),
+            can_continue: false,
+        };
+        state.issues = vec![
+            "The target folder already exists and is not empty: /home/ada/Games/OrbitalTwo"
+                .to_string(),
+        ];
+    }
+    vm
+}
+
+fn new_project_partial() -> ViewModel {
+    let mut vm = new_project(NewProjectStep::Result);
+    if let Some(ModalVm::NewProject(state)) = &mut vm.modal {
+        state.result = Some(NewProjectResultVm {
+            success: false,
+            path: Some("/home/ada/Games/OrbitalTwo".to_string()),
+            summary:
+                "The project was created at /home/ada/Games/OrbitalTwo, but 1 setup step(s) failed."
+                    .to_string(),
+            failed_steps: vec!["cloudLink: NO_CLOUD".to_string()],
+        });
+    }
+    vm
+}
+
+fn new_project(step: NewProjectStep) -> ViewModel {
+    let mut vm = templates();
+    vm.modal = Some(ModalVm::NewProject(Box::new(NewProjectVm {
+        step,
+        form: unity_hub_model::NewProjectFormVm {
+            name: "OrbitalTwo".to_string(),
+            parent_dir: "/home/ada/Games".to_string(),
+            editor_version: "6000.3.15f1".to_string(),
+            architecture: "x86_64".to_string(),
+            template: "com.unity.template.urp-blank".to_string(),
+            open_after_create: true,
+            show_builtin_templates: false,
+        },
+        editors: LoadState::Ready(vec![NewProjectEditorVm {
+            version: "6000.3.15f1".to_string(),
+            architecture: "x86_64".to_string(),
+            is_default: true,
+        }]),
+        templates: LoadState::Ready(template_rows()),
+        selected_template: Some(template_detail()),
+        preflight: NewProjectPreflightVm {
+            state: NewProjectPreflightState::Ready,
+            license_ok: true,
+            message: None,
+            can_continue: true,
+        },
+        issues: Vec::new(),
+        command_preview: "unity projects create OrbitalTwo --output-dir /home/ada/Games --editor-version 6000.3.15f1 --template com.unity.template.urp-blank --architecture x86_64 --no-cloud --open --format ndjson --no-pager --no-banner --non-interactive".to_string(),
+        result: (step == NewProjectStep::Result).then(|| NewProjectResultVm {
+            success: true,
+            path: Some("/home/ada/Games/OrbitalTwo".to_string()),
+            summary: "Project created at /home/ada/Games/OrbitalTwo.".to_string(),
+            failed_steps: Vec::new(),
+        }),
+        job: None,
+    })));
+    vm
+}
+
+fn template_authoring(mode: TemplateAuthoringMode, existing: bool) -> ViewModel {
+    let mut vm = templates();
+    vm.modal = Some(ModalVm::TemplateAuthoring(Box::new(TemplateAuthoringVm {
+        mode,
+        projects: vec![
+            "/home/ada/Games/Orbital".to_string(),
+            "/home/ada/Tools/LevelKit".to_string(),
+        ],
+        selected_project: Some("/home/ada/Games/Orbital".to_string()),
+        form: TemplateFormVm {
+            name: "com.ada.template.orbital".to_string(),
+            display_name: "Orbital Starter".to_string(),
+            description: "A 3D URP starter with the Orbital scene.".to_string(),
+            version: "1.0.0".to_string(),
+            output: if mode.is_pack() {
+                "/home/ada/Games/orbital-template.tgz".to_string()
+            } else {
+                "/home/ada/.config/unityhub/templates".to_string()
+            },
+        },
+        overwrite: false,
+        overwrite_confirmed: existing,
+        can_submit: !existing,
+        issues: if existing {
+            vec!["The archive already exists. Confirm overwrite to replace it.".to_string()]
+        } else {
+            Vec::new()
+        },
+        command_preview: if mode.is_pack() {
+            "unity templates pack /home/ada/Games/Orbital --output /home/ada/Games/orbital-template.tgz --name com.ada.template.orbital --display-name 'Orbital Starter'".to_string()
+        } else {
+            "unity templates create /home/ada/Games/Orbital --name com.ada.template.orbital --display-name 'Orbital Starter'".to_string()
+        },
+        result: None,
+        job: None,
+    })));
     vm
 }

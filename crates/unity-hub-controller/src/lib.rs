@@ -6,6 +6,7 @@
 
 mod app;
 mod jobs;
+pub mod metrics;
 mod settings;
 mod util;
 

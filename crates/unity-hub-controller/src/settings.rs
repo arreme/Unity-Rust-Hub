@@ -62,6 +62,9 @@ pub struct AppSettings {
     pub text_scale_percent: u16,
     #[serde(default = "default_font_family")]
     pub font_family: String,
+    /// Opt-in CPU/RSS sampling on the Processes page. Off by default.
+    #[serde(default)]
+    pub process_metrics: bool,
 }
 
 impl Default for AppSettings {
@@ -70,6 +73,7 @@ impl Default for AppSettings {
             cli_path: None,
             text_scale_percent: default_text_scale_percent(),
             font_family: default_font_family(),
+            process_metrics: false,
         }
     }
 }

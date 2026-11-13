@@ -1,4 +1,4 @@
-use crate::Page;
+use crate::{NewProjectField, Page, TemplateAuthoringMode, TemplateField, TemplateKindFilter};
 
 /// Everything a screen is allowed to ask the application to do.
 ///
@@ -50,4 +50,34 @@ pub enum UiAction {
     CliPathChanged(String),
     SaveCliPath,
     ClearCliPath,
+
+    // Templates
+    TemplatesEditorChanged(String),
+    TemplateFilterChanged(TemplateKindFilter),
+    TemplateInstalledOnlyToggled(bool),
+    OpenTemplateDetail(String),
+    OpenTemplateAuthoring(TemplateAuthoringMode),
+    TemplateAuthoringProjectChanged(String),
+    TemplateFieldChanged(TemplateField, String),
+    TemplateOverwriteToggled(bool),
+    StartTemplateAuthoring,
+
+    // New Project wizard
+    OpenNewProject,
+    NewProjectFieldChanged(NewProjectField, String),
+    NewProjectBrowseParent,
+    NewProjectEditorChanged(String),
+    NewProjectArchitectureChanged(String),
+    NewProjectTemplateChanged(String),
+    NewProjectBuiltinToggled(bool),
+    NewProjectOpenToggled(bool),
+    NewProjectNext,
+    NewProjectBack,
+    StartNewProject,
+
+    // Processes
+    RefreshProcesses,
+    ProcessMetricsToggled(bool),
+    CopyText(String),
+    OpenFolder(String),
 }

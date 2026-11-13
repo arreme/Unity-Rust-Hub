@@ -10,6 +10,7 @@
 use unity_core::changelog::{
     parse_changelog, ChangelogProvider, ChangelogRequest, CliChangelogProvider,
 };
+use unity_core::models::TemplateFilter;
 use unity_core::UnityCli;
 
 #[test]
@@ -74,6 +75,29 @@ fn reads_real_cli_data() {
 
     let running = cli.editors_running().expect("unity editors running");
     println!("running editors: {}", running.count);
+
+    let templates = cli
+        .templates(&first_version, TemplateFilter::Core, false)
+        .expect("unity templates --brief");
+    println!("templates for {first_version}: {}", templates.len());
+    assert!(!templates.is_empty());
+    let first_template = templates
+        .iter()
+        .find(|template| template.name.contains("urp-blank"))
+        .or_else(|| templates.first())
+        .expect("a template");
+    let template_info = cli
+        .template_info(&first_version, &first_template.name)
+        .expect("unity templates info");
+    println!(
+        "template info: {} pipeline={:?} status={}",
+        template_info.name,
+        template_info.render_pipeline_label(),
+        template_info.status
+    );
+
+    let status = cli.status_instances().expect("unity status");
+    println!("status instances: {}", status.len());
 
     let auth = cli.auth_status().expect("unity auth status");
     println!(

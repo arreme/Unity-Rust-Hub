@@ -58,7 +58,7 @@ fixture when a new state needs review.
 
 ### Shell
 
-- Sidebar navigation (5 destinations), active state.
+- Sidebar navigation (7 destinations), active state.
 - Sidebar footer: CLI status (checking / connected with version / missing).
 - Page header: title, subtitle, and actions (Refresh on Overview, Editors,
   Projects).
@@ -98,6 +98,22 @@ fixture when a new state needs review.
 - Row actions: favorite star, Open, Change version, Remove (confirmation modal;
   files on disk are untouched).
 
+### Templates
+
+- Editor picker, All/Core/Custom filters, installed-only toggle.
+- Loading, empty filter, error-with-retry, no-Editor, and CLI-missing states.
+- Row: display name, package id, render pipeline, version, status.
+- Detail: description, versions, installed state, packages.
+
+### Processes
+
+- Merged read-only list: project name/path, Editor version, PID, port, state,
+  phase, Play mode, frame count, Safe Mode, and blocking dialog.
+- No Editor running, Pipeline missing, unreachable instance, Safe Mode, and
+  blocking-dialog states.
+- Optional CPU/memory/uptime columns; the first CPU sample is unknown.
+- Copy PID/port/path and Open folder actions.
+
 ### Changelog
 
 - Not loaded, loading, error, no data.
@@ -124,6 +140,11 @@ fixture when a new state needs review.
 - Project upgrade: current version/path, target picker, no target installed
   warning, confirmation, disabled/enabled upgrade.
 - Remove project: path, "files on disk are not deleted" warning, cancel/remove.
+- New project wizard: details, Editor/architecture (including no-Editor state),
+  template (with built-ins hidden by default), review with command preview,
+  license preflight, and partial-success result.
+- Template authoring: create and pack forms, validation issues, overwrite
+  confirmation, command preview, job card, and result path.
 
 ## Platform constraints to design around
 

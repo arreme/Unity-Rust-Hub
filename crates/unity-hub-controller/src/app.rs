@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -8,23 +8,34 @@ use serde_json::Value;
 use unity_core::bootstrap;
 use unity_core::changelog::{ChangelogRequest, ChangelogView, CliChangelogProvider};
 use unity_core::models::{
-    AuthStatus, CliStatus, CliUpdateInfo, Editor, InstallPreview, LicenseStatus, Module, Project,
-    Release, RunningEditor, RunningEditors,
+    AuthStatus, CliStatus, CliUpdateInfo, CreateProjectOptions, CreateProjectResult, Editor,
+    InstallPreview, LicenseStatus, Module, Project, Release, RunningEditor, RunningEditors,
+    TemplateBrief, TemplateCreateOptions, TemplateFilter, TemplateInfo, TemplatePackOptions,
+};
+use unity_core::versions::{
+    validate_archive_path, validate_output_dir, validate_package_id, validate_project_name,
+    validate_project_path, validate_template_version,
 };
 use unity_core::{CommandSpec, UnityCli, UnityError};
 use unity_hub_model::{
     AccountCardVm, AuthVm, BadgeVm, BreakingChangeVm, ChangelogDataVm, ChangelogSectionVm,
     ChangelogVm, CliCardVm, CliConnectionVm, CliDetailsVm, EditorModulesVm, EditorRowVm, EditorsVm,
     InstallCliVm, InstallEditorVm, InstallPreviewVm, JobPhase, JobVm, LicenseRowVm, LicenseVm,
-    LoadState, ModalVm, ModuleOptionVm, NoticeVm, OverviewVm, Page, PageVm, ProjectRowVm,
-    ProjectsVm, ReleaseRowVm, RemoveProjectVm, RunningEditorVm, SectionKind, SettingsVm, ShellVm,
+    LoadState, ModalVm, ModuleOptionVm, NewProjectEditorVm, NewProjectField, NewProjectFormVm,
+    NewProjectPreflightState, NewProjectPreflightVm, NewProjectResultVm, NewProjectStep,
+    NewProjectVm, NoticeVm, OverviewVm, Page, PageVm, ProcessMetricsVm, ProcessRowVm, ProcessesVm,
+    ProjectRowVm, ProjectsVm, ReleaseRowVm, RemoveProjectVm, RunningEditorVm, SectionKind,
+    SettingsVm, ShellVm, TemplateAuthoringMode, TemplateAuthoringVm, TemplateDetailVm,
+    TemplateField, TemplateFormVm, TemplateKindFilter, TemplateRowVm, TemplatesVm,
     TextScaleOptionVm, Tone, UiAction, UiError, UpdateVm, UpgradeProjectVm, ViewModel,
 };
 
 use crate::jobs::{JobManager, JobStarted, JobState, StreamKind};
+use crate::metrics::{ProcessMetrics, Sampler};
 use crate::settings::{self, AppSettings, TextSize};
 use crate::util::{
-    error_text, format_bytes, format_epoch_millis, format_iso, run_blocking, short_path,
+    error_text, format_bytes, format_duration, format_epoch_millis, format_iso, open_folder,
+    run_blocking, short_path,
 };
 
 #[derive(Debug, Clone)]
@@ -34,6 +45,170 @@ pub enum Modal {
     EditorModules(Editor),
     UpgradeProject(Project),
     RemoveProject(Project),
+    NewProject(Box<NewProjectState>),
+    TemplateAuthoring(Box<TemplateAuthoringState>),
+}
+
+#[derive(Debug, Clone)]
+pub struct NewProjectState {
+    pub step: NewProjectStep,
+    pub form: NewProjectFormVm,
+    pub editors: Loadable<Vec<Editor>>,
+    pub templates: Loadable<Vec<TemplateBrief>>,
+    pub selected_template: Option<TemplateInfo>,
+    pub license: Loadable<LicenseStatus>,
+    pub issues: Vec<String>,
+    pub result: Option<CreateProjectResult>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct TemplateForm {
+    pub name: String,
+    pub display_name: String,
+    pub description: String,
+    pub version: String,
+    pub output: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct TemplateAuthoringState {
+    pub mode: TemplateAuthoringMode,
+    pub source: String,
+    pub form: TemplateForm,
+    pub overwrite_confirmed: bool,
+    pub issues: Vec<String>,
+    pub result: Option<String>,
+}
+
+impl NewProjectState {
+    fn new() -> Self {
+        Self {
+            step: NewProjectStep::Details,
+            form: NewProjectFormVm::default(),
+            editors: Loadable::default(),
+            templates: Loadable::default(),
+            selected_template: None,
+            license: Loadable::default(),
+            issues: Vec::new(),
+            result: None,
+        }
+    }
+
+    /// Inline validation for the current step. Nothing mutates before the final
+    /// confirm, so every rule here is checkable without the CLI.
+    fn validation_issues(&self) -> Vec<String> {
+        let mut issues = Vec::new();
+        let check_details = matches!(self.step, NewProjectStep::Details | NewProjectStep::Review);
+        let check_editor = matches!(self.step, NewProjectStep::Editor | NewProjectStep::Review);
+        let check_template = matches!(self.step, NewProjectStep::Template | NewProjectStep::Review);
+
+        if check_details {
+            let name_ok = validate_project_name(&self.form.name).is_ok();
+            if let Err(error) = validate_project_name(&self.form.name) {
+                issues.push(error.message);
+            }
+            let parent = self.form.parent_dir.trim();
+            if parent.is_empty() {
+                issues.push("Choose the folder that will contain the project.".to_string());
+            } else {
+                let parent = std::path::Path::new(parent);
+                if !parent.exists() {
+                    issues.push(format!(
+                        "The parent folder does not exist: {}",
+                        parent.display()
+                    ));
+                } else if !parent.is_dir() {
+                    issues.push(format!(
+                        "The parent path is not a folder: {}",
+                        parent.display()
+                    ));
+                } else if name_ok {
+                    let target = parent.join(self.form.name.trim());
+                    if target.exists() {
+                        if target.is_file() {
+                            issues.push(format!(
+                                "A file already exists at the target path: {}",
+                                target.display()
+                            ));
+                        } else if folder_is_not_empty(&target) {
+                            issues.push(format!(
+                                "The target folder already exists and is not empty: {}",
+                                target.display()
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
+        if check_editor {
+            if self.form.editor_version.trim().is_empty() {
+                issues.push("Choose an installed Unity Editor version.".to_string());
+            }
+            if !matches!(self.form.architecture.trim(), "x86_64" | "arm64") {
+                issues.push("Choose the x86_64 or arm64 Editor architecture.".to_string());
+            }
+        }
+
+        if check_template && self.form.template.trim().is_empty() {
+            issues.push("Choose a project template.".to_string());
+        }
+
+        issues
+    }
+}
+
+impl TemplateAuthoringState {
+    fn new(mode: TemplateAuthoringMode) -> Self {
+        Self {
+            mode,
+            source: String::new(),
+            form: TemplateForm::default(),
+            overwrite_confirmed: false,
+            issues: Vec::new(),
+            result: None,
+        }
+    }
+
+    fn create_options(&self) -> TemplateCreateOptions {
+        TemplateCreateOptions {
+            project_path: self.source.clone(),
+            name: self.form.name.trim().to_string(),
+            display_name: self.form.display_name.trim().to_string(),
+            description: self.form.description.trim().to_string(),
+            version: self.form.version.trim().to_string(),
+            output_dir: self.form.output.trim().to_string(),
+            overwrite: self.overwrite_confirmed,
+        }
+    }
+
+    fn pack_options(&self) -> TemplatePackOptions {
+        TemplatePackOptions {
+            project_path: self.source.clone(),
+            output: self.form.output.trim().to_string(),
+            name: self.form.name.trim().to_string(),
+            display_name: self.form.display_name.trim().to_string(),
+            description: self.form.description.trim().to_string(),
+            version: self.form.version.trim().to_string(),
+            overwrite: self.overwrite_confirmed,
+        }
+    }
+}
+
+fn folder_is_not_empty(path: &std::path::Path) -> bool {
+    std::fs::read_dir(path)
+        .map(|mut entries| entries.next().is_some())
+        .unwrap_or(true)
+}
+
+fn path_is_inside(path: &std::path::Path, parent: &std::path::Path) -> bool {
+    let absolute = |value: &std::path::Path| {
+        value
+            .canonicalize()
+            .or_else(|_| std::path::absolute(value))
+            .unwrap_or_else(|_| value.to_path_buf())
+    };
+    absolute(path).starts_with(absolute(parent))
 }
 
 #[derive(Debug, Clone)]
@@ -204,6 +379,9 @@ pub struct ActiveJob {
     /// view can hand iced a stable string.
     pub log_text: Arc<str>,
     pub error: Option<UnityError>,
+    /// The last NDJSON result frame. Streaming writes read created paths and
+    /// `steps[]` from it after the job ends.
+    pub result: Option<Value>,
 }
 
 impl ActiveJob {
@@ -218,6 +396,7 @@ impl ActiveJob {
             logs: VecDeque::new(),
             log_text: Arc::from(""),
             error: None,
+            result: None,
         }
     }
 
@@ -264,6 +443,16 @@ pub struct App {
     pub editors: Loadable<Vec<Editor>>,
     pub releases: Loadable<Vec<Release>>,
     pub projects: Loadable<Vec<Project>>,
+    pub templates: Loadable<Vec<TemplateBrief>>,
+    pub template_detail: Loadable<TemplateInfo>,
+    pub template_editor: Option<String>,
+    pub template_filter: TemplateKindFilter,
+    pub template_installed_only: bool,
+    pub template_selected: Option<String>,
+    pub processes: Loadable<RunningEditors>,
+    pub process_sampler: Sampler,
+    pub process_metrics: HashMap<u32, ProcessMetrics>,
+    pub process_last_refreshed: Option<String>,
     pub changelog: Loadable<ChangelogView>,
     pub changelog_loaded: bool,
     pub changelog_target: Option<String>,
@@ -342,6 +531,37 @@ pub enum Message {
     SaveCliPath,
     ClearCliPath,
 
+    // Templates
+    TemplatesEditorChanged(String),
+    TemplateFilterChanged(TemplateKindFilter),
+    TemplateInstalledOnlyToggled(bool),
+    OpenTemplateDetail(String),
+    OpenTemplateAuthoring(TemplateAuthoringMode),
+    TemplateAuthoringProjectChanged(String),
+    TemplateFieldChanged(TemplateField, String),
+    TemplateOverwriteToggled(bool),
+    StartTemplateAuthoring,
+
+    // New Project
+    OpenNewProject,
+    NewProjectFieldChanged(NewProjectField, String),
+    NewProjectBrowseParent,
+    NewProjectFolderPicked(Option<PathBuf>),
+    NewProjectEditorChanged(String),
+    NewProjectArchitectureChanged(String),
+    NewProjectTemplateChanged(String),
+    NewProjectBuiltinToggled(bool),
+    NewProjectOpenToggled(bool),
+    NewProjectNext,
+    NewProjectBack,
+    StartNewProject,
+
+    // Processes
+    RefreshProcesses,
+    ProcessMetricsToggled(bool),
+    CopyText(String),
+    OpenFolder(String),
+
     // Async results and job lifecycle stay controller-private.
     StatusLoaded(Result<CliStatus, UnityError>),
     UpdateLoaded(Result<CliUpdateInfo, UnityError>),
@@ -351,6 +571,14 @@ pub enum Message {
     EditorsLoaded(Result<Vec<Editor>, UnityError>),
     ReleasesLoaded(Result<Vec<Release>, UnityError>),
     ProjectsLoaded(Result<Vec<Project>, UnityError>),
+    TemplatesLoaded(Result<Vec<TemplateBrief>, UnityError>),
+    TemplateInfoLoaded(Result<TemplateInfo, UnityError>),
+    ProcessesLoaded(Result<RunningEditors, UnityError>),
+    NewProjectLicenseLoaded(Result<LicenseStatus, UnityError>),
+    NewProjectEditorsLoaded(Result<Vec<Editor>, UnityError>),
+    NewProjectTemplatesLoaded(Result<Vec<TemplateBrief>, UnityError>),
+    NewProjectTemplateInfoLoaded(Result<TemplateInfo, UnityError>),
+    ProcessTick,
     ModulesLoaded(Result<Vec<Module>, UnityError>),
     DialogModulesLoaded(Result<Vec<Module>, UnityError>),
     PreviewLoaded(Result<Value, UnityError>),
@@ -413,6 +641,40 @@ impl From<UiAction> for Message {
             UiAction::CliPathChanged(value) => Self::CliPathChanged(value),
             UiAction::SaveCliPath => Self::SaveCliPath,
             UiAction::ClearCliPath => Self::ClearCliPath,
+            UiAction::TemplatesEditorChanged(version) => Self::TemplatesEditorChanged(version),
+            UiAction::TemplateFilterChanged(filter) => Self::TemplateFilterChanged(filter),
+            UiAction::TemplateInstalledOnlyToggled(value) => {
+                Self::TemplateInstalledOnlyToggled(value)
+            }
+            UiAction::OpenTemplateDetail(name) => Self::OpenTemplateDetail(name),
+            UiAction::OpenTemplateAuthoring(mode) => Self::OpenTemplateAuthoring(mode),
+            UiAction::TemplateAuthoringProjectChanged(path) => {
+                Self::TemplateAuthoringProjectChanged(path)
+            }
+            UiAction::TemplateFieldChanged(field, value) => {
+                Self::TemplateFieldChanged(field, value)
+            }
+            UiAction::TemplateOverwriteToggled(value) => Self::TemplateOverwriteToggled(value),
+            UiAction::StartTemplateAuthoring => Self::StartTemplateAuthoring,
+            UiAction::OpenNewProject => Self::OpenNewProject,
+            UiAction::NewProjectFieldChanged(field, value) => {
+                Self::NewProjectFieldChanged(field, value)
+            }
+            UiAction::NewProjectBrowseParent => Self::NewProjectBrowseParent,
+            UiAction::NewProjectEditorChanged(version) => Self::NewProjectEditorChanged(version),
+            UiAction::NewProjectArchitectureChanged(arch) => {
+                Self::NewProjectArchitectureChanged(arch)
+            }
+            UiAction::NewProjectTemplateChanged(name) => Self::NewProjectTemplateChanged(name),
+            UiAction::NewProjectBuiltinToggled(value) => Self::NewProjectBuiltinToggled(value),
+            UiAction::NewProjectOpenToggled(value) => Self::NewProjectOpenToggled(value),
+            UiAction::NewProjectNext => Self::NewProjectNext,
+            UiAction::NewProjectBack => Self::NewProjectBack,
+            UiAction::StartNewProject => Self::StartNewProject,
+            UiAction::RefreshProcesses => Self::RefreshProcesses,
+            UiAction::ProcessMetricsToggled(value) => Self::ProcessMetricsToggled(value),
+            UiAction::CopyText(text) => Self::CopyText(text),
+            UiAction::OpenFolder(path) => Self::OpenFolder(path),
         }
     }
 }
@@ -440,6 +702,16 @@ impl App {
             editors: Loadable::default(),
             releases: Loadable::default(),
             projects: Loadable::default(),
+            templates: Loadable::default(),
+            template_detail: Loadable::default(),
+            template_editor: None,
+            template_filter: TemplateKindFilter::All,
+            template_installed_only: false,
+            template_selected: None,
+            processes: Loadable::default(),
+            process_sampler: Sampler::new(),
+            process_metrics: HashMap::new(),
+            process_last_refreshed: None,
             changelog: Loadable::default(),
             changelog_loaded: false,
             changelog_target: None,
@@ -484,43 +756,60 @@ impl App {
     }
 
     pub fn subscription(&self) -> Subscription<Message> {
-        // Only wake the update loop while a job is streaming. An always-on
-        // timer keeps the app awake for no reason and prevents the process from
+        // Job events only matter while a job is streaming. An always-on timer
+        // keeps the app awake for no reason and prevents the process from
         // idling when nothing is running.
-        if !self
+        let job = if self
             .active_job
             .as_ref()
             .map(ActiveJob::is_running)
             .unwrap_or(false)
         {
-            return Subscription::none();
-        }
+            Subscription::run_with(self.jobs.clone(), |jobs| {
+                let (notifier, wakeups) = std::sync::mpsc::sync_channel(1);
+                jobs.set_notifier(notifier);
 
-        // iced 0.14 no longer exposes `time::every`. JobManager wakes this
-        // subscription only when it actually has an event, and the notifier
-        // coalesces bursts into at most one UI poll every 100 ms.
-        Subscription::run_with(self.jobs.clone(), |jobs| {
-            let (notifier, wakeups) = std::sync::mpsc::sync_channel(1);
-            jobs.set_notifier(notifier);
-
-            let (sender, receiver) = futures::channel::mpsc::unbounded();
-            std::thread::spawn(move || {
-                // Drain anything that arrived before this subscription existed.
-                if sender.unbounded_send(Message::PollJobs).is_err() {
-                    return;
-                }
-
-                while wakeups.recv().is_ok() {
-                    std::thread::sleep(Duration::from_millis(100));
-                    while wakeups.try_recv().is_ok() {}
-
+                let (sender, receiver) = futures::channel::mpsc::unbounded();
+                std::thread::spawn(move || {
+                    // Drain anything that arrived before this subscription existed.
                     if sender.unbounded_send(Message::PollJobs).is_err() {
+                        return;
+                    }
+
+                    while wakeups.recv().is_ok() {
+                        std::thread::sleep(Duration::from_millis(100));
+                        while wakeups.try_recv().is_ok() {}
+
+                        if sender.unbounded_send(Message::PollJobs).is_err() {
+                            break;
+                        }
+                    }
+                });
+                receiver
+            })
+        } else {
+            Subscription::none()
+        };
+
+        // The Processes page refreshes only while it is visible. Dropping the
+        // subscription when the page changes closes the receiver, and the
+        // producer thread exits on its next failed send.
+        let processes = if self.page == Page::Processes {
+            Subscription::run_with(Page::Processes, |_| {
+                let (sender, receiver) = futures::channel::mpsc::unbounded();
+                std::thread::spawn(move || loop {
+                    std::thread::sleep(Duration::from_secs(5));
+                    if sender.unbounded_send(Message::ProcessTick).is_err() {
                         break;
                     }
-                }
-            });
-            receiver
-        })
+                });
+                receiver
+            })
+        } else {
+            Subscription::none()
+        };
+
+        Subscription::batch([job, processes])
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
@@ -615,14 +904,21 @@ impl App {
                 Task::none()
             }
             Message::EditorsLoaded(result) => {
+                let mut task = Task::none();
                 match result {
                     Ok(editors) => {
                         self.editors.succeeded(editors);
                         self.ensure_upgrade_target();
+                        if self.page == Page::Templates
+                            && self.template_editor.is_none()
+                            && self.templates.data.is_none()
+                        {
+                            task = self.load_templates(false);
+                        }
                     }
                     Err(error) => self.editors.failed(error),
                 }
-                Task::none()
+                task
             }
             Message::ReleasesLoaded(result) => {
                 match result {
@@ -636,6 +932,18 @@ impl App {
                     Ok(projects) => {
                         self.project_search_index = project_search_keys(&projects);
                         self.projects.succeeded(projects);
+                        if let Modal::TemplateAuthoring(state) = &mut self.modal {
+                            if state.source.trim().is_empty() {
+                                if let Some(project) = self
+                                    .projects
+                                    .data
+                                    .as_ref()
+                                    .and_then(|projects| projects.first())
+                                {
+                                    state.source = project.path.clone();
+                                }
+                            }
+                        }
                     }
                     Err(error) => self.projects.failed(error),
                 }
@@ -1037,15 +1345,13 @@ impl App {
                 }
             },
             Message::OpenProject(path) => {
-                let Some(project) = self
+                let title = self
                     .projects
                     .data
                     .as_ref()
                     .and_then(|projects| projects.iter().find(|project| project.path == path))
-                else {
-                    return Task::none();
-                };
-                let title = project.title.clone();
+                    .map(|project| project.title.clone())
+                    .unwrap_or_else(|| project_name_from_path(&path));
                 self.notice = Some(Notice::info(format!("Opening {title}…")));
                 let ensure_broker = needs_auth_broker();
                 Task::perform(
@@ -1184,6 +1490,7 @@ impl App {
                     },
                     text_scale_percent: self.app_settings.text_scale_percent,
                     font_family: self.app_settings.font_family.clone(),
+                    process_metrics: self.app_settings.process_metrics,
                 };
                 if !value.is_empty() {
                     let path = PathBuf::from(&value);
@@ -1224,7 +1531,607 @@ impl App {
                     }
                 }
             }
+
+            // -----------------------------------------------------------------
+            // Templates
+            Message::TemplatesEditorChanged(version) => {
+                self.template_editor = Some(version);
+                self.template_selected = None;
+                self.template_detail = Loadable::default();
+                self.load_templates(true)
+            }
+            Message::TemplateFilterChanged(filter) => {
+                self.template_filter = filter;
+                self.load_templates(true)
+            }
+            Message::TemplateInstalledOnlyToggled(value) => {
+                self.template_installed_only = value;
+                self.load_templates(true)
+            }
+            Message::OpenTemplateDetail(name) => {
+                let Some(editor) = self.template_editor.clone() else {
+                    return Task::none();
+                };
+                self.template_selected = Some(name.clone());
+                self.template_detail.begin();
+                Task::perform(
+                    run_blocking({
+                        let cli = self.cli.clone();
+                        move || cli.template_info(&editor, &name)
+                    }),
+                    Message::TemplateInfoLoaded,
+                )
+            }
+            Message::TemplateInfoLoaded(result) => {
+                match result {
+                    Ok(info) => self.template_detail.succeeded(info),
+                    Err(error) => self.template_detail.failed(error),
+                }
+                Task::none()
+            }
+            Message::TemplatesLoaded(result) => {
+                match result {
+                    Ok(templates) => self.templates.succeeded(templates),
+                    Err(error) => self.templates.failed(error),
+                }
+                Task::none()
+            }
+            Message::OpenTemplateAuthoring(mode) => {
+                let mut state = TemplateAuthoringState::new(mode);
+                state.source = self
+                    .projects
+                    .data
+                    .as_ref()
+                    .and_then(|projects| projects.first())
+                    .map(|project| project.path.clone())
+                    .unwrap_or_default();
+                self.modal = Modal::TemplateAuthoring(Box::new(state));
+                self.refresh_authoring_issues();
+                if self.projects.data.is_none() && !self.projects.loading {
+                    self.projects.begin();
+                    load_projects(self.cli.clone())
+                } else {
+                    Task::none()
+                }
+            }
+            Message::TemplateAuthoringProjectChanged(path) => {
+                if let Modal::TemplateAuthoring(state) = &mut self.modal {
+                    state.source = path;
+                    state.result = None;
+                }
+                self.refresh_authoring_issues();
+                Task::none()
+            }
+            Message::TemplateFieldChanged(field, value) => {
+                if let Modal::TemplateAuthoring(state) = &mut self.modal {
+                    match field {
+                        TemplateField::Name => state.form.name = value,
+                        TemplateField::DisplayName => state.form.display_name = value,
+                        TemplateField::Description => state.form.description = value,
+                        TemplateField::Version => state.form.version = value,
+                        TemplateField::Output => state.form.output = value,
+                    }
+                    state.overwrite_confirmed = false;
+                    state.result = None;
+                }
+                self.refresh_authoring_issues();
+                Task::none()
+            }
+            Message::TemplateOverwriteToggled(value) => {
+                if let Modal::TemplateAuthoring(state) = &mut self.modal {
+                    state.overwrite_confirmed = value;
+                }
+                self.refresh_authoring_issues();
+                Task::none()
+            }
+            Message::StartTemplateAuthoring => {
+                let Modal::TemplateAuthoring(state) = &self.modal else {
+                    return Task::none();
+                };
+                if !state.issues.is_empty() {
+                    return Task::none();
+                }
+                let mode = state.mode;
+                let options = state.create_options();
+                let pack_options = state.pack_options();
+                let (kind, spec) = if mode.is_pack() {
+                    ("template-pack", self.cli.templates_pack_spec(&pack_options))
+                } else {
+                    ("template-create", self.cli.templates_create_spec(&options))
+                };
+                match spec {
+                    Ok(spec) => {
+                        if mode.is_pack() {
+                            if let Some(parent) =
+                                std::path::Path::new(&pack_options.output).parent()
+                            {
+                                if !parent.as_os_str().is_empty() {
+                                    if let Err(error) = std::fs::create_dir_all(parent) {
+                                        if let Modal::TemplateAuthoring(state) = &mut self.modal {
+                                            state.issues.push(format!(
+                                                "Could not create the archive folder: {error}"
+                                            ));
+                                        }
+                                        return Task::none();
+                                    }
+                                }
+                            }
+                        }
+                        if self.start_job(kind, spec) {
+                            if let Modal::TemplateAuthoring(state) = &mut self.modal {
+                                state.result = None;
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        if let Modal::TemplateAuthoring(state) = &mut self.modal {
+                            state
+                                .issues
+                                .push(format!("{}: {}", error.code, error.message));
+                        }
+                    }
+                }
+                Task::none()
+            }
+
+            // -----------------------------------------------------------------
+            // New Project wizard
+            Message::OpenNewProject => {
+                let mut state = NewProjectState::new();
+                state.form.parent_dir = dirs::home_dir()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_default();
+                self.modal = Modal::NewProject(Box::new(state));
+                self.notice = None;
+                Task::batch([
+                    load_new_project_editors(self.cli.clone()),
+                    load_new_project_license(self.cli.clone()),
+                ])
+            }
+            Message::NewProjectLicenseLoaded(result) => {
+                if let Modal::NewProject(state) = &mut self.modal {
+                    match result {
+                        Ok(license) => state.license.succeeded(license),
+                        Err(error) => state.license.failed(error),
+                    }
+                }
+                Task::none()
+            }
+            Message::NewProjectEditorsLoaded(result) => {
+                if let Modal::NewProject(state) = &mut self.modal {
+                    match result {
+                        Ok(editors) => {
+                            state.editors.succeeded(editors);
+                            if state.form.editor_version.is_empty() {
+                                if let Some(editor) = state
+                                    .editors
+                                    .data
+                                    .as_ref()
+                                    .and_then(|editors| default_editor(editors))
+                                {
+                                    state.form.editor_version = editor.version.clone();
+                                    state.form.architecture = editor.architecture.clone();
+                                }
+                            }
+                        }
+                        Err(error) => state.editors.failed(error),
+                    }
+                }
+                Task::none()
+            }
+            Message::NewProjectTemplatesLoaded(result) => {
+                if let Modal::NewProject(state) = &mut self.modal {
+                    match result {
+                        Ok(templates) => state.templates.succeeded(templates),
+                        Err(error) => state.templates.failed(error),
+                    }
+                }
+                Task::none()
+            }
+            Message::NewProjectTemplateInfoLoaded(result) => {
+                if let Modal::NewProject(state) = &mut self.modal {
+                    match result {
+                        Ok(info) => state.selected_template = Some(info),
+                        Err(error) => {
+                            state.selected_template = None;
+                            let mut text = error_text(&error);
+                            if let Some(offered) = template_offers(&error) {
+                                text.push_str(&format!(
+                                    "\n\nTemplates offered by the CLI: {}",
+                                    offered.join(", ")
+                                ));
+                            }
+                            state.issues.push(text);
+                        }
+                    }
+                }
+                Task::none()
+            }
+            Message::NewProjectFieldChanged(field, value) => {
+                if let Modal::NewProject(state) = &mut self.modal {
+                    match field {
+                        NewProjectField::Name => state.form.name = value,
+                        NewProjectField::ParentDir => state.form.parent_dir = value,
+                    }
+                    state.issues.clear();
+                    state.result = None;
+                }
+                Task::none()
+            }
+            Message::NewProjectBrowseParent => {
+                Task::perform(pick_project_folder(), Message::NewProjectFolderPicked)
+            }
+            Message::NewProjectFolderPicked(Some(path)) => {
+                if let Modal::NewProject(state) = &mut self.modal {
+                    state.form.parent_dir = path.display().to_string();
+                    state.issues.clear();
+                }
+                Task::none()
+            }
+            Message::NewProjectFolderPicked(None) => Task::none(),
+            Message::NewProjectEditorChanged(version) => {
+                let mut templates_task = Task::none();
+                if let Modal::NewProject(state) = &mut self.modal {
+                    state.form.editor_version = version.clone();
+                    state.form.template.clear();
+                    state.selected_template = None;
+                    state.issues.clear();
+                    if let Some(editor) =
+                        state.editors.data.as_ref().and_then(|editors| {
+                            editors.iter().find(|editor| editor.version == version)
+                        })
+                    {
+                        state.form.architecture = editor.architecture.clone();
+                    }
+                }
+                if let Some(state) = self.new_project_state() {
+                    let editor = state.form.editor_version.clone();
+                    let filter = TemplateFilter::Core;
+                    let installed = false;
+                    if let Modal::NewProject(state) = &mut self.modal {
+                        state.templates.begin();
+                    }
+                    templates_task = Task::perform(
+                        run_blocking({
+                            let cli = self.cli.clone();
+                            move || cli.templates(&editor, filter, installed)
+                        }),
+                        Message::NewProjectTemplatesLoaded,
+                    );
+                }
+                templates_task
+            }
+            Message::NewProjectArchitectureChanged(architecture) => {
+                if let Modal::NewProject(state) = &mut self.modal {
+                    state.form.architecture = architecture;
+                    state.issues.clear();
+                }
+                Task::none()
+            }
+            Message::NewProjectTemplateChanged(name) => {
+                let editor = self
+                    .new_project_state()
+                    .map(|state| state.form.editor_version.clone())
+                    .unwrap_or_default();
+                if let Modal::NewProject(state) = &mut self.modal {
+                    state.form.template = name.clone();
+                    state.selected_template = None;
+                    state.issues.clear();
+                }
+                if editor.is_empty() || name.is_empty() {
+                    return Task::none();
+                }
+                Task::perform(
+                    run_blocking({
+                        let cli = self.cli.clone();
+                        move || cli.template_info(&editor, &name)
+                    }),
+                    Message::NewProjectTemplateInfoLoaded,
+                )
+            }
+            Message::NewProjectBuiltinToggled(value) => {
+                if let Modal::NewProject(state) = &mut self.modal {
+                    state.form.show_builtin_templates = value;
+                }
+                Task::none()
+            }
+            Message::NewProjectOpenToggled(value) => {
+                if let Modal::NewProject(state) = &mut self.modal {
+                    state.form.open_after_create = value;
+                }
+                Task::none()
+            }
+            Message::NewProjectBack => {
+                if let Modal::NewProject(state) = &mut self.modal {
+                    state.step = match state.step {
+                        NewProjectStep::Editor => NewProjectStep::Details,
+                        NewProjectStep::Template => NewProjectStep::Editor,
+                        NewProjectStep::Review => NewProjectStep::Template,
+                        NewProjectStep::Result | NewProjectStep::Details => NewProjectStep::Details,
+                    };
+                    state.issues.clear();
+                }
+                Task::none()
+            }
+            Message::NewProjectNext => {
+                let Some(state) = self.new_project_state() else {
+                    return Task::none();
+                };
+                let issues = state.validation_issues();
+                let mut task = Task::none();
+                if !issues.is_empty() {
+                    if let Modal::NewProject(state) = &mut self.modal {
+                        state.issues = issues;
+                    }
+                    return Task::none();
+                }
+
+                match state.step {
+                    NewProjectStep::Details => {
+                        if let Modal::NewProject(state) = &mut self.modal {
+                            state.step = NewProjectStep::Editor;
+                            state.issues.clear();
+                        }
+                    }
+                    NewProjectStep::Editor => {
+                        let editor = state.form.editor_version.clone();
+                        if let Modal::NewProject(state) = &mut self.modal {
+                            state.step = NewProjectStep::Template;
+                            state.templates.begin();
+                            state.issues.clear();
+                        }
+                        task = Task::perform(
+                            run_blocking({
+                                let cli = self.cli.clone();
+                                move || cli.templates(&editor, TemplateFilter::Core, false)
+                            }),
+                            Message::NewProjectTemplatesLoaded,
+                        );
+                    }
+                    NewProjectStep::Template | NewProjectStep::Result => {
+                        if let Modal::NewProject(state) = &mut self.modal {
+                            state.step = NewProjectStep::Review;
+                            state.issues.clear();
+                        }
+                    }
+                    NewProjectStep::Review => {}
+                }
+                task
+            }
+            Message::StartNewProject => {
+                let Some(state) = self.new_project_state() else {
+                    return Task::none();
+                };
+                let mut issues = state.validation_issues();
+                match state.license.data.as_ref() {
+                    Some(license) if !license.active => issues.push(
+                        "Unity reports no usable license. Sign in and activate a license before creating a project."
+                            .to_string(),
+                    ),
+                    Some(_) => {}
+                    None => issues.push(
+                        "License status is still loading. Wait a moment and try again."
+                            .to_string(),
+                    ),
+                }
+                if !issues.is_empty() {
+                    if let Modal::NewProject(state) = &mut self.modal {
+                        state.issues = issues;
+                    }
+                    return Task::none();
+                }
+
+                let options = CreateProjectOptions {
+                    name: state.form.name.trim().to_string(),
+                    output_dir: state.form.parent_dir.trim().to_string(),
+                    editor_version: state.form.editor_version.trim().to_string(),
+                    template: state.form.template.trim().to_string(),
+                    architecture: state.form.architecture.trim().to_string(),
+                    open: state.form.open_after_create,
+                    bare: false,
+                };
+                match self.cli.create_project_spec(&options) {
+                    Ok(spec) => {
+                        if self.start_job("project-create", spec) {
+                            if let Modal::NewProject(state) = &mut self.modal {
+                                state.step = NewProjectStep::Result;
+                                state.result = None;
+                                state.issues.clear();
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        if let Modal::NewProject(state) = &mut self.modal {
+                            state.issues.push(error_text(&error));
+                        }
+                    }
+                }
+                Task::none()
+            }
+
+            // -----------------------------------------------------------------
+            // Processes
+            Message::RefreshProcesses => self.load_processes(true),
+            Message::ProcessTick => {
+                if self.page == Page::Processes {
+                    self.load_processes(false)
+                } else {
+                    Task::none()
+                }
+            }
+            Message::ProcessesLoaded(result) => {
+                match result {
+                    Ok(running) => self.processes.succeeded(running),
+                    Err(error) => self.processes.failed(error),
+                }
+                self.sample_processes();
+                self.process_last_refreshed =
+                    Some(chrono::Local::now().format("%H:%M:%S").to_string());
+                Task::none()
+            }
+            Message::ProcessMetricsToggled(value) => {
+                self.app_settings.process_metrics = value;
+                if !value {
+                    self.process_metrics.clear();
+                    self.process_sampler.reset();
+                } else {
+                    self.sample_processes();
+                }
+                if let Err(error) = settings::save(&self.app_settings) {
+                    self.notice = Some(Notice::error(error_text(&error)));
+                }
+                Task::none()
+            }
+            Message::CopyText(text) => {
+                self.notice = Some(Notice::success("Copied to the clipboard."));
+                iced::clipboard::write(text)
+            }
+            Message::OpenFolder(path) => {
+                if let Err(error) = open_folder(&path) {
+                    self.notice = Some(Notice::error(error_text(&error)));
+                }
+                Task::none()
+            }
         }
+    }
+
+    fn new_project_state(&self) -> Option<&NewProjectState> {
+        match &self.modal {
+            Modal::NewProject(state) => Some(state),
+            _ => None,
+        }
+    }
+
+    /// Recomputes the authoring form's issues without running the CLI.
+    fn refresh_authoring_issues(&mut self) {
+        let Modal::TemplateAuthoring(state) = &mut self.modal else {
+            return;
+        };
+        let mut issues = Vec::new();
+        if state.source.trim().is_empty() {
+            issues.push("Choose a registered Unity project.".to_string());
+        } else if validate_project_path(&state.source).is_err() {
+            issues.push(format!(
+                "The source project does not exist: {}",
+                state.source
+            ));
+        }
+
+        if state.mode.is_pack() {
+            match validate_archive_path(&state.form.output) {
+                Err(error) => issues.push(error.message),
+                Ok(output) => {
+                    if let Ok(project) = validate_project_path(&state.source) {
+                        if path_is_inside(&output, &project) {
+                            issues.push(
+                                "The archive destination cannot be inside the project being packed."
+                                    .to_string(),
+                            );
+                        }
+                    }
+                    if output.exists() && !state.overwrite_confirmed {
+                        issues.push(
+                            "The archive already exists. Confirm overwrite to replace it."
+                                .to_string(),
+                        );
+                    }
+                }
+            }
+        } else if let Err(error) = validate_output_dir(&state.form.output) {
+            issues.push(error.message);
+        }
+
+        if !state.form.name.trim().is_empty() {
+            if let Err(error) = validate_package_id(&state.form.name) {
+                issues.push(error.message);
+            }
+        } else {
+            issues.push("Enter a template package id.".to_string());
+        }
+        if state.form.display_name.trim().is_empty() {
+            issues.push("Enter a template display name.".to_string());
+        }
+        if !state.form.version.trim().is_empty() {
+            if let Err(error) = validate_template_version(&state.form.version) {
+                issues.push(error.message);
+            }
+        }
+
+        state.issues = issues;
+    }
+
+    /// Loads the template catalog for the selected Editor, starting with the
+    /// installed-Editor list when it is missing.
+    fn load_templates(&mut self, force: bool) -> Task<Message> {
+        let mut tasks = Vec::new();
+
+        if self.editors.data.is_none() && !self.editors.loading {
+            self.editors.begin();
+            tasks.push(load_editors(self.cli.clone()));
+        }
+
+        if let Some(editors) = &self.editors.data {
+            let selected = self
+                .template_editor
+                .clone()
+                .filter(|selected| editors.iter().any(|editor| &editor.version == selected))
+                .or_else(|| default_editor(editors).map(|editor| editor.version.clone()));
+            let changed = selected != self.template_editor;
+            self.template_editor = selected;
+            if changed {
+                self.template_selected = None;
+                self.template_detail = Loadable::default();
+            }
+        }
+
+        if let Some(editor) = self.template_editor.clone() {
+            if force || (self.templates.data.is_none() && !self.templates.loading) {
+                self.templates.begin();
+                let filter = template_filter(self.template_filter);
+                let installed = self.template_installed_only;
+                tasks.push(Task::perform(
+                    run_blocking({
+                        let cli = self.cli.clone();
+                        move || cli.templates(&editor, filter, installed)
+                    }),
+                    Message::TemplatesLoaded,
+                ));
+            }
+        }
+
+        Task::batch(tasks)
+    }
+
+    fn load_processes(&mut self, force: bool) -> Task<Message> {
+        if self.processes.loading {
+            return Task::none();
+        }
+        if force || self.processes.data.is_none() {
+            self.processes.begin();
+            return Task::perform(
+                run_blocking({
+                    let cli = self.cli.clone();
+                    move || cli.editors_running()
+                }),
+                Message::ProcessesLoaded,
+            );
+        }
+        Task::none()
+    }
+
+    fn sample_processes(&mut self) {
+        if !self.app_settings.process_metrics {
+            return;
+        }
+        let Some(running) = &self.processes.data else {
+            return;
+        };
+        let pids: Vec<u32> = running
+            .instances
+            .iter()
+            .filter_map(|editor| editor.pid)
+            .collect();
+        self.process_metrics = self.process_sampler.sample(&pids);
     }
 
     fn start_job(&mut self, kind: &str, spec: CommandSpec) -> bool {
@@ -1288,6 +2195,7 @@ impl App {
             if event.state != JobState::Running {
                 job.state = event.state;
                 job.error = event.error.clone();
+                job.result = event.result.clone();
                 if event.state == JobState::Succeeded {
                     job.progress = 100.0;
                 }
@@ -1305,7 +2213,8 @@ impl App {
             }
             JobState::Failed => {
                 let message = error
-                    .map(|error| error_text(&error))
+                    .as_ref()
+                    .map(error_text)
                     .unwrap_or_else(|| "The job failed.".to_string());
                 self.notice = Some(Notice::error(message));
             }
@@ -1333,6 +2242,49 @@ impl App {
                 Task::batch(tasks)
             }
             "project-upgrade" => self.load_projects_page(true),
+            "template-create" | "template-pack" => {
+                let result = self.active_job.as_ref().and_then(|job| job.result.clone());
+                let path = result.as_ref().and_then(result_path);
+                if let Modal::TemplateAuthoring(state) = &mut self.modal {
+                    state.result = Some(match path {
+                        Some(path) => path,
+                        None if state.mode.is_pack() => state.form.output.clone(),
+                        None => "Completed. The template archive was written.".to_string(),
+                    });
+                }
+                if kind == "template-create" {
+                    self.load_templates(true)
+                } else {
+                    Task::none()
+                }
+            }
+            "project-create" => {
+                let result = self.active_job.as_ref().and_then(|job| job.result.clone());
+                let created = result
+                    .as_ref()
+                    .and_then(result_payload::<CreateProjectResult>);
+                if let Modal::NewProject(state) = &mut self.modal {
+                    state.result = created.clone();
+                    state.step = NewProjectStep::Result;
+                    if let Some(error) = &error {
+                        if let Some(offered) = template_offers(error) {
+                            state.issues.push(format!(
+                                "Templates offered by the CLI: {}",
+                                offered.join(", ")
+                            ));
+                        }
+                    }
+                }
+                let failed = created
+                    .as_ref()
+                    .map(|created| created.failed_steps().len())
+                    .unwrap_or(0);
+                if failed == 0 {
+                    self.load_projects_page(true)
+                } else {
+                    Task::none()
+                }
+            }
             _ => Task::none(),
         }
     }
@@ -1440,6 +2392,8 @@ impl App {
             Page::Overview => self.load_overview_data(false),
             Page::Editors => self.load_editors_page(false),
             Page::Projects => self.load_projects_page(false),
+            Page::Templates => self.load_templates(false),
+            Page::Processes => self.load_processes(false),
             Page::Changelog => self.load_changelog_page(false),
             _ => Task::none(),
         }
@@ -1452,6 +2406,8 @@ impl App {
             }
             Page::Editors => self.load_editors_page(true),
             Page::Projects => self.load_projects_page(true),
+            Page::Templates => self.load_templates(true),
+            Page::Processes => self.load_processes(true),
             Page::Changelog => self.load_changelog_page(true),
             Page::Settings => self.refresh_status(),
         }
@@ -1466,6 +2422,8 @@ impl App {
                 Page::Overview => PageVm::Overview(self.overview_vm()),
                 Page::Editors => PageVm::Editors(self.editors_vm()),
                 Page::Projects => PageVm::Projects(self.projects_vm()),
+                Page::Templates => PageVm::Templates(self.templates_vm()),
+                Page::Processes => PageVm::Processes(self.processes_vm()),
                 Page::Changelog => PageVm::Changelog(self.changelog_vm()),
                 Page::Settings => PageVm::Settings(self.settings_vm()),
             },
@@ -1761,6 +2719,53 @@ impl App {
         }
     }
 
+    fn templates_vm(&self) -> TemplatesVm {
+        TemplatesVm {
+            editors: load_state(&self.editors, |editors| {
+                editors
+                    .iter()
+                    .map(|editor| editor.version.clone())
+                    .collect()
+            }),
+            selected_editor: self.template_editor.clone(),
+            filter: self.template_filter,
+            installed_only: self.template_installed_only,
+            list: load_state(&self.templates, |templates| {
+                templates.iter().map(template_row_vm).collect()
+            }),
+            detail: self.template_detail.data.as_ref().map(template_detail_vm),
+            detail_loading: self.template_detail.loading,
+            detail_error: self.template_detail.error.as_ref().map(ui_error),
+        }
+    }
+
+    fn processes_vm(&self) -> ProcessesVm {
+        let pipeline_available = self
+            .processes
+            .data
+            .as_ref()
+            .map(|running| {
+                running
+                    .instances
+                    .iter()
+                    .any(|editor| editor.phase.is_some() || editor.pipeline_version.is_some())
+            })
+            .unwrap_or(false);
+
+        ProcessesVm {
+            rows: load_state(&self.processes, |running| {
+                running
+                    .instances
+                    .iter()
+                    .map(|editor| process_row_vm(editor, &self.process_metrics))
+                    .collect()
+            }),
+            metrics_enabled: self.app_settings.process_metrics,
+            pipeline_available,
+            last_refreshed: self.process_last_refreshed.clone(),
+        }
+    }
+
     fn changelog_vm(&self) -> ChangelogVm {
         ChangelogVm {
             loaded: self.changelog_loaded,
@@ -1911,6 +2916,165 @@ impl App {
                 project_title: project.title.clone(),
                 project_path_short: short_path(&project.path, 60).into_owned(),
             })),
+            Modal::NewProject(state) => {
+                Some(ModalVm::NewProject(Box::new(self.new_project_vm(state))))
+            }
+            Modal::TemplateAuthoring(state) => Some(ModalVm::TemplateAuthoring(Box::new(
+                self.authoring_vm(state),
+            ))),
+        }
+    }
+
+    fn new_project_vm(&self, state: &NewProjectState) -> NewProjectVm {
+        let preflight = if state.license.loading && state.license.data.is_none() {
+            NewProjectPreflightVm {
+                state: NewProjectPreflightState::Checking,
+                license_ok: false,
+                message: Some("Checking the Unity license…".to_string()),
+                can_continue: false,
+            }
+        } else if let Some(license) = &state.license.data {
+            if license.active {
+                NewProjectPreflightVm {
+                    state: NewProjectPreflightState::Ready,
+                    license_ok: true,
+                    message: None,
+                    can_continue: true,
+                }
+            } else {
+                NewProjectPreflightVm {
+                    state: NewProjectPreflightState::Blocked,
+                    license_ok: false,
+                    message: Some(
+                        "Unity reports no active license. Sign in and activate a license before creating a project."
+                            .to_string(),
+                    ),
+                    can_continue: false,
+                }
+            }
+        } else if let Some(error) = &state.license.error {
+            NewProjectPreflightVm {
+                state: NewProjectPreflightState::Blocked,
+                license_ok: false,
+                message: Some(error_text(error)),
+                can_continue: false,
+            }
+        } else {
+            NewProjectPreflightVm {
+                state: NewProjectPreflightState::Idle,
+                license_ok: false,
+                message: None,
+                can_continue: true,
+            }
+        };
+
+        let templates = load_state(&state.templates, |templates| {
+            templates
+                .iter()
+                .filter(|template| {
+                    state.form.show_builtin_templates || !is_builtin_template(&template.name)
+                })
+                .map(template_row_vm)
+                .collect()
+        });
+
+        let form = state.form.clone();
+        let options = CreateProjectOptions {
+            name: form.name.trim().to_string(),
+            output_dir: form.parent_dir.trim().to_string(),
+            editor_version: form.editor_version.trim().to_string(),
+            template: form.template.trim().to_string(),
+            architecture: form.architecture.trim().to_string(),
+            open: form.open_after_create,
+            bare: false,
+        };
+        let command_preview = self
+            .cli
+            .create_project_spec(&options)
+            .map(|spec| spec.display())
+            .unwrap_or_default();
+
+        NewProjectVm {
+            step: state.step,
+            form,
+            editors: load_state(&state.editors, |editors| {
+                editors
+                    .iter()
+                    .map(|editor| NewProjectEditorVm {
+                        version: editor.version.clone(),
+                        architecture: editor.architecture.clone(),
+                        is_default: editor.default,
+                    })
+                    .collect()
+            }),
+            templates,
+            selected_template: state.selected_template.as_ref().map(template_detail_vm),
+            preflight,
+            issues: state.issues.clone(),
+            command_preview,
+            result: state.result.as_ref().map(new_project_result_vm),
+            job: self
+                .active_job
+                .as_ref()
+                .filter(|job| job.kind == "project-create")
+                .map(job_vm),
+        }
+    }
+
+    fn authoring_vm(&self, state: &TemplateAuthoringState) -> TemplateAuthoringVm {
+        let projects = self
+            .projects
+            .data
+            .as_ref()
+            .map(|projects| {
+                projects
+                    .iter()
+                    .map(|project| project.path.clone())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let options = state.create_options();
+        let pack_options = state.pack_options();
+        let command_preview = if state.mode.is_pack() {
+            self.cli
+                .templates_pack_spec(&pack_options)
+                .map(|spec| spec.display())
+                .unwrap_or_default()
+        } else {
+            self.cli
+                .templates_create_spec(&options)
+                .map(|spec| spec.display())
+                .unwrap_or_default()
+        };
+        let job = self
+            .active_job
+            .as_ref()
+            .filter(|job| matches!(job.kind.as_str(), "template-create" | "template-pack"))
+            .map(job_vm);
+
+        TemplateAuthoringVm {
+            mode: state.mode,
+            projects,
+            selected_project: (!state.source.trim().is_empty()).then(|| state.source.clone()),
+            form: TemplateFormVm {
+                name: state.form.name.clone(),
+                display_name: state.form.display_name.clone(),
+                description: state.form.description.clone(),
+                version: state.form.version.clone(),
+                output: state.form.output.clone(),
+            },
+            overwrite: state.overwrite_confirmed,
+            overwrite_confirmed: state.overwrite_confirmed,
+            can_submit: state.issues.is_empty()
+                && !state.source.trim().is_empty()
+                && !state.form.name.trim().is_empty()
+                && !state.form.display_name.trim().is_empty()
+                && !state.form.output.trim().is_empty()
+                && job.is_none(),
+            issues: state.issues.clone(),
+            command_preview,
+            result: state.result.clone(),
+            job,
         }
     }
 
@@ -2005,6 +3169,255 @@ impl App {
             None => "Unity CLI not detected".to_string(),
         }
     }
+}
+
+fn default_editor(editors: &[Editor]) -> Option<&Editor> {
+    editors.iter().find(|editor| editor.default).or_else(|| {
+        editors
+            .iter()
+            .max_by(|left, right| left.version.cmp(&right.version))
+    })
+}
+
+fn template_filter(filter: TemplateKindFilter) -> TemplateFilter {
+    match filter {
+        TemplateKindFilter::All => TemplateFilter::All,
+        TemplateKindFilter::Core => TemplateFilter::Core,
+        TemplateKindFilter::Custom => TemplateFilter::Custom,
+    }
+}
+
+fn is_builtin_template(name: &str) -> bool {
+    matches!(name, "com.unity.template.3d" | "com.unity.template.2d")
+}
+
+fn template_pipeline(name: &str, display_name: &str) -> Option<String> {
+    let label = format!("{name} {display_name}").to_lowercase();
+    if label.contains("universal-2d") || label.contains("universal 2d") {
+        Some("URP · 2D".to_string())
+    } else if label.contains("urp") || label.contains("universal 3d") || label.contains("universal")
+    {
+        Some("URP".to_string())
+    } else if label.contains("hdrp") || label.contains("high definition") {
+        Some("HDRP".to_string())
+    } else if label.contains("built-in") || label.contains("built in") {
+        Some("Built-in".to_string())
+    } else {
+        None
+    }
+}
+
+fn template_status_tone(status: &str) -> Tone {
+    let status = status.to_ascii_lowercase();
+    if status.contains("ready") {
+        Tone::Success
+    } else if status.contains("upgrad") {
+        Tone::Warning
+    } else if status.contains("download") {
+        Tone::Info
+    } else {
+        Tone::Neutral
+    }
+}
+
+fn template_row_vm(template: &TemplateBrief) -> TemplateRowVm {
+    TemplateRowVm {
+        name: template.name.clone(),
+        display_name: if template.display_name.trim().is_empty() {
+            template.name.clone()
+        } else {
+            template.display_name.clone()
+        },
+        kind: template.kind.clone(),
+        version: template.version.clone(),
+        status: template.status.clone(),
+        status_tone: template_status_tone(&template.status),
+        installed: template.is_installed(),
+        pipeline: template_pipeline(&template.name, &template.display_name),
+    }
+}
+
+fn template_detail_vm(info: &TemplateInfo) -> TemplateDetailVm {
+    TemplateDetailVm {
+        name: info.name.clone(),
+        display_name: if info.display_name.trim().is_empty() {
+            info.name.clone()
+        } else {
+            info.display_name.clone()
+        },
+        description: info.description.clone(),
+        kind: info.kind.clone(),
+        version: info.version.clone(),
+        status: info.status.clone(),
+        installed: info.is_installed(),
+        render_pipeline: info.render_pipeline_label().map(str::to_string),
+        packages: info
+            .packages
+            .iter()
+            .map(|package| {
+                let name = if package.package_name.trim().is_empty() {
+                    package.name.as_str()
+                } else {
+                    package.package_name.as_str()
+                };
+                format!("{name} {}", package.version).trim().to_string()
+            })
+            .collect(),
+        previous_versions: info.previous_version_names(),
+    }
+}
+
+fn project_name_from_path(path: &str) -> String {
+    path.trim_end_matches(['/', '\\'])
+        .rsplit(['/', '\\'])
+        .next()
+        .filter(|name| !name.is_empty())
+        .unwrap_or(path)
+        .to_string()
+}
+
+fn process_state_tone(state: &str) -> Tone {
+    let state = state.to_ascii_lowercase();
+    if state.contains("ready") {
+        Tone::Success
+    } else if state.contains("start") || state.contains("load") {
+        Tone::Info
+    } else if state.contains("unreachable") || state.contains("stale") {
+        Tone::Danger
+    } else {
+        Tone::Neutral
+    }
+}
+
+fn process_row_vm(editor: &RunningEditor, metrics: &HashMap<u32, ProcessMetrics>) -> ProcessRowVm {
+    let project_path = editor
+        .project_path
+        .clone()
+        .unwrap_or_else(|| "Unity Editor".to_string());
+    let state = editor
+        .state
+        .clone()
+        .filter(|state| !state.trim().is_empty())
+        .or_else(|| editor.phase.clone())
+        .unwrap_or_else(|| "unknown".to_string());
+    let phase = editor.phase.clone();
+    let play_mode = phase
+        .as_deref()
+        .map(|phase| {
+            let phase = phase.to_ascii_lowercase();
+            phase.contains("play") && !phase.contains("stop")
+        })
+        .unwrap_or(false);
+    let metrics = editor
+        .pid
+        .and_then(|pid| metrics.get(&pid))
+        .map(|sample| ProcessMetricsVm {
+            cpu: sample
+                .cpu_percent
+                .map(|cpu| format!("{cpu:.1}%"))
+                .unwrap_or_else(|| "—".to_string()),
+            memory: format_bytes(sample.memory_bytes),
+            uptime: format_duration(sample.uptime),
+        });
+
+    ProcessRowVm {
+        project_path: project_path.clone(),
+        project_name: project_name_from_path(&project_path),
+        editor_version: editor
+            .editor_version
+            .clone()
+            .filter(|version| !version.trim().is_empty())
+            .unwrap_or_else(|| "unknown".to_string()),
+        pid: editor.pid.map(|pid| pid.to_string()),
+        port: editor.port.map(|port| port.to_string()),
+        state_tone: process_state_tone(&state),
+        state,
+        phase,
+        play_mode,
+        frame_count: editor.frame_count.map(|count| count.to_string()),
+        pipeline_version: editor.pipeline_version.clone(),
+        safe_mode: editor.in_safe_mode(),
+        dialog: editor.dialog_text(),
+        metrics,
+    }
+}
+
+fn new_project_result_vm(result: &CreateProjectResult) -> NewProjectResultVm {
+    let failed: Vec<String> = result
+        .failed_steps()
+        .into_iter()
+        .map(|step| match step.detail() {
+            Some(detail) => format!("{}: {detail}", step.id),
+            None => step.id.clone(),
+        })
+        .collect();
+    let success = !result.path.trim().is_empty() && failed.is_empty();
+    let summary = if success {
+        format!("Project created at {}.", result.path)
+    } else if !result.path.trim().is_empty() {
+        format!(
+            "The project was created at {}, but {} setup step(s) failed.",
+            result.path,
+            failed.len()
+        )
+    } else {
+        "Project creation did not report a path.".to_string()
+    };
+
+    NewProjectResultVm {
+        success,
+        path: (!result.path.trim().is_empty()).then(|| result.path.clone()),
+        summary,
+        failed_steps: failed,
+    }
+}
+
+fn result_payload<T: serde::de::DeserializeOwned>(value: &Value) -> Option<T> {
+    value
+        .get("data")
+        .cloned()
+        .and_then(|data| serde_json::from_value(data).ok())
+        .or_else(|| serde_json::from_value(value.clone()).ok())
+}
+
+fn template_offers(error: &UnityError) -> Option<Vec<String>> {
+    let offered = error
+        .extra
+        .get("offered")
+        .or_else(|| error.extra.get("data").and_then(|data| data.get("offered")))?;
+    let values = offered.as_array()?;
+    let names: Vec<String> = values
+        .iter()
+        .filter_map(|value| {
+            value.as_str().map(str::to_string).or_else(|| {
+                value
+                    .get("name")
+                    .or_else(|| value.get("id"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+        })
+        .collect();
+    (!names.is_empty()).then_some(names)
+}
+
+fn result_path(value: &Value) -> Option<String> {
+    let data = value.get("data").unwrap_or(value);
+    for key in [
+        "path",
+        "archive",
+        "output",
+        "outputPath",
+        "templatePath",
+        "target",
+    ] {
+        if let Some(path) = data.get(key).and_then(Value::as_str) {
+            if !path.trim().is_empty() {
+                return Some(path.to_string());
+            }
+        }
+    }
+    None
 }
 
 fn ui_error(error: &UnityError) -> UiError {
@@ -2221,6 +3634,20 @@ fn load_editors(cli: UnityCli) -> Task<Message> {
     Task::perform(
         run_blocking(move || cli.editors_installed()),
         Message::EditorsLoaded,
+    )
+}
+
+fn load_new_project_editors(cli: UnityCli) -> Task<Message> {
+    Task::perform(
+        run_blocking(move || cli.editors_installed()),
+        Message::NewProjectEditorsLoaded,
+    )
+}
+
+fn load_new_project_license(cli: UnityCli) -> Task<Message> {
+    Task::perform(
+        run_blocking(move || cli.license_status()),
+        Message::NewProjectLicenseLoaded,
     )
 }
 
@@ -2485,6 +3912,7 @@ mod tests {
             logs: VecDeque::new(),
             log_text: Arc::from(""),
             error: None,
+            result: None,
         }
     }
 
@@ -2511,5 +3939,263 @@ mod tests {
 
         assert_eq!(job.logs.len(), MAX_LOG_LINES);
         assert_eq!(&*job.log_text, expected);
+    }
+
+    #[test]
+    fn template_filters_map_to_cli_values() {
+        assert_eq!(
+            template_filter(TemplateKindFilter::All),
+            TemplateFilter::All
+        );
+        assert_eq!(
+            template_filter(TemplateKindFilter::Core),
+            TemplateFilter::Core
+        );
+        assert_eq!(
+            template_filter(TemplateKindFilter::Custom),
+            TemplateFilter::Custom
+        );
+    }
+
+    #[test]
+    fn new_project_details_reject_a_missing_parent_and_an_existing_folder() {
+        let dir =
+            std::env::temp_dir().join(format!("unity-rust-hub-wizard-test-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("Taken")).unwrap();
+        std::fs::write(dir.join("Taken").join("ProjectVersion.txt"), b"x").unwrap();
+
+        let mut state = NewProjectState::new();
+        state.form.name = "Game".to_string();
+        state.form.parent_dir = dir.join("missing").to_string_lossy().into_owned();
+        assert!(!state.validation_issues().is_empty());
+
+        state.form.parent_dir = dir.to_string_lossy().into_owned();
+        state.form.name = String::new();
+        assert!(!state
+            .validation_issues()
+            .iter()
+            .any(|issue| issue.contains("not empty")));
+        state.form.name = "Taken".to_string();
+        assert!(state
+            .validation_issues()
+            .iter()
+            .any(|issue| issue.contains("not empty")));
+
+        state.form.name = "Free".to_string();
+        assert!(state.validation_issues().is_empty());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn new_project_editor_step_requires_a_known_architecture() {
+        let mut state = NewProjectState::new();
+        state.step = NewProjectStep::Editor;
+        state.form.editor_version = "6000.3.15f1".to_string();
+        state.form.architecture = "ppc".to_string();
+        assert!(!state.validation_issues().is_empty());
+
+        state.form.architecture = "x86_64".to_string();
+        assert!(state.validation_issues().is_empty());
+    }
+
+    #[test]
+    fn partial_create_success_keeps_the_path_and_names_the_failed_step() {
+        let created = CreateProjectResult {
+            path: "/games/Game".to_string(),
+            steps: vec![
+                unity_core::models::CreateProjectStep {
+                    id: "template".to_string(),
+                    status: "done".to_string(),
+                    ..Default::default()
+                },
+                unity_core::models::CreateProjectStep {
+                    id: "cloudLink".to_string(),
+                    status: "failed".to_string(),
+                    reason: Some("NO_CLOUD".to_string()),
+                    ..Default::default()
+                },
+            ],
+            ..CreateProjectResult::default()
+        };
+
+        let vm = new_project_result_vm(&created);
+        assert!(!vm.success);
+        assert_eq!(vm.path.as_deref(), Some("/games/Game"));
+        assert_eq!(vm.failed_steps.len(), 1);
+        assert!(vm.failed_steps[0].contains("cloudLink"));
+        assert!(vm.summary.contains("1 setup step"));
+    }
+
+    #[test]
+    fn process_rows_show_play_mode_and_optional_metrics() {
+        let mut metrics = HashMap::new();
+        metrics.insert(
+            42,
+            ProcessMetrics {
+                cpu_percent: Some(12.5),
+                memory_bytes: 1024 * 1024 * 512,
+                uptime: Duration::from_secs(90),
+            },
+        );
+        let editor = RunningEditor {
+            project_path: Some("/games/Orbital".to_string()),
+            editor_version: Some("6000.3.15f1".to_string()),
+            pid: Some(42),
+            port: Some(7800),
+            state: Some("ready".to_string()),
+            phase: Some("play mode".to_string()),
+            frame_count: Some(120),
+            safe_mode: Some(serde_json::json!({ "detected": true })),
+            dialog: Some(serde_json::json!({ "title": "Save changes?" })),
+            ..RunningEditor::default()
+        };
+
+        let row = process_row_vm(&editor, &metrics);
+
+        assert_eq!(row.project_name, "Orbital");
+        assert!(row.play_mode);
+        assert!(row.safe_mode);
+        assert_eq!(row.dialog.as_deref(), Some("Save changes?"));
+        assert_eq!(row.pid.as_deref(), Some("42"));
+        assert_eq!(row.port.as_deref(), Some("7800"));
+        let sampled = row.metrics.expect("metrics should be attached");
+        assert_eq!(sampled.cpu, "12.5%");
+        assert_eq!(sampled.memory, "512.0 MB");
+        assert_eq!(sampled.uptime, "1m");
+    }
+
+    #[test]
+    fn template_rows_infer_the_pipeline_and_keep_a_blank_one_optional() {
+        let urp = template_row_vm(&TemplateBrief {
+            name: "com.unity.template.urp-blank".to_string(),
+            display_name: "Universal 3D".to_string(),
+            ..TemplateBrief::default()
+        });
+        assert_eq!(urp.pipeline.as_deref(), Some("URP"));
+
+        let universal_2d = template_row_vm(&TemplateBrief {
+            name: "com.unity.template.universal-2d".to_string(),
+            display_name: "Universal 2D".to_string(),
+            ..TemplateBrief::default()
+        });
+        assert_eq!(universal_2d.pipeline.as_deref(), Some("URP · 2D"));
+
+        let info: TemplateInfo = serde_json::from_value(serde_json::json!({
+            "name": "com.unity.template.universal-2d",
+            "displayName": "Universal 2D",
+            "status": "READY"
+        }))
+        .unwrap();
+        assert_eq!(template_detail_vm(&info).render_pipeline, None);
+    }
+
+    #[test]
+    fn result_path_reads_the_cli_data_frame() {
+        let value = serde_json::json!({
+            "type": "result",
+            "success": true,
+            "data": { "path": "/games/Game" }
+        });
+        assert_eq!(result_path(&value).as_deref(), Some("/games/Game"));
+    }
+
+    #[test]
+    fn built_in_templates_are_hidden_by_default_in_the_wizard() {
+        assert!(is_builtin_template("com.unity.template.3d"));
+        assert!(is_builtin_template("com.unity.template.2d"));
+        assert!(!is_builtin_template("com.unity.template.urp-blank"));
+    }
+
+    #[test]
+    fn template_not_found_exposes_the_offered_ids() {
+        let mut error = UnityError::new("TEMPLATE_NOT_FOUND", "Unknown template");
+        error.extra.insert(
+            "data".to_string(),
+            serde_json::json!({
+                "offered": [
+                    "com.unity.template.urp-blank",
+                    { "name": "com.unity.template.universal-2d" }
+                ]
+            }),
+        );
+
+        let offered = template_offers(&error).expect("offered templates");
+        assert_eq!(
+            offered,
+            vec![
+                "com.unity.template.urp-blank".to_string(),
+                "com.unity.template.universal-2d".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn view_model_maps_the_templates_page() {
+        let (mut app, _) = App::boot();
+        app.page = Page::Templates;
+        app.template_editor = Some("6000.3.15f1".to_string());
+        app.editors.data = Some(vec![Editor {
+            version: "6000.3.15f1".to_string(),
+            ..Editor::default()
+        }]);
+        app.templates.data = Some(vec![TemplateBrief {
+            name: "com.unity.template.urp-blank".to_string(),
+            display_name: "Universal 3D".to_string(),
+            kind: "CORE".to_string(),
+            version: "17.1.0".to_string(),
+            status: "ready".to_string(),
+        }]);
+        app.template_detail.data = Some(TemplateInfo {
+            name: "com.unity.template.universal-2d".to_string(),
+            display_name: "Universal 2D".to_string(),
+            status: "READY".to_string(),
+            ..TemplateInfo::default()
+        });
+
+        let vm = app.view_model();
+        match &vm.page {
+            PageVm::Templates(templates) => {
+                let rows = templates.list.data().expect("template rows");
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0].pipeline.as_deref(), Some("URP"));
+                let detail = templates.detail.as_ref().expect("detail");
+                assert_eq!(detail.render_pipeline, None);
+            }
+            other => panic!("unexpected page: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn view_model_maps_the_processes_page_with_metrics_off() {
+        let (mut app, _) = App::boot();
+        app.page = Page::Processes;
+        app.processes.data = Some(RunningEditors {
+            count: 1,
+            instances: vec![RunningEditor {
+                project_path: Some("/games/Orbital".to_string()),
+                pid: Some(42),
+                state: Some("ready".to_string()),
+                ..RunningEditor::default()
+            }],
+        });
+
+        let vm = app.view_model();
+        match &vm.page {
+            PageVm::Processes(processes) => {
+                assert!(!processes.metrics_enabled);
+                let rows = processes.rows.data().expect("process rows");
+                assert_eq!(rows.len(), 1);
+                assert!(rows[0].metrics.is_none());
+            }
+            other => panic!("unexpected page: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_metrics_toggle_is_off_by_default() {
+        assert!(!AppSettings::default().process_metrics);
+        let settings: AppSettings = serde_json::from_str("{}").unwrap();
+        assert!(!settings.process_metrics);
     }
 }

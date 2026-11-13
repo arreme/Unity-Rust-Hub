@@ -75,6 +75,20 @@ update target.
 - **Projects** — every project in the Hub registry, its Editor version, render pipeline,
   build target, cloud/VCS badges, an Open action, a guarded upgrade dialog, an Add project
   folder picker, a Remove confirmation, and a favorite star backed by `projects pin`.
+- **New Project** — a local-first wizard over `projects create`: name and parent folder,
+  installed Editor and architecture, a template chosen by render pipeline (built-in
+  templates hidden by default), a review with the exact command, then a streamed create.
+  It always passes `--no-cloud`, and a partial success keeps the created path and names
+  the failed setup step.
+- **Templates** — browse `templates --brief` per installed Editor, filter core/custom and
+  installed-only, inspect a template's render pipeline and packages, create a registered
+  template from a project, or pack a portable `.tgz`. Create and pack stream progress and
+  report the resulting path.
+- **Processes** — one read-only row per running Editor, merging `status`,
+  `editors running`, and `pipeline editors`: project, version, PID, port, state, phase,
+  Play mode, frame count, Safe Mode, and blocking dialog, with copy and open-folder
+  actions. Optional CPU/memory/uptime sampling is off by default and only runs while the
+  page is visible.
 - **Changelog** — `unity changelog` rendered as sections with readable bullet points and
   a focused heuristic for **possible breaking changes**, plus a raw Markdown view.
 - **Provider-ready changelog** — `ChangelogProvider` is a trait; v1 uses

@@ -47,7 +47,9 @@ fn min_table_width() -> f32 {
 
 pub fn view(vm: &ProjectsVm) -> Element<'_, UiAction> {
     let actions = row![
-        icon_button(icons::PLUS, "Add project", ButtonKind::Secondary)
+        icon_button(icons::PLUS, "New project", ButtonKind::Primary)
+            .on_press(UiAction::OpenNewProject),
+        icon_button(icons::FOLDERS, "Add existing", ButtonKind::Secondary)
             .on_press(UiAction::AddProject),
         refresh_button(),
     ]
@@ -107,7 +109,7 @@ fn projects_card(vm: &ProjectsVm) -> Element<'_, UiAction> {
         if vm.total_count == 0 {
             empty(
                 "No Unity projects registered",
-                "Choose Add project to register a Unity project folder.",
+                "Choose New project to create one, or Add existing to register a folder.",
             )
         } else if projects.is_empty() {
             empty("No matching projects", "Try a shorter search.")

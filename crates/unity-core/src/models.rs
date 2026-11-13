@@ -228,6 +228,13 @@ pub struct RunningEditor {
     /// Present when a modal dialog blocks the Editor. The CLI shape is still evolving.
     #[serde(default)]
     pub dialog: Option<Value>,
+    /// Live state from `unity status`: `ready`, `starting`, or `unreachable`.
+    #[serde(default)]
+    pub state: Option<String>,
+    #[serde(default)]
+    pub frame_count: Option<u64>,
+    #[serde(default)]
+    pub player_loop_ticking: Option<bool>,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -277,6 +284,12 @@ pub struct PipelineEditor {
     pub safe_mode: Option<Value>,
     #[serde(default)]
     pub dialog: Option<Value>,
+    #[serde(default)]
+    pub state: Option<String>,
+    #[serde(default)]
+    pub frame_count: Option<u64>,
+    #[serde(default)]
+    pub player_loop_ticking: Option<bool>,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -311,6 +324,9 @@ impl PipelineEditor {
             update_available: self.update_available,
             safe_mode: self.safe_mode,
             dialog: self.dialog,
+            state: self.state,
+            frame_count: self.frame_count,
+            player_loop_ticking: self.player_loop_ticking,
             extra: self.extra,
         }
     }
@@ -459,4 +475,294 @@ pub struct PreviewModule {
     pub download_size: u64,
     #[serde(default)]
     pub installed_size: u64,
+}
+
+// ---------------------------------------------------------------------------
+// Templates
+
+/// The `--type` filter accepted by `unity templates`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TemplateFilter {
+    #[default]
+    All,
+    Core,
+    Learning,
+    Sample,
+    Custom,
+    New,
+}
+
+impl TemplateFilter {
+    pub const ALL: [Self; 6] = [
+        Self::All,
+        Self::Core,
+        Self::Learning,
+        Self::Sample,
+        Self::Custom,
+        Self::New,
+    ];
+
+    pub fn cli_value(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Core => "core",
+            Self::Learning => "learning",
+            Self::Sample => "sample",
+            Self::Custom => "custom",
+            Self::New => "new",
+        }
+    }
+}
+
+/// One row from `unity templates --brief --format json`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct TemplateBrief {
+    pub name: String,
+    #[serde(default)]
+    pub display_name: String,
+    #[serde(rename = "type", default)]
+    pub kind: String,
+    #[serde(default)]
+    pub version: String,
+    #[serde(default)]
+    pub status: String,
+}
+
+impl TemplateBrief {
+    /// Whether this template is installed locally.
+    pub fn is_installed(&self) -> bool {
+        matches!(
+            self.status.to_ascii_lowercase().as_str(),
+            "ready" | "upgradable"
+        )
+    }
+
+    /// Whether a newer installed version is available.
+    pub fn update_available(&self) -> bool {
+        self.status.eq_ignore_ascii_case("upgradable")
+    }
+}
+
+/// One package pinned by a template, from `unity templates info`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct TemplatePackage {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub package_name: String,
+    #[serde(default)]
+    pub version: String,
+}
+
+/// One earlier template version from `unity templates info`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct TemplateVersion {
+    #[serde(default)]
+    pub name: String,
+}
+
+/// The useful parts of `unity templates info <name> --format json`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct TemplateInfo {
+    pub name: String,
+    #[serde(default)]
+    pub display_name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(rename = "type", default)]
+    pub kind: String,
+    #[serde(default)]
+    pub version: String,
+    #[serde(default)]
+    pub status: String,
+    /// Missing or blank for Universal 2D in CLI 1.0.0.
+    #[serde(default)]
+    pub render_pipeline: Option<String>,
+    #[serde(default)]
+    pub is_user_generated: bool,
+    #[serde(default)]
+    pub packages: Vec<TemplatePackage>,
+    #[serde(default)]
+    pub previous_versions: Vec<TemplateVersion>,
+    #[serde(default)]
+    pub tar: Option<String>,
+}
+
+impl TemplateInfo {
+    pub fn render_pipeline_label(&self) -> Option<&str> {
+        self.render_pipeline
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    }
+
+    pub fn is_installed(&self) -> bool {
+        matches!(
+            self.status.to_ascii_lowercase().as_str(),
+            "ready" | "upgradable"
+        )
+    }
+
+    pub fn previous_version_names(&self) -> Vec<String> {
+        self.previous_versions
+            .iter()
+            .map(|version| version.name.clone())
+            .filter(|name| !name.trim().is_empty())
+            .collect()
+    }
+}
+
+/// Options for `unity templates create`.
+#[derive(Debug, Clone, Default)]
+pub struct TemplateCreateOptions {
+    pub project_path: String,
+    pub name: String,
+    pub display_name: String,
+    pub description: String,
+    pub version: String,
+    pub output_dir: String,
+    pub overwrite: bool,
+}
+
+/// Options for `unity templates pack`.
+#[derive(Debug, Clone, Default)]
+pub struct TemplatePackOptions {
+    pub project_path: String,
+    pub output: String,
+    pub name: String,
+    pub display_name: String,
+    pub description: String,
+    pub version: String,
+    pub overwrite: bool,
+}
+
+// ---------------------------------------------------------------------------
+// Project creation
+
+/// Options for `unity projects create`. The GUI always passes `--no-cloud`.
+#[derive(Debug, Clone, Default)]
+pub struct CreateProjectOptions {
+    pub name: String,
+    pub output_dir: String,
+    pub editor_version: String,
+    pub template: String,
+    pub architecture: String,
+    pub open: bool,
+    pub bare: bool,
+}
+
+/// One entry from the result's `steps[]`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateProjectStep {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub message: Option<String>,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+impl CreateProjectStep {
+    pub fn failed(&self) -> bool {
+        self.status.eq_ignore_ascii_case("failed")
+    }
+
+    /// The most specific explanation the CLI supplied.
+    pub fn detail(&self) -> Option<&str> {
+        self.error
+            .as_deref()
+            .or(self.message.as_deref())
+            .or(self.reason.as_deref())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    }
+}
+
+/// The result frame of `unity projects create`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateProjectResult {
+    #[serde(default)]
+    pub path: String,
+    #[serde(default)]
+    pub version: String,
+    #[serde(default)]
+    pub architecture: String,
+    #[serde(default)]
+    pub template: String,
+    #[serde(default)]
+    pub opened: bool,
+    #[serde(default)]
+    pub steps: Vec<CreateProjectStep>,
+}
+
+impl CreateProjectResult {
+    pub fn failed_steps(&self) -> Vec<&CreateProjectStep> {
+        self.steps.iter().filter(|step| step.failed()).collect()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// `unity status`
+
+/// One connected Editor from `unity status --format json`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct StatusInstance {
+    #[serde(default)]
+    pub project_path: Option<String>,
+    #[serde(default)]
+    pub editor_version: Option<String>,
+    #[serde(default)]
+    pub pid: Option<u32>,
+    #[serde(default)]
+    pub port: Option<u16>,
+    /// `ready`, `starting`, or `unreachable`.
+    #[serde(default)]
+    pub state: Option<String>,
+    #[serde(default)]
+    pub frame_count: Option<u64>,
+    #[serde(default)]
+    pub player_loop_ticking: Option<bool>,
+    #[serde(default)]
+    pub safe_mode: Option<Value>,
+    #[serde(default)]
+    pub dialog: Option<Value>,
+    /// Newer CLI builds report `blockedBy.dialogs`.
+    #[serde(default)]
+    pub blocked_by: Option<Value>,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+impl StatusInstance {
+    pub fn dialog_text(&self) -> Option<String> {
+        dialog_text(self.dialog.as_ref()).or_else(|| {
+            self.blocked_by
+                .as_ref()
+                .and_then(|value| value.get("dialogs"))
+                .and_then(|value| dialog_text(Some(value)))
+        })
+    }
+
+    pub fn in_safe_mode(&self) -> bool {
+        match &self.safe_mode {
+            None => false,
+            Some(Value::Bool(value)) => *value,
+            Some(Value::Object(object)) => object
+                .get("detected")
+                .and_then(Value::as_bool)
+                .unwrap_or(true),
+            Some(_) => true,
+        }
+    }
 }

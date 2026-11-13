@@ -122,6 +122,46 @@ pub fn error_text(error: &UnityError) -> String {
     }
 }
 
+/// Opens a folder in the platform's file manager. The child is detached; the
+/// app does not wait for it or read its output.
+pub fn open_folder(path: &str) -> Result<(), UnityError> {
+    let program = if cfg!(target_os = "windows") {
+        "explorer"
+    } else if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+
+    std::process::Command::new(program)
+        .arg(path)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| {
+            UnityError::new(
+                "OPEN_FOLDER_FAILED",
+                format!("Could not open the folder in the file manager: {error}"),
+            )
+            .with_detail(path.to_string())
+        })
+}
+
+pub fn format_duration(duration: std::time::Duration) -> String {
+    let total = duration.as_secs();
+    let hours = total / 3600;
+    let minutes = (total % 3600) / 60;
+    if hours > 0 {
+        format!("{hours}h {minutes}m")
+    } else if minutes > 0 {
+        format!("{minutes}m")
+    } else {
+        format!("{total}s")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

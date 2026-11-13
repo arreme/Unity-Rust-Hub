@@ -7,15 +7,19 @@ pub enum Page {
     Overview,
     Editors,
     Projects,
+    Templates,
+    Processes,
     Changelog,
     Settings,
 }
 
 impl Page {
-    pub const ALL: [Page; 5] = [
+    pub const ALL: [Page; 7] = [
         Page::Overview,
         Page::Editors,
         Page::Projects,
+        Page::Templates,
+        Page::Processes,
         Page::Changelog,
         Page::Settings,
     ];
@@ -150,6 +154,8 @@ pub enum PageVm {
     Overview(OverviewVm),
     Editors(EditorsVm),
     Projects(ProjectsVm),
+    Templates(TemplatesVm),
+    Processes(ProcessesVm),
     Changelog(ChangelogVm),
     Settings(SettingsVm),
 }
@@ -160,6 +166,8 @@ pub enum ModalVm {
     EditorModules(EditorModulesVm),
     UpgradeProject(UpgradeProjectVm),
     RemoveProject(RemoveProjectVm),
+    NewProject(Box<NewProjectVm>),
+    TemplateAuthoring(Box<TemplateAuthoringVm>),
 }
 
 #[derive(Debug, Clone)]
@@ -456,4 +464,254 @@ pub struct UpgradeProjectVm {
 pub struct RemoveProjectVm {
     pub project_title: String,
     pub project_path_short: String,
+}
+
+// ---------------------------------------------------------------------------
+// Templates
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TemplateKindFilter {
+    #[default]
+    All,
+    Core,
+    Custom,
+}
+
+impl TemplateKindFilter {
+    pub const ALL: [Self; 3] = [Self::All, Self::Core, Self::Custom];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::All => "All",
+            Self::Core => "Core",
+            Self::Custom => "Custom",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct TemplatesVm {
+    /// Installed Editor versions, newest first.
+    pub editors: LoadState<Vec<String>>,
+    pub selected_editor: Option<String>,
+    pub filter: TemplateKindFilter,
+    pub installed_only: bool,
+    pub list: LoadState<Vec<TemplateRowVm>>,
+    pub detail: Option<TemplateDetailVm>,
+    pub detail_loading: bool,
+    pub detail_error: Option<UiError>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TemplateRowVm {
+    pub name: String,
+    pub display_name: String,
+    pub kind: String,
+    pub version: String,
+    pub status: String,
+    pub status_tone: Tone,
+    pub installed: bool,
+    pub pipeline: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TemplateDetailVm {
+    pub name: String,
+    pub display_name: String,
+    pub description: String,
+    pub kind: String,
+    pub version: String,
+    pub status: String,
+    pub installed: bool,
+    pub render_pipeline: Option<String>,
+    pub packages: Vec<String>,
+    pub previous_versions: Vec<String>,
+}
+
+/// What a template authoring form is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TemplateAuthoringMode {
+    /// `templates create` — register a template in the user template store.
+    Create,
+    /// `templates pack` — write a portable `.tgz`.
+    Pack,
+}
+
+impl TemplateAuthoringMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Create => "Create template",
+            Self::Pack => "Pack template",
+        }
+    }
+
+    pub fn is_pack(self) -> bool {
+        matches!(self, Self::Pack)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TemplateField {
+    Name,
+    DisplayName,
+    Description,
+    Version,
+    Output,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct TemplateFormVm {
+    pub name: String,
+    pub display_name: String,
+    pub description: String,
+    pub version: String,
+    pub output: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct TemplateAuthoringVm {
+    pub mode: TemplateAuthoringMode,
+    pub projects: Vec<String>,
+    pub selected_project: Option<String>,
+    pub form: TemplateFormVm,
+    pub overwrite: bool,
+    pub overwrite_confirmed: bool,
+    pub can_submit: bool,
+    pub issues: Vec<String>,
+    pub command_preview: String,
+    pub result: Option<String>,
+    pub job: Option<JobVm>,
+}
+
+// ---------------------------------------------------------------------------
+// Processes
+
+#[derive(Debug, Clone)]
+pub struct ProcessesVm {
+    pub rows: LoadState<Vec<ProcessRowVm>>,
+    pub metrics_enabled: bool,
+    /// True when at least one row came from the Pipeline package.
+    pub pipeline_available: bool,
+    pub last_refreshed: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcessRowVm {
+    pub project_path: String,
+    pub project_name: String,
+    pub editor_version: String,
+    pub pid: Option<String>,
+    pub port: Option<String>,
+    pub state: String,
+    pub state_tone: Tone,
+    pub phase: Option<String>,
+    pub play_mode: bool,
+    pub frame_count: Option<String>,
+    pub pipeline_version: Option<String>,
+    pub safe_mode: bool,
+    pub dialog: Option<String>,
+    pub metrics: Option<ProcessMetricsVm>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcessMetricsVm {
+    pub cpu: String,
+    pub memory: String,
+    pub uptime: String,
+}
+
+// ---------------------------------------------------------------------------
+// New Project wizard
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NewProjectStep {
+    Details,
+    Editor,
+    Template,
+    Review,
+    Result,
+}
+
+impl NewProjectStep {
+    pub fn index(self) -> usize {
+        match self {
+            Self::Details => 0,
+            Self::Editor => 1,
+            Self::Template => 2,
+            Self::Review => 3,
+            Self::Result => 4,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Details => "Name and folder",
+            Self::Editor => "Editor",
+            Self::Template => "Template",
+            Self::Review => "Review",
+            Self::Result => "Result",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NewProjectField {
+    Name,
+    ParentDir,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NewProjectPreflightState {
+    Idle,
+    Checking,
+    Ready,
+    Blocked,
+}
+
+#[derive(Debug, Clone)]
+pub struct NewProjectPreflightVm {
+    pub state: NewProjectPreflightState,
+    pub license_ok: bool,
+    pub message: Option<String>,
+    pub can_continue: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct NewProjectEditorVm {
+    pub version: String,
+    pub architecture: String,
+    pub is_default: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct NewProjectFormVm {
+    pub name: String,
+    pub parent_dir: String,
+    pub editor_version: String,
+    pub architecture: String,
+    pub template: String,
+    pub open_after_create: bool,
+    pub show_builtin_templates: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct NewProjectVm {
+    pub step: NewProjectStep,
+    pub form: NewProjectFormVm,
+    pub editors: LoadState<Vec<NewProjectEditorVm>>,
+    pub templates: LoadState<Vec<TemplateRowVm>>,
+    pub selected_template: Option<TemplateDetailVm>,
+    pub preflight: NewProjectPreflightVm,
+    pub issues: Vec<String>,
+    pub command_preview: String,
+    pub result: Option<NewProjectResultVm>,
+    pub job: Option<JobVm>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewProjectResultVm {
+    pub success: bool,
+    pub path: Option<String>,
+    pub summary: String,
+    pub failed_steps: Vec<String>,
 }

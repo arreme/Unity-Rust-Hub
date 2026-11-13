@@ -290,6 +290,8 @@ fn page_icon(page: Page) -> char {
         Page::Overview => icons::DASHBOARD,
         Page::Editors => icons::BOX,
         Page::Projects => icons::FOLDERS,
+        Page::Templates => icons::PACKAGE,
+        Page::Processes => icons::CPU,
         Page::Changelog => icons::NEWSPAPER,
         Page::Settings => icons::SETTINGS,
     }
@@ -300,6 +302,8 @@ pub fn page_label(page: Page) -> &'static str {
         Page::Overview => "Overview",
         Page::Editors => "Editors",
         Page::Projects => "Projects",
+        Page::Templates => "Templates",
+        Page::Processes => "Processes",
         Page::Changelog => "Changelog",
         Page::Settings => "Settings",
     }
