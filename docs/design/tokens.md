@@ -74,7 +74,8 @@ Every interactive widget is styled in `theme.rs`; pages use the helpers in
 - `components::button` / `icon_button` with `ButtonKind::{Primary, Secondary,
   Ghost, Danger}`: white pill, outlined pill, text pill, danger outline. Use at
   most one primary action per card or dialog. Pass `components::COMPACT`
-  padding inside list rows.
+  padding inside list rows. `components::icon_only` is the square icon action
+  used by table rows (favorite star, remove).
 - `components::segmented` for small exclusive choices.
 - `components::text_input`, `search_input`, `checkbox`, `scroll`.
 - Pick lists take `theme::pick_list`, `theme::menu`,
@@ -93,13 +94,16 @@ text glyphs, so they scale with it; fixed widths that hold text use
 
 ## Fonts and icons
 
-The UI bundles subsets of Inter (Regular, Medium, SemiBold), JetBrains Mono,
-and the Lucide icon font under `crates/unity-hub-ui/assets/fonts/`, with their
-licenses next to them. `fonts::ALL` is loaded by both the app and the gallery,
-and `fonts::SANS` is the default font.
+The Settings screen also persists one font family from the fonts installed on
+the PC (default `Tahoma`). `ui::text` puts every regular label in that family,
+and `fonts::regular` / `medium` / `semibold` only change the weight, so selecting
+a nav item, button, or row never swaps typefaces. Paths and versions use the
+same family through `fonts::mono`.
 
-Each static Inter weight registers as its own family, so `fonts::MEDIUM` and
-`fonts::SEMIBOLD` name both the family and the weight.
+The UI still bundles Inter (Regular, Medium, SemiBold) as the iced startup
+fallback and the Lucide icon font under `crates/unity-hub-ui/assets/fonts/`,
+with their licenses next to them. `fonts::ALL` is loaded by both the app and the
+gallery, and `fonts::ICONS` stays fixed for glyphs.
 
 To add an icon, add its Lucide name to `ICONS` in `scripts/subset-fonts.sh`,
 run the script, and add the codepoint constant to `icons.rs`.

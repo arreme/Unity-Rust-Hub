@@ -1,5 +1,5 @@
 use iced::widget::{column, container, row, space};
-use iced::{Center, Element, Fill, FillPortion};
+use iced::{Center, Element, Fill, FillPortion, Length};
 
 use unity_hub_model::{
     EditorRowVm, EditorsVm, InstallEditorVm, LoadState, ModuleOptionVm, ReleaseRowVm, Tone,
@@ -7,15 +7,18 @@ use unity_hub_model::{
 };
 
 use crate::components::{
-    self, badge, button, caption, card, cell, checkbox, detail_column, divided, empty, error_text,
-    hint, icon_button, list_row, loading, mono, page_header, refresh_button, scroll, surface,
-    text_input, ButtonKind,
+    self, badge, button, caption, card, cell, cell_centered, checkbox, detail_column, divided,
+    empty, error_text, hint, icon_button, list_row, loading, mono, page_header, refresh_button,
+    scroll, surface, text_input, ButtonKind,
 };
 use crate::fonts;
 use crate::icons::{self, icon};
 use crate::theme;
 use crate::tokens::{font, spacing};
-use crate::ui::text;
+use crate::ui::{self, text};
+
+/// Room for "Manage modules" at 100% text; it grows with the text preference.
+const MANAGE_WIDTH: f32 = 166.0;
 
 pub fn view(vm: &EditorsVm) -> Element<'_, UiAction> {
     column![
@@ -40,7 +43,8 @@ fn editor_row(editor: &EditorRowVm) -> Element<'_, UiAction> {
     let mut version = column![text(editor.version.as_str())
         .size(font::ROW_TITLE)
         .font(fonts::semibold())]
-    .spacing(4);
+    .spacing(4)
+    .width(Fill);
     if editor.is_default {
         version = version.push(
             row![
@@ -57,27 +61,61 @@ fn editor_row(editor: &EditorRowVm) -> Element<'_, UiAction> {
     let modules: Element<'_, UiAction> = if editor.modules.is_empty() {
         hint("No modules reported")
     } else {
-        row(editor
-            .modules
-            .iter()
-            .map(|module| badge(module.clone(), Tone::Neutral))
-            .collect::<Vec<_>>())
-        .spacing(6)
-        .into()
+        row(module_badges(&editor.modules)).spacing(6).into()
     };
 
-    list_row(
-        row![
-            cell(version, FillPortion(3)),
-            cell(mono(editor.architecture.as_str()), FillPortion(2)),
-            cell(modules, FillPortion(5)),
-            button("Manage modules", ButtonKind::Secondary)
-                .on_press(UiAction::OpenEditorModules(editor.version.clone()))
-                .padding(components::COMPACT),
-        ]
-        .spacing(16)
-        .align_y(Center),
-    )
+    list_row(editor_columns(
+        version.into(),
+        mono(editor.architecture.as_str()),
+        modules,
+        button("Manage modules", ButtonKind::Secondary)
+            .on_press(UiAction::OpenEditorModules(editor.version.clone()))
+            .padding(components::COMPACT)
+            .into(),
+    ))
+}
+
+fn editor_columns<'a>(
+    editor: Element<'a, UiAction>,
+    architecture: Element<'a, UiAction>,
+    modules: Element<'a, UiAction>,
+    action: Element<'a, UiAction>,
+) -> Element<'a, UiAction> {
+    row![
+        cell(editor, FillPortion(3)),
+        cell(architecture, FillPortion(2)),
+        cell_centered(modules, FillPortion(5)),
+        cell(action, Length::Fixed(ui::scaled_pixels(MANAGE_WIDTH))),
+    ]
+    .spacing(16)
+    .align_y(Center)
+    .into()
+}
+
+/// Keeps the module strip inside its column: a couple of names, then a `+N`
+/// chip. The full list stays available in the Manage modules dialog.
+fn module_badges(modules: &[String]) -> Vec<Element<'static, UiAction>> {
+    let budget = (42.0 / ui::scale()).max(12.0) as usize;
+    let mut used = 0;
+    let mut shown = Vec::new();
+
+    for module in modules {
+        let chars = module.chars().count() + 4;
+        if shown.len() >= 2 || used + chars > budget {
+            break;
+        }
+        used += chars;
+        shown.push(badge(module.clone(), Tone::Neutral));
+    }
+
+    if shown.len() < modules.len() {
+        shown.push(badge(
+            format!("+{}", modules.len() - shown.len()),
+            Tone::Neutral,
+        ));
+    }
+
+    shown
 }
 
 fn installed_card(installed: &LoadState<Vec<EditorRowVm>>) -> Element<'_, UiAction> {
@@ -90,7 +128,18 @@ fn installed_card(installed: &LoadState<Vec<EditorRowVm>>) -> Element<'_, UiActi
                 "Use the installer below. LTS is the safest default.",
             )
         } else {
-            divided(editors.iter().map(editor_row).collect()).into()
+            let header = list_row(editor_columns(
+                caption("Editor"),
+                caption("Architecture"),
+                container(caption("Modules"))
+                    .width(Fill)
+                    .align_x(Center)
+                    .into(),
+                space().width(0).into(),
+            ));
+            let mut rows = vec![header];
+            rows.extend(editors.iter().map(editor_row));
+            divided(rows).into()
         }
     } else if installed.is_loading() {
         container(loading("Reading installed Editors…"))

@@ -269,6 +269,38 @@ pub fn button_danger(_theme: &Theme, status: button::Status) -> button::Style {
     }
 }
 
+/// A borderless red icon action such as the row's remove button.
+pub fn button_danger_ghost(_theme: &Theme, status: button::Status) -> button::Style {
+    let danger = TOKENS.palette.danger;
+    match status {
+        button::Status::Active => button_style(None, alpha(danger, 0.75), Color::TRANSPARENT),
+        button::Status::Hovered => {
+            button_style(Some(alpha(danger, 0.12)), danger, Color::TRANSPARENT)
+        }
+        button::Status::Pressed => {
+            button_style(Some(alpha(danger, 0.2)), danger, Color::TRANSPARENT)
+        }
+        button::Status::Disabled => button_style(None, alpha(danger, 0.35), Color::TRANSPARENT),
+    }
+}
+
+/// The row's favorite toggle: gold when pinned, faint otherwise.
+pub fn button_favorite(active: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |theme, status| {
+        let palette = &TOKENS.palette;
+        let mut style = button_ghost(theme, status);
+        style.text_color = if active {
+            palette.warning
+        } else {
+            match status {
+                button::Status::Hovered | button::Status::Pressed => palette.text,
+                _ => palette.faint,
+            }
+        };
+        style
+    }
+}
+
 /// Round grey button holding an icon (dialog close).
 pub fn button_round(_theme: &Theme, status: button::Status) -> button::Style {
     let palette = &TOKENS.palette;

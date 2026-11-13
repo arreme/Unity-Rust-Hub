@@ -1,6 +1,6 @@
 use std::fmt;
 use std::path::PathBuf;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use serde::{Deserialize, Serialize};
 use unity_core::UnityError;
@@ -99,8 +99,8 @@ fn normalize_font_family(value: &str) -> String {
 ///
 /// iced resolves a `Font::with_name` family against the same operating-system
 /// font database, so a name listed here is a font the app can actually draw.
-pub fn font_families() -> Vec<String> {
-    static FAMILIES: OnceLock<Vec<String>> = OnceLock::new();
+pub fn font_families() -> Arc<[String]> {
+    static FAMILIES: OnceLock<Arc<[String]>> = OnceLock::new();
 
     FAMILIES
         .get_or_init(|| {
@@ -116,7 +116,7 @@ pub fn font_families() -> Vec<String> {
 
             names.sort_by_key(|name| name.to_lowercase());
             names.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
-            names
+            names.into()
         })
         .clone()
 }
@@ -200,5 +200,21 @@ mod tests {
 
         let settings: AppSettings = serde_json::from_str("{}").unwrap();
         assert_eq!(settings.text_scale_percent, 100);
+    }
+
+    #[test]
+    fn missing_font_family_defaults_to_tahoma() {
+        let settings: AppSettings = serde_json::from_str("{}").unwrap();
+        assert_eq!(settings.font_family, "Tahoma");
+        assert_eq!(AppSettings::default().font_family, "Tahoma");
+    }
+
+    #[test]
+    fn an_empty_font_family_falls_back_to_tahoma() {
+        let settings = AppSettings {
+            font_family: "   ".to_string(),
+            ..AppSettings::default()
+        };
+        assert_eq!(settings.normalized().font_family, "Tahoma");
     }
 }

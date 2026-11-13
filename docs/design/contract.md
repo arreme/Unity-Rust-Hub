@@ -89,11 +89,14 @@ fixture when a new state needs review.
 
 ### Projects
 
-- Search field and count.
+- Search field and count, plus an Add project action that opens the native
+  folder picker and registers the chosen folder with `unity projects add`.
 - Loading, error, no projects registered, no matching projects, populated table.
-- Badges: Unity Cloud, VCS, favorite, Editor not installed, local project.
+- Badges: Unity Cloud, VCS, Editor not installed, local project; favorites are
+  the star toggle beside the title (CLI pin/unpin), not a badge.
 - Pipeline badge or empty, long title, long path, modified date.
-- Row actions: Open, Change version.
+- Row actions: favorite star, Open, Change version, Remove (confirmation modal;
+  files on disk are untouched).
 
 ### Changelog
 
@@ -108,6 +111,7 @@ fixture when a new state needs review.
 
 - Resolved CLI executable/source, path input, save/clear, re-check.
 - Config directory and settings file.
+- Font picker fed by the installed PC font families (default Tahoma).
 - Text-scale picker with preview.
 - About/engine/version badges.
 
@@ -119,6 +123,7 @@ fixture when a new state needs review.
   loaded, selection count, EULA, disabled/enabled install.
 - Project upgrade: current version/path, target picker, no target installed
   warning, confirmation, disabled/enabled upgrade.
+- Remove project: path, "files on disk are not deleted" warning, cancel/remove.
 
 ## Platform constraints to design around
 
@@ -155,6 +160,7 @@ window.
 Environment variables for review:
 
 - `GALLERY_FIXTURE=<index>` opens a specific fixture.
+- `GALLERY_FONT=Tahoma` renders every fixture with a system font family.
 - `GALLERY_TEXT_SCALE=1.5` renders every fixture at a larger text size.
 - `GALLERY_HEIGHT=<px>` opens a taller window.
 - `GALLERY_SCREENSHOTS=<dir>` captures every fixture from inside the gallery

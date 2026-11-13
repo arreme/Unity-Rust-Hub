@@ -311,11 +311,7 @@ impl UnityCli {
     pub fn set_project_pinned(&self, path: &str, pinned: bool) -> Result<(), UnityError> {
         let project = validate_project_path(path)?;
         let project = project.to_string_lossy().to_string();
-        let command = if pinned {
-            "pin"
-        } else {
-            "unpin"
-        };
+        let command = if pinned { "pin" } else { "unpin" };
         self.run_args(&svec(&["projects", command, &project]), "json")?;
         Ok(())
     }

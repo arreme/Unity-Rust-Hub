@@ -61,6 +61,10 @@ fn settle() -> Task<Message> {
 impl Gallery {
     fn boot() -> (Self, Task<Message>) {
         let mut fixtures = fixtures::all();
+        // `GALLERY_FONT=Tahoma` reviews the fixtures with a system font.
+        if let Ok(font) = std::env::var("GALLERY_FONT") {
+            unity_hub_ui::fonts::set_family(&font);
+        }
         // `GALLERY_TEXT_SCALE=1.5` reviews every fixture at a larger text size.
         if let Some(scale) = std::env::var("GALLERY_TEXT_SCALE")
             .ok()
@@ -149,10 +153,13 @@ impl Gallery {
 
         let controls = container(
             row![
-                iced::widget::text("Design gallery").size(16),
+                iced::widget::text("Design gallery")
+                    .size(16)
+                    .font(unity_hub_ui::fonts::regular()),
                 space().width(Fill),
                 pick_list(names, Some(current), Message::Select)
                     .text_size(13.0)
+                    .font(unity_hub_ui::fonts::regular())
                     .width(280),
             ]
             .spacing(12)

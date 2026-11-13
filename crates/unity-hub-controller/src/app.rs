@@ -479,6 +479,10 @@ impl App {
         self.app_settings.text_size().scale()
     }
 
+    pub fn font_family(&self) -> &str {
+        &self.app_settings.font_family
+    }
+
     pub fn subscription(&self) -> Subscription<Message> {
         // Only wake the update loop while a job is streaming. An always-on
         // timer keeps the app awake for no reason and prevents the process from
@@ -936,6 +940,102 @@ impl App {
                 self.project_search = value;
                 Task::none()
             }
+            Message::AddProject => {
+                Task::perform(pick_project_folder(), Message::ProjectFolderPicked)
+            }
+            Message::ProjectFolderPicked(Some(path)) => {
+                let path = path.display().to_string();
+                self.notice = Some(Notice::info(format!("Adding {path}…")));
+                Task::perform(
+                    run_blocking({
+                        let cli = self.cli.clone();
+                        let path = path.clone();
+                        move || cli.add_project(&path)
+                    }),
+                    |result| Message::ProjectMutationDone(ProjectMutation::Added, result),
+                )
+            }
+            Message::ProjectFolderPicked(None) => Task::none(),
+            Message::OpenProjectRemove(path) => {
+                let Some(project) = self
+                    .projects
+                    .data
+                    .as_ref()
+                    .and_then(|projects| projects.iter().find(|project| project.path == path))
+                    .cloned()
+                else {
+                    return Task::none();
+                };
+                self.modal = Modal::RemoveProject(project);
+                Task::none()
+            }
+            Message::ConfirmProjectRemove => {
+                let Modal::RemoveProject(project) = &self.modal else {
+                    return Task::none();
+                };
+                let path = project.path.clone();
+                let title = project.title.clone();
+                self.modal = Modal::None;
+                self.notice = Some(Notice::info(format!("Removing {title} from the registry…")));
+                Task::perform(
+                    run_blocking({
+                        let cli = self.cli.clone();
+                        let path = path.clone();
+                        move || cli.remove_project(&path)
+                    }),
+                    move |result| {
+                        Message::ProjectMutationDone(
+                            ProjectMutation::Removed(title.clone()),
+                            result,
+                        )
+                    },
+                )
+            }
+            Message::ToggleProjectFavorite(path, favorite) => {
+                let Some(project) = self
+                    .projects
+                    .data
+                    .as_ref()
+                    .and_then(|projects| projects.iter().find(|project| project.path == path))
+                else {
+                    return Task::none();
+                };
+                let title = project.title.clone();
+                Task::perform(
+                    run_blocking({
+                        let cli = self.cli.clone();
+                        let path = path.clone();
+                        move || cli.set_project_pinned(&path, favorite)
+                    }),
+                    move |result| {
+                        Message::ProjectMutationDone(
+                            ProjectMutation::Pinned(title.clone(), favorite),
+                            result,
+                        )
+                    },
+                )
+            }
+            Message::ProjectMutationDone(mutation, result) => match result {
+                Ok(()) => {
+                    self.notice = Some(Notice::success(match mutation {
+                        ProjectMutation::Added => "Project added to the registry.".to_string(),
+                        ProjectMutation::Removed(title) => {
+                            format!("{title} removed from the registry.")
+                        }
+                        ProjectMutation::Pinned(title, true) => {
+                            format!("{title} marked as a favorite.")
+                        }
+                        ProjectMutation::Pinned(title, false) => {
+                            format!("{title} removed from favorites.")
+                        }
+                    }));
+                    self.load_projects_page(true)
+                }
+                Err(error) => {
+                    self.notice = Some(Notice::error(error_text(&error)));
+                    Task::none()
+                }
+            },
             Message::OpenProject(path) => {
                 let Some(project) = self
                     .projects
@@ -1083,6 +1183,7 @@ impl App {
                         Some(value.clone())
                     },
                     text_scale_percent: self.app_settings.text_scale_percent,
+                    font_family: self.app_settings.font_family.clone(),
                 };
                 if !value.is_empty() {
                     let path = PathBuf::from(&value);
@@ -1714,6 +1815,9 @@ impl App {
             format!("{config_dir}/settings.json")
         };
 
+        let font_family = self.app_settings.font_family.clone();
+        let font_options = settings::font_families();
+
         SettingsVm {
             resolved_executable,
             resolved_via,
@@ -1728,6 +1832,8 @@ impl App {
                 })
                 .collect(),
             text_scale_percent: self.app_settings.text_size().percent(),
+            font_options,
+            font_family,
             engine_info: self.engine_info(),
         }
     }
@@ -1801,6 +1907,10 @@ impl App {
                     can_upgrade: self.upgrade_confirmed && self.upgrade_target.is_some(),
                 }))
             }
+            Modal::RemoveProject(project) => Some(ModalVm::RemoveProject(RemoveProjectVm {
+                project_title: project.title.clone(),
+                project_path_short: short_path(&project.path, 60).into_owned(),
+            })),
         }
     }
 
@@ -1997,12 +2107,6 @@ fn project_row_vm(project: &Project, installed: &HashSet<&str>) -> ProjectRowVm 
             tone: Tone::Warning,
         });
     }
-    if project.is_favorite {
-        badges.push(BadgeVm {
-            label: "favorite".to_string(),
-            tone: Tone::Accent,
-        });
-    }
     if badges.is_empty() {
         badges.push(BadgeVm {
             label: "local project".to_string(),
@@ -2018,13 +2122,36 @@ fn project_row_vm(project: &Project, installed: &HashSet<&str>) -> ProjectRowVm 
             label: pipeline.clone(),
             tone: Tone::Highlight,
         }),
-        build_target: project
-            .build_target
-            .clone()
-            .unwrap_or_else(|| "—".to_string()),
-        short_path: short_path(&project.path, 42).into_owned(),
+        build_target: build_target_label(project.build_target.as_deref()),
+        short_path: short_path(&project.path, 30).into_owned(),
         modified: format_epoch_millis(project.last_modified),
+        is_favorite: project.is_favorite,
         badges,
+    }
+}
+
+fn build_target_label(target: Option<&str>) -> String {
+    let Some(target) = target.map(str::trim).filter(|target| !target.is_empty()) else {
+        return "—".to_string();
+    };
+
+    let lower = target.to_ascii_lowercase();
+    if lower.contains("windows") {
+        "Windows".to_string()
+    } else if lower.contains("linux") {
+        "Linux".to_string()
+    } else if lower.contains("osx") || lower.contains("macos") {
+        "macOS".to_string()
+    } else if lower.contains("android") {
+        "Android".to_string()
+    } else if lower == "ios" {
+        "iOS".to_string()
+    } else if lower.contains("webgl") {
+        "WebGL".to_string()
+    } else if lower.contains("tvos") {
+        "tvOS".to_string()
+    } else {
+        target.to_string()
     }
 }
 
@@ -2109,6 +2236,16 @@ fn load_projects(cli: UnityCli) -> Task<Message> {
         run_blocking(move || cli.projects()),
         Message::ProjectsLoaded,
     )
+}
+
+/// Opens the operating system's folder picker. `rfd` hands the work to the
+/// platform's native dialog, so the iced event loop stays responsive.
+async fn pick_project_folder() -> Option<PathBuf> {
+    rfd::AsyncFileDialog::new()
+        .set_title("Add an existing Unity project")
+        .pick_folder()
+        .await
+        .map(|handle| handle.path().to_path_buf())
 }
 
 async fn load_changelog_future(
@@ -2227,6 +2364,21 @@ mod tests {
             }
             other => panic!("unexpected page: {other:?}"),
         }
+    }
+
+    #[test]
+    fn favorite_projects_map_to_the_star_not_a_badge() {
+        let mut favorite = project("Alpha", "/games/alpha", "6000.1.1f1");
+        favorite.is_favorite = true;
+        let row = project_row_vm(&favorite, &HashSet::new());
+        assert!(row.is_favorite);
+        assert!(!row.badges.iter().any(|badge| badge.label == "favorite"));
+
+        let row = project_row_vm(
+            &project("Alpha", "/games/alpha", "6000.1.1f1"),
+            &HashSet::new(),
+        );
+        assert!(!row.is_favorite);
     }
 
     #[test]

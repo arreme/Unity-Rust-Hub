@@ -24,6 +24,7 @@ impl Runtime {
     }
 
     pub fn view(&self) -> Element<'_, Message> {
+        unity_hub_ui::fonts::set_family(self.app.font_family());
         unity_hub_ui::view(&self.view_model).map(Message::from)
     }
 

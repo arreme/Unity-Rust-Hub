@@ -62,6 +62,14 @@ pub fn icon_button<'a>(
     .style(kind.style())
 }
 
+/// A square button holding only an icon. Callers add `.on_press` and may
+/// override the padding for tighter rows.
+pub fn icon_only<'a>(glyph: char, kind: ButtonKind) -> Button<'a, UiAction> {
+    iced::widget::button(icon(glyph, font::ICON_SMALL))
+        .padding([8.0, 9.0])
+        .style(kind.style())
+}
+
 /// A row of pills where the selected option is filled.
 pub fn segmented<'a>(options: Vec<(String, bool, UiAction)>) -> Element<'a, UiAction> {
     container(
@@ -122,6 +130,21 @@ pub fn scroll<'a>(content: impl Into<Element<'a, UiAction>>) -> Scrollable<'a, U
                 .scroller_width(6)
                 .margin(2),
         ))
+        .style(theme::scrollable)
+}
+
+/// A horizontally scrolling viewport for tables that cannot fit their columns.
+pub fn scroll_horizontal<'a>(
+    content: impl Into<Element<'a, UiAction>>,
+) -> Scrollable<'a, UiAction> {
+    iced::widget::scrollable(content)
+        .direction(iced::widget::scrollable::Direction::Horizontal(
+            iced::widget::scrollable::Scrollbar::new()
+                .width(6)
+                .scroller_width(6)
+                .margin(2),
+        ))
+        .width(Fill)
         .style(theme::scrollable)
 }
 
@@ -246,7 +269,24 @@ pub fn cell<'a>(
     content: impl Into<Element<'a, UiAction>>,
     width: impl Into<Length>,
 ) -> Element<'a, UiAction> {
-    container(content.into()).width(width).into()
+    container(content.into())
+        .width(width)
+        .align_y(iced::Alignment::Center)
+        .clip(true)
+        .into()
+}
+
+/// A table cell whose content is centered in both axes (module tags).
+pub fn cell_centered<'a>(
+    content: impl Into<Element<'a, UiAction>>,
+    width: impl Into<Length>,
+) -> Element<'a, UiAction> {
+    container(content.into())
+        .width(width)
+        .align_x(iced::Alignment::Center)
+        .align_y(iced::Alignment::Center)
+        .clip(true)
+        .into()
 }
 
 /// A titled group of settings-style rows inside one card.

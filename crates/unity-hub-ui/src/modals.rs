@@ -2,7 +2,8 @@ use iced::widget::{column, container, pick_list, row, space};
 use iced::{Center, Element, Fill};
 
 use unity_hub_model::{
-    EditorModulesVm, InstallCliVm, ModalVm, ModuleOptionVm, Tone, UiAction, UpgradeProjectVm,
+    EditorModulesVm, InstallCliVm, ModalVm, ModuleOptionVm, RemoveProjectVm, Tone, UiAction,
+    UpgradeProjectVm,
 };
 
 use crate::components::{
@@ -22,6 +23,7 @@ pub fn view(modal: &ModalVm) -> Element<'_, UiAction> {
         ModalVm::InstallCli(vm) => install_cli_modal(vm),
         ModalVm::EditorModules(vm) => editor_modules_modal(vm),
         ModalVm::UpgradeProject(vm) => upgrade_modal(vm),
+        ModalVm::RemoveProject(vm) => remove_project_modal(vm),
     };
 
     container(iced::widget::center(card).padding(24))
@@ -224,7 +226,9 @@ fn module_checkbox(module: &ModuleOptionVm) -> Element<'static, UiAction> {
 fn version_cell<'a>(label: &'a str, version: String, end: bool) -> Element<'a, UiAction> {
     let content = column![
         caption(label),
-        text(version).size(font::BODY_LARGE + 1.0).font(fonts::mono()),
+        text(version)
+            .size(font::BODY_LARGE + 1.0)
+            .font(fonts::mono()),
     ]
     .spacing(4);
 
@@ -307,6 +311,34 @@ fn upgrade_modal(vm: &UpgradeProjectVm) -> Element<'_, UiAction> {
 
     dialog(
         "Change Editor version",
+        vm.project_title.as_str(),
+        body.into(),
+        actions.into(),
+    )
+}
+
+fn remove_project_modal(vm: &RemoveProjectVm) -> Element<'_, UiAction> {
+    let body = column![
+        mono(vm.project_path_short.as_str()),
+        notice(
+            Tone::Warning,
+            icons::TRIANGLE_ALERT,
+            text("This removes the project from the Unity Hub registry. Files on disk are not deleted.")
+                .size(font::BODY)
+                .line_height(1.55)
+                .style(theme::muted_text),
+        ),
+    ]
+    .spacing(20);
+
+    let actions = row![
+        button("Cancel", ButtonKind::Ghost).on_press(UiAction::CloseModal),
+        button("Remove project", ButtonKind::Danger).on_press(UiAction::ConfirmProjectRemove),
+    ]
+    .spacing(8);
+
+    dialog(
+        "Remove project",
         vm.project_title.as_str(),
         body.into(),
         actions.into(),

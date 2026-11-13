@@ -1,16 +1,17 @@
-use iced::widget::{column, container, row};
-use iced::{Center, Element, Fill};
+use iced::widget::{column, container, pick_list, row};
+use iced::{Center, Element, Fill, Length};
 
 use unity_hub_model::{SettingsVm, Tone, UiAction};
 
 use crate::components::{
     badge, button, group, hint, list_row, mono, page_header, segmented, setting_row, text_input,
-    ButtonKind,
+    ButtonKind, PICK_LIST_PADDING,
 };
+use crate::fonts;
 use crate::icons;
 use crate::theme;
 use crate::tokens::{font, spacing};
-use crate::ui::text;
+use crate::ui::{self, text};
 
 const MAX_WIDTH: f32 = 860.0;
 
@@ -106,6 +107,11 @@ fn appearance_group(vm: &SettingsVm) -> Element<'_, UiAction> {
         "Appearance",
         vec![
             setting_row(
+                "Font",
+                Some("Uses the font families installed on this PC."),
+                font_picker(vm),
+            ),
+            setting_row(
                 "Text size",
                 Some("Scales text only; controls keep their size."),
                 segmented(sizes),
@@ -119,6 +125,22 @@ fn appearance_group(vm: &SettingsVm) -> Element<'_, UiAction> {
     )
 }
 
+fn font_picker(vm: &SettingsVm) -> Element<'_, UiAction> {
+    pick_list(
+        vm.font_options.clone(),
+        Some(vm.font_family.clone()),
+        UiAction::FontFamilyChanged,
+    )
+    .text_size(ui::font_size(font::BODY))
+    .font(fonts::regular())
+    .padding(PICK_LIST_PADDING)
+    .handle(icons::pick_list_handle(font::ICON_SMALL))
+    .style(theme::pick_list)
+    .menu_style(theme::menu)
+    .width(Length::Fixed(ui::scaled_pixels(240.0)))
+    .into()
+}
+
 fn app_data_group(vm: &SettingsVm) -> Element<'_, UiAction> {
     group(
         "App data",
@@ -126,7 +148,7 @@ fn app_data_group(vm: &SettingsVm) -> Element<'_, UiAction> {
             setting_row("Config directory", None, mono(vm.config_dir.as_str())),
             setting_row("Settings file", None, mono(vm.settings_file.as_str())),
             list_row(hint(
-                "Only the optional CLI path and the text size are stored. Credentials and account state stay in the CLI and the OS keyring.",
+                "Only the optional CLI path, the text size, and the font are stored. Credentials and account state stay in the CLI and the OS keyring.",
             )),
         ],
     )

@@ -73,13 +73,15 @@ update target.
   explicitly, then install with live NDJSON progress and a cancellable raw log.
 - **Modules** — add modules to an installed Editor with `install-modules`.
 - **Projects** — every project in the Hub registry, its Editor version, render pipeline,
-  build target, cloud/VCS badges, an Open action, and a guarded upgrade dialog.
+  build target, cloud/VCS badges, an Open action, a guarded upgrade dialog, an Add project
+  folder picker, a Remove confirmation, and a favorite star backed by `projects pin`.
 - **Changelog** — `unity changelog` rendered as sections with readable bullet points and
   a focused heuristic for **possible breaking changes**, plus a raw Markdown view.
 - **Provider-ready changelog** — `ChangelogProvider` is a trait; v1 uses
   `CliChangelogProvider`. A remote JSON/docs feed can be added without changing the UI.
-- **Settings** — explicit CLI path override with auto-detection fallback and a persisted
-  text-size setting (100%, 110%, 125%, 150%).
+- **Settings** — explicit CLI path override with auto-detection fallback, a persisted
+  text-size setting (100%, 110%, 125%, 150%), and a persisted font family chosen from the
+  fonts installed on the PC (default Tahoma).
 
 ## Stack
 
@@ -105,7 +107,7 @@ crates/unity-hub-model/     Stable presentation contract: view models, UiAction,
 crates/unity-hub-controller/ State, messages, update loop, jobs, settings, and
   src/app.rs                domain/CLI → view-model mapping.
   src/jobs.rs               Child processes, NDJSON progress, cancellation.
-  src/settings.rs           Persisted CLI path and text-size preference.
+  src/settings.rs           Persisted CLI path, text-size, and font preferences.
   src/util.rs               Serialized reader worker and display formatting.
 crates/unity-hub-ui/        Visual layer; depends only on unity-hub-model + iced.
   src/tokens.rs             Figma-mappable palette, spacing, radii, type tokens.

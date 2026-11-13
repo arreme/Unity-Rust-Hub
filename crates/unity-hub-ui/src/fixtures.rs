@@ -8,8 +8,8 @@ use unity_hub_model::{
     ChangelogVm, CliCardVm, CliConnectionVm, CliDetailsVm, EditorModulesVm, EditorRowVm, EditorsVm,
     InstallCliVm, InstallEditorVm, JobPhase, JobVm, LicenseRowVm, LicenseVm, LoadState, ModalVm,
     ModuleOptionVm, OverviewVm, Page, PageVm, ProjectRowVm, ProjectsVm, ReleaseRowVm,
-    RunningEditorVm, SectionKind, SettingsVm, ShellVm, TextScaleOptionVm, Tone, UiError, UpdateVm,
-    UpgradeProjectVm, ViewModel,
+    RemoveProjectVm, RunningEditorVm, SectionKind, SettingsVm, ShellVm, TextScaleOptionVm, Tone,
+    UiError, UpdateVm, UpgradeProjectVm, ViewModel,
 };
 
 pub struct Fixture {
@@ -58,6 +58,10 @@ pub fn all() -> Vec<Fixture> {
         Fixture {
             name: "Modal · project upgrade",
             view_model: upgrade_modal(),
+        },
+        Fixture {
+            name: "Modal · remove project",
+            view_model: remove_modal(),
         },
         Fixture {
             name: "Job · running",
@@ -222,6 +226,16 @@ fn editors() -> ViewModel {
                     is_default: false,
                     modules: Vec::new(),
                 },
+                EditorRowVm {
+                    version: "6000.3.15f1".to_string(),
+                    architecture: "x86_64".to_string(),
+                    is_default: false,
+                    modules: vec![
+                        "Android Build Support".to_string(),
+                        "Android SDK & NDK Tools".to_string(),
+                        "Documentation".to_string(),
+                    ],
+                },
             ]),
             install: InstallEditorVm {
                 version_input: "lts".to_string(),
@@ -267,8 +281,8 @@ fn projects() -> ViewModel {
         Page::Projects,
         PageVm::Projects(ProjectsVm {
             search: String::new(),
-            total_count: 2,
-            visible_count: 2,
+            total_count: 3,
+            visible_count: 3,
             projects: LoadState::Ready(vec![
                 ProjectRowVm {
                     path: "/home/ada/Games/Orbital".to_string(),
@@ -281,16 +295,11 @@ fn projects() -> ViewModel {
                     build_target: "Linux".to_string(),
                     short_path: "…/Games/Orbital".to_string(),
                     modified: "Oct 31, 2026".to_string(),
-                    badges: vec![
-                        BadgeVm {
-                            label: "Unity Cloud".to_string(),
-                            tone: Tone::Info,
-                        },
-                        BadgeVm {
-                            label: "favorite".to_string(),
-                            tone: Tone::Accent,
-                        },
-                    ],
+                    is_favorite: true,
+                    badges: vec![BadgeVm {
+                        label: "Unity Cloud".to_string(),
+                        tone: Tone::Info,
+                    }],
                 },
                 ProjectRowVm {
                     path: "/home/ada/Tools/LevelKit".to_string(),
@@ -300,10 +309,35 @@ fn projects() -> ViewModel {
                     build_target: "—".to_string(),
                     short_path: "…/Tools/LevelKit".to_string(),
                     modified: "Sep 12, 2026".to_string(),
+                    is_favorite: false,
                     badges: vec![BadgeVm {
                         label: "Editor not installed".to_string(),
                         tone: Tone::Warning,
                     }],
+                },
+                ProjectRowVm {
+                    path: "C:\\Users\\ada\\DustGames\\GitProjects\\RoomBattleMultiplayer"
+                        .to_string(),
+                    title: "RoomBattleMultiplayer".to_string(),
+                    version: "6000.0.61f1".to_string(),
+                    pipeline: Some(BadgeVm {
+                        label: "URP".to_string(),
+                        tone: Tone::Highlight,
+                    }),
+                    build_target: "Windows".to_string(),
+                    short_path: "…\\RoomBattleMultiplayer".to_string(),
+                    modified: "Dec 4, 2026".to_string(),
+                    is_favorite: false,
+                    badges: vec![
+                        BadgeVm {
+                            label: "Unity Cloud".to_string(),
+                            tone: Tone::Info,
+                        },
+                        BadgeVm {
+                            label: "github".to_string(),
+                            tone: Tone::Neutral,
+                        },
+                    ],
                 },
             ]),
         }),
@@ -378,6 +412,13 @@ fn settings() -> ViewModel {
                 },
             ],
             text_scale_percent: 100,
+            font_options: vec![
+                "Consolas".to_string(),
+                "Segoe UI".to_string(),
+                "Tahoma".to_string(),
+            ]
+            .into(),
+            font_family: "Tahoma".to_string(),
             engine_info: "1.0.0 · stable · linux/x86_64".to_string(),
         }),
     )
@@ -433,6 +474,15 @@ fn upgrade_modal() -> ViewModel {
         selected_target: Some("6000.3.0f1".to_string()),
         confirmed: false,
         can_upgrade: false,
+    }));
+    vm
+}
+
+fn remove_modal() -> ViewModel {
+    let mut vm = projects();
+    vm.modal = Some(ModalVm::RemoveProject(RemoveProjectVm {
+        project_title: "Orbital".to_string(),
+        project_path_short: "…/Games/Orbital".to_string(),
     }));
     vm
 }

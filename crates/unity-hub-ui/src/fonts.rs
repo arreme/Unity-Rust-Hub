@@ -36,7 +36,7 @@ pub fn set_family(name: &str) {
     FAMILY.with(|family| {
         let changed = family
             .get()
-            .map_or(true, |current| !current.eq_ignore_ascii_case(name));
+            .is_none_or(|current| !current.eq_ignore_ascii_case(name));
 
         if changed {
             family.set(Some(Box::leak(name.to_string().into_boxed_str())));

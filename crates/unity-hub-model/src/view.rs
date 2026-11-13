@@ -402,7 +402,7 @@ pub struct SettingsVm {
     pub settings_file: String,
     pub text_scale_options: Vec<TextScaleOptionVm>,
     pub text_scale_percent: u16,
-    pub font_options: Vec<String>,
+    pub font_options: Arc<[String]>,
     pub font_family: String,
     pub engine_info: String,
 }
