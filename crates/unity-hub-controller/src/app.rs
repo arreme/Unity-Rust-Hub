@@ -17,8 +17,8 @@ use unity_hub_model::{
     ChangelogVm, CliCardVm, CliConnectionVm, CliDetailsVm, EditorModulesVm, EditorRowVm, EditorsVm,
     InstallCliVm, InstallEditorVm, InstallPreviewVm, JobPhase, JobVm, LicenseRowVm, LicenseVm,
     LoadState, ModalVm, ModuleOptionVm, NoticeVm, OverviewVm, Page, PageVm, ProjectRowVm,
-    ProjectsVm, ReleaseRowVm, RunningEditorVm, SectionKind, SettingsVm, ShellVm, TextScaleOptionVm,
-    Tone, UiAction, UiError, UpdateVm, UpgradeProjectVm, ViewModel,
+    ProjectsVm, ReleaseRowVm, RemoveProjectVm, RunningEditorVm, SectionKind, SettingsVm, ShellVm,
+    TextScaleOptionVm, Tone, UiAction, UiError, UpdateVm, UpgradeProjectVm, ViewModel,
 };
 
 use crate::jobs::{JobManager, JobStarted, JobState, StreamKind};
@@ -33,6 +33,14 @@ pub enum Modal {
     InstallCli,
     EditorModules(Editor),
     UpgradeProject(Project),
+    RemoveProject(Project),
+}
+
+#[derive(Debug, Clone)]
+pub enum ProjectMutation {
+    Added,
+    Removed(String),
+    Pinned(String, bool),
 }
 
 #[derive(Debug, Clone)]
@@ -105,6 +113,35 @@ fn project_matches_fallback(project: &Project, needle: &str) -> bool {
     project.title.to_lowercase().contains(needle)
         || project.path.to_lowercase().contains(needle)
         || project.version.to_lowercase().contains(needle)
+}
+
+/// The CLI's resident sign-in broker serves one session to every command. On
+/// Linux that is what keeps a locked Secret Service collection from showing an
+/// unlock prompt once per command. `UNITY_NO_AUTH_BROKER` turns it off, in
+/// which case there is nothing for the app to start.
+fn needs_auth_broker() -> bool {
+    cfg!(target_os = "linux") && std::env::var_os("UNITY_NO_AUTH_BROKER").is_none()
+}
+
+fn auth_broker_hint(error: &UnityError) -> String {
+    format!(
+        "The Unity CLI could not start its sign-in service, so each command may ask to unlock the system keyring. {}",
+        error_text(error).replace('\n', " ")
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn broker_env_notice() -> Option<Notice> {
+    std::env::var_os("UNITY_NO_AUTH_BROKER").map(|_| {
+        Notice::info(
+            "UNITY_NO_AUTH_BROKER is set, so every Unity CLI command reads the system keyring directly and may ask to unlock it repeatedly. Unset it to let the CLI share one sign-in session.",
+        )
+    })
+}
+
+#[cfg(not(target_os = "linux"))]
+fn broker_env_notice() -> Option<Notice> {
+    None
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -268,6 +305,7 @@ pub enum Message {
     DismissNotice,
     SignIn,
     TextSizeChanged(TextSize),
+    FontFamilyChanged(String),
     OpenInstallCli,
     CliChannelChanged(String),
     CliConsentToggled(bool),
@@ -287,6 +325,11 @@ pub enum Message {
     DialogEulaToggled(bool),
     StartInstallModules,
     ProjectSearchChanged(String),
+    AddProject,
+    ProjectFolderPicked(Option<PathBuf>),
+    OpenProjectRemove(String),
+    ConfirmProjectRemove,
+    ToggleProjectFavorite(String, bool),
     OpenProject(String),
     OpenUpgrade(String),
     UpgradeTargetChanged(String),
@@ -315,6 +358,10 @@ pub enum Message {
     RawChangelogLoaded(Result<String, UnityError>),
     PollJobs,
     ProjectOpened(Result<(), UnityError>),
+    /// The Linux sign-in broker was started (or failed to start) before the
+    /// first credential-reading batch.
+    AuthBrokerEnsured(Result<(), UnityError>),
+    ProjectMutationDone(ProjectMutation, Result<(), UnityError>),
 }
 
 impl From<UiAction> for Message {
@@ -329,6 +376,7 @@ impl From<UiAction> for Message {
             UiAction::TextScaleChanged(percent) => {
                 Self::TextSizeChanged(TextSize::from_percent(percent))
             }
+            UiAction::FontFamilyChanged(family) => Self::FontFamilyChanged(family),
             UiAction::OpenInstallCli => Self::OpenInstallCli,
             UiAction::CliChannelChanged(channel) => Self::CliChannelChanged(channel),
             UiAction::CliConsentToggled(value) => Self::CliConsentToggled(value),
@@ -348,6 +396,12 @@ impl From<UiAction> for Message {
             UiAction::DialogEulaToggled(value) => Self::DialogEulaToggled(value),
             UiAction::StartInstallModules => Self::StartInstallModules,
             UiAction::ProjectSearchChanged(value) => Self::ProjectSearchChanged(value),
+            UiAction::AddProject => Self::AddProject,
+            UiAction::OpenProjectRemove(path) => Self::OpenProjectRemove(path),
+            UiAction::ConfirmProjectRemove => Self::ConfirmProjectRemove,
+            UiAction::ToggleProjectFavorite(path, favorite) => {
+                Self::ToggleProjectFavorite(path, favorite)
+            }
             UiAction::OpenProject(path) => Self::OpenProject(path),
             UiAction::OpenProjectUpgrade(path) => Self::OpenUpgrade(path),
             UiAction::UpgradeTargetChanged(version) => Self::UpgradeTargetChanged(version),
@@ -412,7 +466,7 @@ impl App {
             app_settings,
             config_dir: settings::config_dir().map(|path| path.display().to_string()),
             active_job: None,
-            notice: None,
+            notice: broker_env_notice(),
             boot_background_started: false,
         };
 
@@ -494,12 +548,39 @@ impl App {
                     Task::none()
                 } else {
                     self.boot_background_started = true;
-                    if installed {
+                    if !installed {
+                        // Without a CLI there is nothing to read.
+                        Task::none()
+                    } else if !needs_auth_broker() {
                         self.load_overview_data(false)
                     } else {
-                        Task::none()
+                        // Start the sign-in broker before the Overview batch so
+                        // its credential reads share one session instead of
+                        // asking to unlock the keyring once per command.
+                        Task::perform(
+                            run_blocking({
+                                let cli = self.cli.clone();
+                                move || cli.ensure_auth_broker()
+                            }),
+                            Message::AuthBrokerEnsured,
+                        )
                     }
                 }
+            }
+            Message::AuthBrokerEnsured(result) => {
+                if let Err(error) = &result {
+                    if matches!(
+                        error.code.as_str(),
+                        "AUTH_BROKER_UNAVAILABLE"
+                            | "AUTH_BROKER_REFUSED"
+                            | "CREDENTIAL_STORE_ACCESS_DENIED"
+                    ) {
+                        self.notice = Some(Notice::error(auth_broker_hint(error)));
+                    }
+                }
+                // A missing broker only means each read may prompt again; the
+                // Overview is still worth loading.
+                self.load_overview_data(false)
             }
             Message::UpdateLoaded(result) => {
                 match result {
@@ -638,6 +719,26 @@ impl App {
                 match settings::save(&self.app_settings) {
                     Ok(()) => {
                         self.notice = Some(Notice::success(format!("Text size set to {size}.")));
+                    }
+                    Err(error) => {
+                        self.notice = Some(Notice::error(error_text(&error)));
+                    }
+                }
+                Task::none()
+            }
+            Message::FontFamilyChanged(family) => {
+                let family = family.trim();
+                self.app_settings.font_family = if family.is_empty() {
+                    settings::default_font_family()
+                } else {
+                    family.to_string()
+                };
+                match settings::save(&self.app_settings) {
+                    Ok(()) => {
+                        self.notice = Some(Notice::success(format!(
+                            "Font set to {}.",
+                            self.app_settings.font_family
+                        )));
                     }
                     Err(error) => {
                         self.notice = Some(Notice::error(error_text(&error)));
@@ -846,10 +947,19 @@ impl App {
                 };
                 let title = project.title.clone();
                 self.notice = Some(Notice::info(format!("Opening {title}…")));
+                let ensure_broker = needs_auth_broker();
                 Task::perform(
                     run_blocking({
                         let cli = self.cli.clone();
-                        move || cli.open_project(&path)
+                        move || {
+                            if ensure_broker {
+                                // Best effort: `open` is the command that
+                                // needs the session most, and its own error
+                                // describes a real launch failure better.
+                                let _ = cli.ensure_auth_broker();
+                            }
+                            cli.open_project(&path)
+                        }
                     }),
                     Message::ProjectOpened,
                 )

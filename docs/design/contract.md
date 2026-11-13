@@ -134,6 +134,12 @@ fixture when a new state needs review.
   CLI child must be spawned through `unity_core::process::hidden`. Otherwise
   Windows creates a console window per invocation, and a page's read batch
   flashes a terminal on each tab open/switch.
+- Linux: CLI commands read the stored sign-in through the CLI's resident auth
+  broker; without it each command reads the Secret Service keyring itself and a
+  locked keyring asks to unlock once per command. The app runs
+  `unity auth broker ensure` before its first credential read and before
+  `unity open`. `UNITY_NO_AUTH_BROKER` disables that sharing, so it is surfaced
+  as a notice.
 
 ## Design gallery
 

@@ -138,7 +138,7 @@ fn cli_details(details: &CliDetailsVm) -> Element<'_, UiAction> {
     column![
         text(details.version.as_str())
             .size(font::DISPLAY)
-            .font(fonts::SEMIBOLD),
+            .font(fonts::semibold()),
         row![
             detail_column("Platform", details.platform.as_str()),
             detail_column("Runtime", details.runtime.as_str()),
@@ -183,13 +183,13 @@ fn update_callout(update: &UpdateVm) -> Element<'static, UiAction> {
             column![
                 text("A newer CLI is available.")
                     .size(font::BODY_LARGE)
-                    .font(fonts::MEDIUM),
+                    .font(fonts::medium()),
                 text(format!(
                     "{} → {}",
                     update.current_version, update.latest_version
                 ))
                 .size(font::MONO)
-                .font(fonts::MONO)
+                .font(fonts::mono())
                 .style(theme::muted_text),
             ]
             .spacing(3)
@@ -210,7 +210,7 @@ fn install_callout() -> Element<'static, UiAction> {
             column![
                 text("The Unity CLI is not installed.")
                     .size(font::BODY_LARGE)
-                    .font(fonts::MEDIUM),
+                    .font(fonts::medium()),
                 text("This app is a native GUI over the official unity binary. Install it to manage Editors, projects, and release notes.")
                     .size(font::BODY)
                     .style(theme::muted_text),
@@ -238,7 +238,7 @@ fn avatar(name: &str) -> Element<'static, UiAction> {
     } else {
         text(initials)
             .size(font::BODY_LARGE)
-            .font(fonts::SEMIBOLD)
+            .font(fonts::semibold())
             .into()
     };
 
@@ -265,7 +265,7 @@ fn account_card(account: &AccountCardVm) -> Element<'_, UiAction> {
                     column![
                         text(name.as_str())
                             .size(font::BODY_LARGE)
-                            .font(fonts::MEDIUM),
+                            .font(fonts::medium()),
                         text(email.as_str())
                             .size(font::SMALL)
                             .style(theme::faint_text),
@@ -347,7 +347,7 @@ fn account_card(account: &AccountCardVm) -> Element<'_, UiAction> {
                         row![
                             text(license.product.as_str())
                                 .size(font::BODY_LARGE)
-                                .font(fonts::MEDIUM)
+                                .font(fonts::medium())
                                 .width(Fill),
                             badge(license.kind.clone(), Tone::Neutral),
                         ]
@@ -381,7 +381,7 @@ fn running_row(instance: &RunningEditorVm) -> Element<'_, UiAction> {
     let mut details = row![column![
         text(project_name(&instance.project_path))
             .size(font::BODY_LARGE)
-            .font(fonts::MEDIUM),
+            .font(fonts::medium()),
         mono(format!(
             "{} · {} · pid {}",
             instance.project_path, instance.editor_version, instance.pid
@@ -432,7 +432,7 @@ fn running_card(running: &LoadState<Vec<RunningEditorVm>>) -> Element<'_, UiActi
                 column![
                     text("No Editor running.")
                         .size(font::BODY_LARGE)
-                        .font(fonts::MEDIUM),
+                        .font(fonts::medium()),
                     hint("Open a project with the Pipeline package to see live Editors here."),
                 ]
                 .spacing(2),

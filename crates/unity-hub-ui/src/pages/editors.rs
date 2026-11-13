@@ -39,7 +39,7 @@ pub fn view(vm: &EditorsVm) -> Element<'_, UiAction> {
 fn editor_row(editor: &EditorRowVm) -> Element<'_, UiAction> {
     let mut version = column![text(editor.version.as_str())
         .size(font::ROW_TITLE)
-        .font(fonts::SEMIBOLD)]
+        .font(fonts::semibold())]
     .spacing(4);
     if editor.is_default {
         version = version.push(
@@ -249,7 +249,7 @@ fn release_row(release: &ReleaseRowVm) -> Element<'_, UiAction> {
         row![
             text(release.version.as_str())
                 .size(font::BODY_LARGE)
-                .font(fonts::MEDIUM)
+                .font(fonts::medium())
                 .width(Fill),
             badge(release.stream.clone(), release.stream_tone),
             container(action).width(84).align_right(84),

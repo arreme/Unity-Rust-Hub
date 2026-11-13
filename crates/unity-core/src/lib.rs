@@ -11,6 +11,7 @@ pub mod errors;
 pub mod models;
 pub mod process;
 pub mod runner;
+pub mod trace;
 pub mod versions;
 
 pub use errors::UnityError;

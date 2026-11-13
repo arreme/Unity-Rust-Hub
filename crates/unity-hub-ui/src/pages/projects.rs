@@ -108,7 +108,7 @@ fn project_row(project: &ProjectRowVm) -> Element<'_, UiAction> {
     let mut details = column![
         text(project.title.as_str())
             .size(font::BODY_LARGE)
-            .font(fonts::SEMIBOLD),
+            .font(fonts::semibold()),
         mono(project.short_path.as_str()),
     ]
     .spacing(3);
@@ -149,7 +149,7 @@ fn project_row(project: &ProjectRowVm) -> Element<'_, UiAction> {
         name.into(),
         text(project.version.as_str())
             .size(font::MONO)
-            .font(fonts::MONO)
+            .font(fonts::mono())
             .into(),
         pipeline,
         target,

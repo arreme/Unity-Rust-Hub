@@ -125,6 +125,8 @@ impl JobManager {
             }
         })?;
 
+        unity_core::trace::record("job", &spec.display(), Duration::ZERO, None);
+
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
         let child = Arc::new(Mutex::new(child));

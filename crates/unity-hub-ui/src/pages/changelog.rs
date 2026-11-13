@@ -92,7 +92,7 @@ fn changelog_body(vm: &ChangelogVm) -> Element<'_, UiAction> {
             column![
                 text(format!("Unity CLI {}", data.version))
                     .size(font::MODAL_TITLE)
-                    .font(fonts::SEMIBOLD),
+                    .font(fonts::semibold()),
                 hint(data.source_detail.as_str()),
             ]
             .spacing(3)
@@ -164,7 +164,7 @@ fn changelog_body(vm: &ChangelogVm) -> Element<'_, UiAction> {
             scroll(
                 text(markdown.as_str())
                     .size(font::MONO)
-                    .font(fonts::MONO)
+                    .font(fonts::mono())
                     .line_height(1.55)
                     .style(theme::muted_text),
             )
@@ -195,7 +195,7 @@ fn breaking_changes(data: &ChangelogDataVm) -> Element<'_, UiAction> {
             column![
                 text("No likely breaking changes detected.")
                     .size(font::BODY_LARGE)
-                    .font(fonts::MEDIUM),
+                    .font(fonts::medium()),
                 text("This is a text heuristic, not a guarantee. Read the Changed and Removed sections before updating.")
                     .size(font::BODY)
                     .style(theme::muted_text),
@@ -213,7 +213,7 @@ fn breaking_changes(data: &ChangelogDataVm) -> Element<'_, UiAction> {
                     row![
                         text(format!("{:02}", index + 1))
                             .size(font::MONO)
-                            .font(fonts::MONO)
+                            .font(fonts::mono())
                             .style(theme::faint_text)
                             .width(28),
                         column![

@@ -159,6 +159,7 @@ pub enum ModalVm {
     InstallCli(InstallCliVm),
     EditorModules(EditorModulesVm),
     UpgradeProject(UpgradeProjectVm),
+    RemoveProject(RemoveProjectVm),
 }
 
 #[derive(Debug, Clone)]
@@ -338,6 +339,7 @@ pub struct ProjectRowVm {
     pub build_target: String,
     pub short_path: String,
     pub modified: String,
+    pub is_favorite: bool,
     pub badges: Vec<BadgeVm>,
 }
 
@@ -400,6 +402,8 @@ pub struct SettingsVm {
     pub settings_file: String,
     pub text_scale_options: Vec<TextScaleOptionVm>,
     pub text_scale_percent: u16,
+    pub font_options: Vec<String>,
+    pub font_family: String,
     pub engine_info: String,
 }
 
@@ -446,4 +450,10 @@ pub struct UpgradeProjectVm {
     pub selected_target: Option<String>,
     pub confirmed: bool,
     pub can_upgrade: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct RemoveProjectVm {
+    pub project_title: String,
+    pub project_path_short: String,
 }

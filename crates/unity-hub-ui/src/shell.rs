@@ -62,7 +62,7 @@ fn sidebar(vm: &ViewModel) -> Element<'_, UiAction> {
         column![
             text("Unity Rust Hub")
                 .size(font::BODY_LARGE)
-                .font(fonts::SEMIBOLD),
+                .font(fonts::semibold()),
             text(concat!("v", env!("CARGO_PKG_VERSION")))
                 .size(font::SMALL)
                 .style(theme::faint_text),
@@ -78,11 +78,9 @@ fn sidebar(vm: &ViewModel) -> Element<'_, UiAction> {
         button(
             row![
                 icon(page_icon(page), font::ICON),
-                text(page_label(page)).size(font::BODY).font(if active {
-                    fonts::MEDIUM
-                } else {
-                    fonts::SANS
-                }),
+                text(page_label(page))
+                    .size(font::BODY)
+                    .font(fonts::regular()),
             ]
             .spacing(12)
             .align_y(Center),
@@ -119,10 +117,10 @@ fn sidebar(vm: &ViewModel) -> Element<'_, UiAction> {
         row![
             status_dot(tone),
             column![
-                text(status).size(font::SMALL).font(fonts::MEDIUM),
+                text(status).size(font::SMALL).font(fonts::medium()),
                 text(version)
                     .size(font::CAPTION)
-                    .font(fonts::MONO)
+                    .font(fonts::mono())
                     .style(theme::faint_text),
             ]
             .spacing(1),
@@ -208,10 +206,10 @@ fn job_view(job: &JobVm) -> Element<'_, UiAction> {
         column![
             text(job.kind.as_str())
                 .size(font::CARD_TITLE)
-                .font(fonts::SEMIBOLD),
+                .font(fonts::semibold()),
             text(job.command.as_str())
                 .size(font::MONO)
-                .font(fonts::MONO)
+                .font(fonts::mono())
                 .style(theme::faint_text),
         ]
         .spacing(2)
@@ -233,7 +231,7 @@ fn job_view(job: &JobVm) -> Element<'_, UiAction> {
                     .style(theme::progress_bar),
                 text(format!("{:.0}%", job.progress))
                     .size(font::SMALL)
-                    .font(fonts::MONO)
+                    .font(fonts::mono())
                     .style(theme::muted_text),
             ]
             .spacing(12)
@@ -259,7 +257,7 @@ fn job_view(job: &JobVm) -> Element<'_, UiAction> {
                 scroll(
                     text(job.logs.as_ref())
                         .size(font::MONO)
-                        .font(fonts::MONO)
+                        .font(fonts::mono())
                         .line_height(1.55)
                         .style(theme::muted_text),
                 )

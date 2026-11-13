@@ -1,11 +1,16 @@
 use std::fmt;
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
 use unity_core::UnityError;
 
 const fn default_text_scale_percent() -> u16 {
     100
+}
+
+pub fn default_font_family() -> String {
+    "Tahoma".to_string()
 }
 
 /// A text-size preset persisted as a percentage.
@@ -55,6 +60,8 @@ pub struct AppSettings {
     pub cli_path: Option<String>,
     #[serde(default = "default_text_scale_percent")]
     pub text_scale_percent: u16,
+    #[serde(default = "default_font_family")]
+    pub font_family: String,
 }
 
 impl Default for AppSettings {
@@ -62,6 +69,7 @@ impl Default for AppSettings {
         Self {
             cli_path: None,
             text_scale_percent: default_text_scale_percent(),
+            font_family: default_font_family(),
         }
     }
 }
@@ -73,8 +81,44 @@ impl AppSettings {
 
     pub fn normalized(mut self) -> Self {
         self.text_scale_percent = normalize_text_scale_percent(self.text_scale_percent);
+        self.font_family = normalize_font_family(&self.font_family);
         self
     }
+}
+
+fn normalize_font_family(value: &str) -> String {
+    let value = value.trim();
+    if value.is_empty() {
+        default_font_family()
+    } else {
+        value.to_string()
+    }
+}
+
+/// Family names installed on this PC, sorted for a stable pick list.
+///
+/// iced resolves a `Font::with_name` family against the same operating-system
+/// font database, so a name listed here is a font the app can actually draw.
+pub fn font_families() -> Vec<String> {
+    static FAMILIES: OnceLock<Vec<String>> = OnceLock::new();
+
+    FAMILIES
+        .get_or_init(|| {
+            let mut database = fontdb::Database::new();
+            database.load_system_fonts();
+
+            let mut names: Vec<String> = database
+                .faces()
+                .flat_map(|face| face.families.iter())
+                .map(|(name, _)| name.trim().to_string())
+                .filter(|name| !name.is_empty())
+                .collect();
+
+            names.sort_by_key(|name| name.to_lowercase());
+            names.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
+            names
+        })
+        .clone()
 }
 
 pub fn config_dir() -> Option<PathBuf> {

@@ -40,7 +40,7 @@ impl ButtonKind {
 }
 
 pub fn button<'a>(label: impl IntoFragment<'a>, kind: ButtonKind) -> Button<'a, UiAction> {
-    iced::widget::button(text(label).size(font::BUTTON).font(fonts::MEDIUM))
+    iced::widget::button(text(label).size(font::BUTTON).font(fonts::medium()))
         .padding([11.0, 18.0])
         .style(kind.style())
 }
@@ -53,7 +53,7 @@ pub fn icon_button<'a>(
     iced::widget::button(
         row![
             icon(glyph, font::ICON_SMALL),
-            text(label).size(font::BUTTON).font(fonts::MEDIUM),
+            text(label).size(font::BUTTON).font(fonts::medium()),
         ]
         .spacing(8)
         .align_y(Center),
@@ -68,7 +68,7 @@ pub fn segmented<'a>(options: Vec<(String, bool, UiAction)>) -> Element<'a, UiAc
         row(options
             .into_iter()
             .map(|(label, selected, action)| {
-                iced::widget::button(text(label).size(font::SMALL).font(fonts::MEDIUM))
+                iced::widget::button(text(label).size(font::SMALL).font(fonts::medium()))
                     .padding([7.0, 14.0])
                     .style(theme::segment(selected))
                     .on_press(action)
@@ -86,6 +86,7 @@ pub fn text_input<'a>(placeholder: &str, value: &str) -> TextInput<'a, UiAction>
     iced::widget::text_input(placeholder, value)
         .padding([11.0, 14.0])
         .size(ui::font_size(font::BODY_LARGE))
+        .font(fonts::regular())
         .style(theme::text_input)
 }
 
@@ -93,6 +94,7 @@ pub fn search_input<'a>(placeholder: &str, value: &str) -> TextInput<'a, UiActio
     iced::widget::text_input(placeholder, value)
         .padding([12.0, 18.0])
         .size(ui::font_size(font::BODY_LARGE))
+        .font(fonts::regular())
         .icon(icons::input_icon(icons::SEARCH, font::ICON_SMALL))
         .style(theme::search_input)
 }
@@ -108,6 +110,7 @@ pub fn checkbox<'a>(
         .size(16)
         .spacing(12)
         .text_size(ui::font_size(font::BODY))
+        .font(fonts::regular())
         .style(theme::checkbox)
 }
 
@@ -129,7 +132,7 @@ pub fn page_header<'a>(
     actions: Option<Element<'a, UiAction>>,
 ) -> Element<'a, UiAction> {
     let heading = column![
-        text(title).size(font::PAGE_TITLE).font(fonts::SEMIBOLD),
+        text(title).size(font::PAGE_TITLE).font(fonts::semibold()),
         text(subtitle)
             .size(font::BODY_LARGE)
             .style(theme::muted_text),
@@ -155,7 +158,7 @@ pub fn refresh_button<'a>() -> Element<'a, UiAction> {
 pub fn card_title<'a>(title: impl IntoFragment<'a>) -> Element<'a, UiAction> {
     text(title)
         .size(font::CARD_TITLE)
-        .font(fonts::SEMIBOLD)
+        .font(fonts::semibold())
         .into()
 }
 
@@ -200,7 +203,7 @@ pub fn stat_strip<'a>(stats: Vec<(String, String, Option<Tone>)>) -> Element<'a,
             // A Fill-height rule stretches to the tallest cell.
             cells = cells.push(rule::vertical(1).style(theme::divider));
         }
-        let value = text(value).size(font::STAT).font(fonts::SEMIBOLD);
+        let value = text(value).size(font::STAT).font(fonts::semibold());
         let value = match tone {
             Some(tone) => value.style(theme::tone_text(tone)),
             None => value,
@@ -279,7 +282,7 @@ pub fn empty<'a>(title: &'a str, description: &'a str) -> Element<'a, UiAction> 
     container(
         column![
             icon_tile(icons::PACKAGE, Tone::Neutral, 44.0),
-            text(title).size(font::BODY_LARGE).font(fonts::MEDIUM),
+            text(title).size(font::BODY_LARGE).font(fonts::medium()),
             text(description).size(font::SMALL).style(theme::muted_text),
         ]
         .spacing(spacing::SMALL + 2.0)
@@ -312,7 +315,7 @@ pub fn initial_tile<'a>(title: &str, size: f32) -> Element<'a, UiAction> {
     container(
         text(initial)
             .size(font::BODY_LARGE + 1.0)
-            .font(fonts::SEMIBOLD),
+            .font(fonts::semibold()),
     )
     .width(size)
     .height(size)
@@ -325,7 +328,7 @@ pub fn initial_tile<'a>(title: &str, size: f32) -> Element<'a, UiAction> {
 pub fn caption<'a>(label: impl Into<String>) -> Element<'a, UiAction> {
     text(label.into().to_uppercase())
         .size(font::CAPTION)
-        .font(fonts::MEDIUM)
+        .font(fonts::medium())
         .style(theme::faint_text)
         .into()
 }
@@ -361,13 +364,13 @@ pub fn detail_mono<'a>(label: &'a str, value: impl IntoFragment<'a>) -> Element<
 pub fn mono<'a>(value: impl IntoFragment<'a>) -> Element<'a, UiAction> {
     text(value)
         .size(font::MONO)
-        .font(fonts::MONO)
+        .font(fonts::mono())
         .style(theme::muted_text)
         .into()
 }
 
 pub fn badge(label: impl Into<String>, tone: Tone) -> Element<'static, UiAction> {
-    container(text(label.into()).size(font::BADGE).font(fonts::MEDIUM))
+    container(text(label.into()).size(font::BADGE).font(fonts::medium()))
         .padding([3.0, 10.0])
         .style(theme::badge(tone))
         .into()
@@ -377,7 +380,7 @@ pub fn icon_badge(glyph: char, label: impl Into<String>, tone: Tone) -> Element<
     container(
         row![
             icon(glyph, 12.0),
-            text(label.into()).size(font::BADGE).font(fonts::MEDIUM),
+            text(label.into()).size(font::BADGE).font(fonts::medium()),
         ]
         .spacing(5)
         .align_y(Center),

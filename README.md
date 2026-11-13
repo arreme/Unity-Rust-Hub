@@ -324,6 +324,18 @@ Long operations use `--format ndjson` and are streamed by `JobManager` into the 
 job card. `projects upgrade` is run **without** `--wait` so the job ends when the
 upgrade does, not when the Editor is closed.
 
+On Linux, the CLI reads the stored sign-in through its resident auth broker. When that
+broker is not running, every command reads the Secret Service keyring itself, and a
+locked keyring shows its unlock prompt once per command. Before the first credential
+read (and before `unity open`), the app runs `unity auth broker ensure` so the whole
+batch shares one session. `UNITY_NO_AUTH_BROKER` defeats this, so the app shows a notice
+when it is set.
+
+Set `UNITY_HUB_CLI_TRACE=1` to append every CLI invocation (`argv`, start time, exit code,
+elapsed time) to `cli-trace.log` next to `cli-install.json`. It is the fastest way to
+match a credential prompt to the command that caused it. `UNITY_HUB_CLI_TRACE_FILE`
+overrides the destination.
+
 CLI beta.15 removed the `list` subcommands and deprecated a few flags, so the adapter
 uses the current spellings: `unity projects --all`, `unity modules <version>`,
 `unity releases --offset`, and `unity install-modules --editor-version`.

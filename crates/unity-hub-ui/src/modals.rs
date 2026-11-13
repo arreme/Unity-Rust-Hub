@@ -43,7 +43,7 @@ fn dialog<'a>(
         column![
             text(title.into())
                 .size(font::MODAL_TITLE)
-                .font(fonts::SEMIBOLD),
+                .font(fonts::semibold()),
             text(subtitle.into())
                 .size(font::BODY_LARGE)
                 .style(theme::muted_text),
@@ -90,6 +90,7 @@ fn styled_pick_list<'a>(
 ) -> Element<'a, UiAction> {
     pick_list(options, selected, on_select)
         .text_size(ui::font_size(font::BODY))
+        .font(fonts::regular())
         .padding(PICK_LIST_PADDING)
         .handle(icons::pick_list_handle(font::ICON_SMALL))
         .style(theme::pick_list)
@@ -115,7 +116,7 @@ fn install_cli_modal(vm: &InstallCliVm) -> Element<'_, UiAction> {
                 caption("Official installer command"),
                 text(vm.command_preview.as_str())
                     .size(font::MONO)
-                    .font(fonts::MONO)
+                    .font(fonts::mono())
                     .line_height(1.55),
                 hint("UNITY_CLI_SKIP_SETUP=1 is set so the installer does not block on its interactive setup."),
             ]
@@ -223,7 +224,7 @@ fn module_checkbox(module: &ModuleOptionVm) -> Element<'static, UiAction> {
 fn version_cell<'a>(label: &'a str, version: String, end: bool) -> Element<'a, UiAction> {
     let content = column![
         caption(label),
-        text(version).size(font::BODY_LARGE + 1.0).font(fonts::MONO),
+        text(version).size(font::BODY_LARGE + 1.0).font(fonts::mono()),
     ]
     .spacing(4);
 

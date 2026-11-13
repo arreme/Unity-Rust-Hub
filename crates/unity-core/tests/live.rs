@@ -31,6 +31,10 @@ fn reads_real_cli_data() {
     let install_path = cli.install_path().expect("unity install-path");
     println!("install path: {install_path}");
 
+    cli.ensure_auth_broker()
+        .expect("unity auth broker ensure should be accepted");
+    println!("auth broker: ensured");
+
     let editors = cli.editors_installed().expect("unity editors --installed");
     println!("installed editors: {}", editors.len());
     for editor in &editors {

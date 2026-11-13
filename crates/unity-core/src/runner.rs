@@ -120,7 +120,20 @@ impl UnityCli {
         timeout: Duration,
         require_success: bool,
     ) -> Result<Executed, UnityError> {
-        let output = run_command(spec, timeout)?;
+        let started = Instant::now();
+        let output = match run_command(spec, timeout) {
+            Ok(output) => output,
+            Err(error) => {
+                crate::trace::record("read", &spec.display(), started.elapsed(), None);
+                return Err(error);
+            }
+        };
+        crate::trace::record(
+            "read",
+            &spec.display(),
+            started.elapsed(),
+            output.status.code(),
+        );
 
         let stdout = match String::from_utf8(output.stdout) {
             Ok(stdout) => stdout,
@@ -278,6 +291,35 @@ impl UnityCli {
         Ok(())
     }
 
+    /// Registers an existing Unity project in the Hub registry.
+    pub fn add_project(&self, path: &str) -> Result<(), UnityError> {
+        let project = validate_project_path(path)?;
+        let project = project.to_string_lossy().to_string();
+        self.run_args(&svec(&["projects", "add", &project]), "json")?;
+        Ok(())
+    }
+
+    /// Removes a project from the Hub registry. The files stay on disk.
+    pub fn remove_project(&self, path: &str) -> Result<(), UnityError> {
+        let project = validate_project_path(path)?;
+        let project = project.to_string_lossy().to_string();
+        self.run_args(&svec(&["projects", "remove", &project]), "json")?;
+        Ok(())
+    }
+
+    /// Pins a project to the top of the registry list, or unpins it.
+    pub fn set_project_pinned(&self, path: &str, pinned: bool) -> Result<(), UnityError> {
+        let project = validate_project_path(path)?;
+        let project = project.to_string_lossy().to_string();
+        let command = if pinned {
+            "pin"
+        } else {
+            "unpin"
+        };
+        self.run_args(&svec(&["projects", command, &project]), "json")?;
+        Ok(())
+    }
+
     pub fn changelog(&self, target: Option<&str>) -> Result<RawChangelog, UnityError> {
         let mut parts = svec(&["changelog"]);
         if let Some(target) = target.filter(|value| !value.trim().is_empty()) {
@@ -307,6 +349,18 @@ impl UnityCli {
 
     pub fn auth_login_spec(&self) -> Result<CommandSpec, UnityError> {
         self.spec(&auth_login_parts(), "ndjson")
+    }
+
+    /// Starts the CLI's resident sign-in broker.
+    ///
+    /// CLI commands read the stored session through that broker. When it is not
+    /// running, each command reads the OS credential store itself; on Linux a
+    /// locked Secret Service collection then shows its unlock prompt once per
+    /// command. Starting the broker before a read batch collapses those prompts
+    /// into at most one.
+    pub fn ensure_auth_broker(&self) -> Result<(), UnityError> {
+        self.run_args(&auth_broker_ensure_parts(), "json")?;
+        Ok(())
     }
 
     pub fn license_status(&self) -> Result<LicenseStatus, UnityError> {
@@ -826,6 +880,10 @@ fn auth_login_parts() -> Vec<String> {
     svec(&["auth", "login"])
 }
 
+fn auth_broker_ensure_parts() -> Vec<String> {
+    svec(&["auth", "broker", "ensure"])
+}
+
 fn append_modules(parts: &mut Vec<String>, modules: &[String]) -> Result<(), UnityError> {
     for module in modules {
         validate_module_id(module)?;
@@ -1160,6 +1218,14 @@ mod tests {
     #[test]
     fn auth_login_uses_the_standard_login_command() {
         assert_eq!(auth_login_parts(), svec(&["auth", "login"]));
+    }
+
+    #[test]
+    fn auth_broker_ensure_uses_the_supported_broker_command() {
+        assert_eq!(
+            auth_broker_ensure_parts(),
+            svec(&["auth", "broker", "ensure"])
+        );
     }
 
     #[test]

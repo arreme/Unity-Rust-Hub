@@ -4,6 +4,8 @@ use iced::widget::text::{self, IntoFragment};
 use iced::widget::Text;
 use iced::{Element, Font, Length, Pixels, Theme};
 
+use crate::fonts;
+
 thread_local! {
     static TEXT_SCALE: Cell<f32> = const { Cell::new(1.0) };
 }
@@ -37,7 +39,7 @@ pub fn font_size(base: f32) -> f32 {
 /// `text(...).size(...)` call follows the persisted text-size setting.
 pub fn text<'a>(content: impl IntoFragment<'a>) -> ScaledText<'a> {
     ScaledText {
-        inner: Text::new(content),
+        inner: Text::new(content).font(fonts::regular()),
     }
 }
 
