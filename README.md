@@ -2,8 +2,9 @@
 
 A native desktop GUI for the [Unity CLI](https://docs.unity.com/en-us/unity-cli/unity-cli),
 written in Rust with [iced](https://iced.rs). It wraps the official `unity` binary so
-you can inspect the local toolchain, manage Editors and modules, change project
-versions, and read release notes without keeping a terminal open.
+you can inspect the local toolchain, manage Editors and modules, create and change
+projects, browse and author project templates, watch running Editors, and read
+release notes without keeping a terminal open.
 
 No webview, no Node toolchain, no HTML/JS layer. The release build is a single Rust
 binary that renders through iced's `wgpu` backend, with iced's `tiny-skia` software
@@ -32,7 +33,7 @@ The AppImage embeds its version so
 Install it through Shelly instead of copying it into place:
 
 ```bash
-mv UnityRustHub-0.2.1-linux-x86_64.AppImage UnityRustHub.AppImage
+mv UnityRustHub-0.3.0-linux-x86_64.AppImage UnityRustHub.AppImage
 shelly install appimage ./UnityRustHub.AppImage
 shelly sync appimage UnityRustHub arreme/Unity-Rust-Hub GitHub
 ```
@@ -127,7 +128,8 @@ crates/unity-hub-ui/        Visual layer; depends only on unity-hub-model + iced
   src/tokens.rs             Figma-mappable palette, spacing, radii, type tokens.
   src/theme.rs              iced theme/styles built from tokens.
   src/components.rs         Shared cards, badges, tables, headers.
-  src/pages/                overview, editors, projects, changelog, settings.
+  src/pages/                overview, editors, projects, templates, processes,
+                            changelog, settings.
   src/shell.rs              Sidebar, notice and job cards.
   src/modals.rs             Full-screen dialog screens.
   src/fixtures.rs           Deterministic content for every screen/state.
@@ -292,9 +294,10 @@ Live adapter smoke test against a real Unity CLI (ignored by default):
 cargo test -p unity-core --test live -- --ignored --nocapture
 ```
 
-This only reads data: version, Editors, modules, releases, projects, auth/license,
-update check, and the installed changelog. It never installs an Editor, changes a
-project, or updates the CLI.
+This only reads data: version, Editors, modules, releases, projects, templates
+(`--brief` and `info`), running Editors, `unity status`, auth/license, update check,
+and the installed changelog. It never installs an Editor, creates or packs a project,
+changes a project, or updates the CLI.
 
 ## Performance
 
@@ -308,7 +311,7 @@ on Windows 11 with an RTX 4060 Ti, release build, 1280×840 window, Unity CLI `1
 | Idle CPU | 0% | 0% |
 | Idle RSS | 103–120 MB | 24–26 MB |
 | Threads | ~22 | ~11 |
-| Binary | 13.1 MB | 7.1 MB |
+| Binary | 14.4 MB | 8.1 MB |
 | Needs a GPU driver | yes (DX12/Vulkan/Metal) | no |
 
 The GPU path is roughly an order of magnitude cheaper per frame, which is what keeps
@@ -424,6 +427,11 @@ Resolution order for the binary:
   matching checkbox is checked.
 - Project upgrades require a second confirmation and warn that the project on disk can
   change. Commit or back up first.
+- New projects always pass `--no-cloud`; Cloud and VCS linking are not offered in this
+  version, and the app never collects a Git token.
+- Template create/pack forms validate the package id and destination before running, and
+  refuse a destination inside the source project. Replacing an existing archive or
+  template requires an explicit confirmation.
 - No credentials are read, stored, or forwarded. The app never passes
   `--insecure-storage` to `unity auth login`, so a CLI 1.0.0 sign-in either uses the
   system credential store or reports that no store is available. Changelog Markdown is
