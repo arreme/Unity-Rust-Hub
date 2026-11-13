@@ -1,3 +1,7 @@
+// A GUI binary must not open a console window. Debug builds keep it so
+// `cargo run` can show panics and backtraces.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod runtime;
 
 use std::future::Future;
@@ -26,7 +30,20 @@ impl iced::Executor for SmallExecutor {
     }
 }
 
+/// iced picks the first adapter from `WGPU_BACKEND`, falling back to every
+/// primary backend. On Windows that enumeration can land on Vulkan, which costs
+/// roughly 60 MB more resident memory than DX12 for the same 2D scene. Prefer
+/// the native backend unless the user has explicitly chosen one.
+fn prefer_native_gpu_backend() {
+    #[cfg(target_os = "windows")]
+    if std::env::var_os("WGPU_BACKEND").is_none() {
+        std::env::set_var("WGPU_BACKEND", "dx12");
+    }
+}
+
 fn main() -> iced::Result {
+    prefer_native_gpu_backend();
+
     let icon =
         iced::window::icon::from_rgba(include_bytes!("../assets/icon-128.rgba").to_vec(), 128, 128)
             .ok();

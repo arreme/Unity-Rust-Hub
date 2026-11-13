@@ -10,12 +10,16 @@ publish = false
 name = "unity-rust-hub"
 path = "src/main.rs"
 
+[features]
+default = ["gpu"]
+# GPU rendering (~100 MB resident on Windows/DX12). Build with
+# `--no-default-features` for the ~26 MB software renderer.
+gpu = ["iced/wgpu", "unity-hub-ui/gpu"]
+
 [dependencies]
 futures = "0.3"
 iced = { version = "0.14", default-features = false, features = [
   "crisp",
-  "image",
-  "linux-theme-detection",
   "thread-pool",
   "tiny-skia",
   "wayland",

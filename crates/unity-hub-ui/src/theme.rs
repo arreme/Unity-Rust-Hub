@@ -120,7 +120,8 @@ pub fn segmented(_theme: &Theme) -> container::Style {
 
 pub fn modal(_theme: &Theme) -> container::Style {
     // No drop shadow: tiny-skia's damage tracking repaints it over the card on
-    // partial redraws, which progressively darkens the dialog.
+    // partial redraws, which progressively darkens the dialog. The software
+    // fallback must look identical to the GPU path.
     surface(TOKENS.palette.panel, TOKENS.palette.border, radius::MODAL)
 }
 

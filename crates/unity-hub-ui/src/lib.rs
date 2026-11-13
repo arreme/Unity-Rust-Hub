@@ -24,7 +24,7 @@ pub const WINDOW_SIZE: Size = Size::new(1280.0, 840.0);
 pub const MIN_WINDOW_SIZE: Size = Size::new(1040.0, 680.0);
 
 /// Entry point for every visual. A modal replaces the shell; the iced tiny-skia
-/// backend miscomposites stacked layers over the scrollable shell.
+/// fallback miscomposites stacked layers over the scrollable shell.
 pub fn view(vm: &ViewModel) -> Element<'_, UiAction> {
     ui::set_scale(vm.text_scale);
 

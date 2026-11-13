@@ -469,6 +469,17 @@ fn push_entry(
     *current_entry = Some(parsed.sections[section].entries.len() - 1);
 }
 
+/// The CLI marks its own breaking entries with a leading `**Breaking:**`, which
+/// `clean_inline` reduces to `Breaking:`. Use that marker directly instead of
+/// guessing from the wording, so an explicit exit-code change is not reported
+/// as a removal or rename.
+fn explicitly_marked_breaking(entry: &str) -> bool {
+    entry
+        .trim_start()
+        .to_ascii_lowercase()
+        .starts_with("breaking:")
+}
+
 fn find_breaking_changes(sections: &[ChangelogSection]) -> Vec<BreakingChange> {
     let mut seen = HashSet::new();
     let mut changes = Vec::new();
@@ -479,7 +490,9 @@ fn find_breaking_changes(sections: &[ChangelogSection]) -> Vec<BreakingChange> {
             section_lower.contains("fixed") || section_lower.contains("security");
         for entry in &section.entries {
             let text_lower = entry.to_ascii_lowercase();
-            let reason = if section_lower.contains("removed") {
+            let reason = if explicitly_marked_breaking(entry) {
+                Some("explicitly marked breaking")
+            } else if section_lower.contains("removed") {
                 Some("removed functionality")
             } else if section_lower.contains("deprecated") {
                 Some("deprecated functionality")
@@ -584,6 +597,19 @@ mod tests {
 - `unity projects --watch` now follows the project list. A project added or removed from another terminal while the watch runs appears or disappears on the next poll. Before, only the rows already shown refreshed, so the list never changed.
 "#;
 
+    const V1_0_0: &str = r#"## 1.0.0
+
+### Changed
+
+- **Breaking:** `unity recompile` exits `12` when no Editor answers, as `unity command` does, instead of `7`. A script that matched exit `7` for this should check `12`; `errors[0].code` is unchanged.
+- `unity recompile` takes the project as a positional argument too: `unity recompile <path>`.
+
+### Fixed
+
+- **Breaking:** `unity close` and `unity projects close` fail with exit `11` and `PROJECTS_CLOSE_NOT_A_PROJECT` when the path isn't a Unity project (no `Assets` or `ProjectSettings` folder), such as a mistyped name. They used to succeed with `reason: "not_open"`.
+- `unity install` and `unity install-modules` write their module notices, such as an added dependency or a skipped unknown module, to stderr under `--format json`, `ndjson` and `tsv`, so stdout holds only the output a script parses.
+"#;
+
     #[test]
     fn parses_versions_sections_and_wrapped_entries() {
         let parsed = parse_changelog(SAMPLE);
@@ -685,5 +711,37 @@ mod tests {
                 "{needle} is a fix or ordinary behavior change, not a breaking change"
             );
         }
+    }
+
+    #[test]
+    fn explicit_breaking_markers_get_their_own_reason() {
+        let parsed = parse_changelog(V1_0_0);
+
+        for needle in ["recompile exits", "unity close"] {
+            let change = parsed
+                .breaking_changes
+                .iter()
+                .find(|change| change.text.contains(needle))
+                .unwrap_or_else(|| panic!("{needle} should be flagged"));
+            assert_eq!(
+                change.reason, "explicitly marked breaking",
+                "{needle} should use the explicit marker reason"
+            );
+        }
+
+        assert!(
+            !parsed
+                .breaking_changes
+                .iter()
+                .any(|change| change.text.contains("positional argument")),
+            "an ordinary Changed entry should stay quiet"
+        );
+        assert!(
+            !parsed
+                .breaking_changes
+                .iter()
+                .any(|change| change.text.contains("module notices")),
+            "an install fix that only moves notices to stderr is not a breaking change"
+        );
     }
 }

@@ -254,19 +254,10 @@ fn job_view(job: &JobVm) -> Element<'_, UiAction> {
     }
 
     if !job.logs.is_empty() {
-        let mut log_text = String::new();
-        for line in &job.logs {
-            if line.is_stderr {
-                log_text.push_str("! ");
-            }
-            log_text.push_str(&line.text);
-            log_text.push('\n');
-        }
-
         body = body.push(
             container(
                 scroll(
-                    text(log_text)
+                    text(job.logs.as_ref())
                         .size(font::MONO)
                         .font(fonts::MONO)
                         .line_height(1.55)

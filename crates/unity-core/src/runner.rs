@@ -1,6 +1,6 @@
 use std::io::Read;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
@@ -209,8 +209,8 @@ impl UnityCli {
 
     pub fn editors_running(&self) -> Result<RunningEditors, UnityError> {
         let mut running = self.editors_running_base()?;
-        // Pipeline status is a beta.16 addition. An older CLI, a stopped
-        // Pipeline server, or an unexpected shape must not break the base list.
+        // Pipeline status is optional. An older CLI, a stopped Pipeline
+        // server, or an unexpected shape must not break the base list.
         if let Ok(pipeline) = self.pipeline_editors() {
             merge_pipeline_editors(&mut running, pipeline);
         }
@@ -370,8 +370,11 @@ impl UnityCli {
         Ok(info)
     }
 
+    /// `unity self-update` does not emit NDJSON in 1.0.0: it prints a two-column
+    /// result line even under `--format ndjson`. Use human output for the job
+    /// log, then refresh `unity version` once the job finishes.
     pub fn self_update_spec(&self) -> Result<CommandSpec, UnityError> {
-        self.spec(&svec(&["self-update", "--yes"]), "ndjson")
+        self.spec(&svec(&["self-update", "--yes"]), "human")
     }
 }
 
@@ -513,7 +516,7 @@ fn spawn_error(spec: &CommandSpec, err: std::io::Error) -> UnityError {
 /// Runs a child with a hard deadline. `Command::output` cannot be cancelled, so
 /// stdout/stderr are drained on dedicated threads while the supervisor polls.
 fn run_command(spec: &CommandSpec, timeout: Duration) -> Result<std::process::Output, UnityError> {
-    let mut command = Command::new(&spec.program);
+    let mut command = crate::process::hidden(&spec.program);
     command
         .args(&spec.args)
         .stdin(Stdio::null())
@@ -1186,6 +1189,25 @@ mod tests {
             .env
             .iter()
             .any(|(key, value)| key == DO_NOT_TRACK_ENV && value == "1"));
+    }
+
+    #[test]
+    fn self_update_uses_human_output_because_the_cli_does_not_emit_ndjson() {
+        let path = std::env::temp_dir().join(format!(
+            "unity-rust-hub-self-update-test-{}",
+            std::process::id()
+        ));
+        std::fs::write(&path, b"test").unwrap();
+
+        let cli = UnityCli::new();
+        cli.set_override_path(Some(path.clone()));
+        let spec = cli.self_update_spec().unwrap();
+        std::fs::remove_file(path).ok();
+
+        assert!(spec
+            .args
+            .windows(2)
+            .any(|pair| pair == ["--format", "human"]));
     }
 
     #[cfg(unix)]

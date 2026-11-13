@@ -9,6 +9,7 @@ pub mod changelog;
 pub mod envelope;
 pub mod errors;
 pub mod models;
+pub mod process;
 pub mod runner;
 pub mod versions;
 

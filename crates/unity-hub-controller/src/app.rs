@@ -1,5 +1,6 @@
 use std::collections::{BTreeSet, HashSet, VecDeque};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use iced::{Subscription, Task};
@@ -14,10 +15,10 @@ use unity_core::{CommandSpec, UnityCli, UnityError};
 use unity_hub_model::{
     AccountCardVm, AuthVm, BadgeVm, BreakingChangeVm, ChangelogDataVm, ChangelogSectionVm,
     ChangelogVm, CliCardVm, CliConnectionVm, CliDetailsVm, EditorModulesVm, EditorRowVm, EditorsVm,
-    InstallCliVm, InstallEditorVm, InstallPreviewVm, JobLogVm, JobPhase, JobVm, LicenseRowVm,
-    LicenseVm, LoadState, ModalVm, ModuleOptionVm, NoticeVm, OverviewVm, Page, PageVm,
-    ProjectRowVm, ProjectsVm, ReleaseRowVm, RunningEditorVm, SectionKind, SettingsVm, ShellVm,
-    TextScaleOptionVm, Tone, UiAction, UiError, UpdateVm, UpgradeProjectVm, ViewModel,
+    InstallCliVm, InstallEditorVm, InstallPreviewVm, JobPhase, JobVm, LicenseRowVm, LicenseVm,
+    LoadState, ModalVm, ModuleOptionVm, NoticeVm, OverviewVm, Page, PageVm, ProjectRowVm,
+    ProjectsVm, ReleaseRowVm, RunningEditorVm, SectionKind, SettingsVm, ShellVm, TextScaleOptionVm,
+    Tone, UiAction, UiError, UpdateVm, UpgradeProjectVm, ViewModel,
 };
 
 use crate::jobs::{JobManager, JobStarted, JobState, StreamKind};
@@ -148,6 +149,11 @@ pub struct LogLine {
     pub text: String,
 }
 
+/// The log scrollback is bounded so a chatty install cannot grow the view model
+/// or the shaped text without limit.
+const MAX_LOG_LINES: usize = 300;
+const MAX_LOG_CHARS: usize = 1000;
+
 #[derive(Debug, Clone)]
 pub struct ActiveJob {
     pub id: String,
@@ -157,6 +163,9 @@ pub struct ActiveJob {
     pub progress: f32,
     pub message: Option<String>,
     pub logs: VecDeque<LogLine>,
+    /// The rendered form of `logs`, rebuilt only when the buffer changes so the
+    /// view can hand iced a stable string.
+    pub log_text: Arc<str>,
     pub error: Option<UnityError>,
 }
 
@@ -170,13 +179,40 @@ impl ActiveJob {
             progress: 0.0,
             message: None,
             logs: VecDeque::new(),
+            log_text: Arc::from(""),
             error: None,
         }
+    }
+
+    fn push_log(&mut self, stream: StreamKind, text: String) {
+        self.logs.push_back(LogLine { stream, text });
+
+        if self.logs.len() > MAX_LOG_LINES {
+            self.logs.pop_front();
+        }
+
+        // Rendering is a single pass over a bounded buffer (300 lines), and it
+        // happens only when a line arrives, never per frame.
+        let mut rendered = String::with_capacity(self.log_text.len() + 64);
+
+        for line in &self.logs {
+            push_log_line(&mut rendered, line);
+        }
+
+        self.log_text = Arc::from(rendered);
     }
 
     fn is_running(&self) -> bool {
         self.state == JobState::Running
     }
+}
+
+fn push_log_line(buffer: &mut String, line: &LogLine) {
+    if line.stream == StreamKind::Stderr {
+        buffer.push_str("! ");
+    }
+    buffer.push_str(&line.text);
+    buffer.push('\n');
 }
 
 pub struct App {
@@ -1005,9 +1041,6 @@ impl App {
     }
 
     fn poll_jobs(&mut self) -> Task<Message> {
-        const MAX_LOG_LINES: usize = 300;
-        const MAX_LOG_CHARS: usize = 1000;
-
         let events = self.jobs.poll();
         let mut finished: Option<(String, JobState, Option<UnityError>)> = None;
 
@@ -1032,13 +1065,7 @@ impl App {
                     } else {
                         line
                     };
-                    job.logs.push_back(LogLine {
-                        stream: event.stream.unwrap_or(StreamKind::Stdout),
-                        text,
-                    });
-                    while job.logs.len() > MAX_LOG_LINES {
-                        job.logs.pop_front();
-                    }
+                    job.push_log(event.stream.unwrap_or(StreamKind::Stdout), text);
                 }
             }
             if let Some(progress) = event.progress {
@@ -1372,6 +1399,7 @@ impl App {
                         .as_ref()
                         .map(|user| user.email.clone())
                         .unwrap_or_default(),
+                    stale: auth.session_state.as_deref() == Some("stale"),
                 };
             }
             return AuthVm::SignedOut {
@@ -1826,14 +1854,7 @@ fn job_vm(job: &ActiveJob) -> JobVm {
         progress: job.progress,
         message: job.message.clone(),
         error: job.error.as_ref().map(ui_error),
-        logs: job
-            .logs
-            .iter()
-            .map(|line| JobLogVm {
-                is_stderr: line.stream == StreamKind::Stderr,
-                text: line.text.clone(),
-            })
-            .collect(),
+        logs: job.log_text.clone(),
     }
 }
 
@@ -2043,8 +2064,8 @@ mod tests {
             path: Some("/usr/bin/unity".to_string()),
             path_source: Some("PATH".to_string()),
             version: Some(CliVersion {
-                version: "1.0.0-beta.16".to_string(),
-                channel: "beta".to_string(),
+                version: "1.0.0".to_string(),
+                channel: "stable".to_string(),
                 platform: "linux".to_string(),
                 arch: "x86_64".to_string(),
                 ..CliVersion::default()
@@ -2058,13 +2079,13 @@ mod tests {
             &vm.shell.cli,
             CliConnectionVm::Connected {
                 version: Some(version)
-            } if version == "1.0.0-beta.16"
+            } if version == "1.0.0"
         ));
         match &vm.page {
             PageVm::Overview(overview) => {
                 match &overview.cli {
                     CliCardVm::Ready { details, .. } => {
-                        assert_eq!(details.channel, "beta");
+                        assert_eq!(details.channel, "stable");
                         assert_eq!(details.platform, "linux x86_64");
                     }
                     other => panic!("unexpected CLI card: {other:?}"),
@@ -2133,6 +2154,26 @@ mod tests {
     }
 
     #[test]
+    fn stale_auth_sessions_are_flagged_in_the_account_card() {
+        let (mut app, _) = App::boot();
+        app.page = Page::Overview;
+        app.auth.data = Some(AuthStatus {
+            logged_in: true,
+            session_state: Some("stale".to_string()),
+            ..AuthStatus::default()
+        });
+
+        let vm = app.view_model();
+        match &vm.page {
+            PageVm::Overview(overview) => match &overview.account.auth {
+                AuthVm::SignedIn { stale, .. } => assert!(*stale),
+                other => panic!("unexpected auth card: {other:?}"),
+            },
+            other => panic!("unexpected page: {other:?}"),
+        }
+    }
+
+    #[test]
     fn upgrade_guard_matches_running_editor_by_project_path() {
         let (mut app, _) = App::boot();
         app.running.data = Some(RunningEditors {
@@ -2169,5 +2210,44 @@ mod tests {
         let _task = app.load_projects_page(true);
 
         assert!(app.running.loading);
+    }
+
+    fn active_job() -> ActiveJob {
+        ActiveJob {
+            id: "job".to_string(),
+            kind: "editor-install".to_string(),
+            command: "unity install lts".to_string(),
+            state: JobState::Running,
+            progress: 0.0,
+            message: None,
+            logs: VecDeque::new(),
+            log_text: Arc::from(""),
+            error: None,
+        }
+    }
+
+    #[test]
+    fn job_log_text_prefixes_stderr_and_ends_each_line() {
+        let mut job = active_job();
+        job.push_log(StreamKind::Stdout, "downloading".to_string());
+        job.push_log(StreamKind::Stderr, "checksum mismatch".to_string());
+
+        assert_eq!(&*job.log_text, "downloading\n! checksum mismatch\n");
+    }
+
+    #[test]
+    fn job_log_text_stays_in_sync_when_the_buffer_rolls_over() {
+        let mut job = active_job();
+
+        for index in 0..MAX_LOG_LINES + 5 {
+            job.push_log(StreamKind::Stdout, format!("line {index}"));
+        }
+
+        let expected: String = (5..MAX_LOG_LINES + 5)
+            .map(|index| format!("line {index}\n"))
+            .collect();
+
+        assert_eq!(job.logs.len(), MAX_LOG_LINES);
+        assert_eq!(&*job.log_text, expected);
     }
 }

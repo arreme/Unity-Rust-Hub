@@ -123,13 +123,17 @@ fixture when a new state needs review.
 ## Platform constraints to design around
 
 - Dialogs replace the shell as full-screen views. Do not design stacked overlays
-  above the scrollable shell: iced 0.14 with the tiny-skia backend miscomposites
+  above the scrollable shell: iced 0.14 with the tiny-skia fallback miscomposites
   them.
 - Tables are built from header/row containers, not `iced::widget::table`; the
   table widget stalled rendering with live data.
 - Text scaling is a user preference. Components must tolerate 100–150% text
   without clipping critical actions.
 - Changelog Markdown is displayed as plain text.
+- Windows: the release binary is a GUI-subsystem app with no console, so every
+  CLI child must be spawned through `unity_core::process::hidden`. Otherwise
+  Windows creates a console window per invocation, and a page's read batch
+  flashes a terminal on each tab open/switch.
 
 ## Design gallery
 

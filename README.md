@@ -6,10 +6,11 @@ you can inspect the local toolchain, manage Editors and modules, change project
 versions, and read release notes without keeping a terminal open.
 
 No webview, no Node toolchain, no HTML/JS layer. The release build is a single Rust
-binary that renders through iced's software renderer.
+binary that renders through iced's `wgpu` backend, with iced's `tiny-skia` software
+renderer kept as an automatic fallback when no usable GPU adapter is available.
 
-The Unity CLI is in beta (`1.0.0-beta.16` at the time of writing). This app is built
-against its JSON envelope and treats the CLI as the source of truth for every mutation.
+The Unity CLI is at `1.0.0` (stable). This app is built against its JSON envelope and
+treats the CLI as the source of truth for every mutation.
 
 ## Download
 
@@ -85,7 +86,7 @@ update target.
 | Layer | Choice |
 |---|---|
 | Desktop shell | iced 0.14 (winit window, no webview) |
-| Renderer | `tiny-skia` software rendering (`wgpu` disabled) |
+| Renderer | iced 0.14 `wgpu` (DX12/Vulkan/Metal) with a `tiny-skia` software fallback |
 | CLI adapter | `crates/unity-core` (synchronous, UI-agnostic) |
 | Contract | `crates/unity-hub-model` (view models + `UiAction`, no dependencies) |
 | Controller | `crates/unity-hub-controller` (state, jobs, settings, view-model mapping) |
@@ -133,10 +134,12 @@ UI never builds a `unity` argument, parses a raw CLI envelope, or sees a `UnityE
 - **Unity CLI** — optional at first launch. The Overview screen installs it.
 - **Linux** — X11 or Wayland client libraries. A typical desktop already has them;
   for a minimal build host install the development packages for
-  `libxkbcommon`, `libwayland-client`, and `libX11`/`libxcb`. `tiny-skia` means no
-  Vulkan/OpenGL driver or WebKitGTK is required.
+  `libxkbcommon`, `libwayland-client`, and `libX11`/`libxcb`. A working Vulkan or
+  OpenGL driver gets the GPU renderer; without one the app falls back to the
+  `tiny-skia` software renderer. No WebKitGTK is required.
 - **macOS** — Xcode Command Line Tools (`xcode-select --install`).
-- **Windows** — the MSVC Rust toolchain. No WebView2 runtime is needed.
+- **Windows** — the MSVC Rust toolchain. No WebView2 runtime is needed. A DX12
+  driver gets the GPU renderer; otherwise the app falls back to software.
 
 ## Run
 
@@ -153,6 +156,23 @@ cargo build --release -p unity-hub
 
 The workspace default member is `unity-hub`, so `cargo run` and `cargo build --release`
 also work from the repository root.
+
+### Two builds: GPU (default) and slim
+
+Rendering is a compile-time choice, because the resident cost of a GPU context is
+fixed and cannot be trimmed from the UI:
+
+```bash
+# Default: GPU via wgpu. Smooth scrolling, ~100 MB resident.
+cargo build --release -p unity-hub
+
+# Slim: software rendering only. ~26 MB resident, ~7 MB binary, no GPU driver.
+cargo build --release -p unity-hub --no-default-features
+```
+
+Both builds are the same UI and the same behaviour; only the renderer differs. See
+[Performance](#performance) for the measured cost of each. The packaging config and
+the GitHub release workflow build the default GPU variant.
 
 ## CachyOS / Arch Linux
 
@@ -262,19 +282,35 @@ project, or updates the CLI.
 
 ## Performance
 
-Measured on a Linux/Wayland release build (1280×840, Unity CLI `1.0.0-beta.15`):
+Scroll cost is dominated by the renderer, not by the CLI or the view model. Measured
+on Windows 11 with an RTX 4060 Ti, release build, 1280×840 window, Unity CLI `1.0.0`:
 
-| Metric | Result |
-|---|---|
-| Idle app RSS | 23–27 MB |
-| Peak RSS during boot (app + CLI child) | ~55–60 MB |
-| Concurrent Unity CLI processes | 1 |
-| Time until the last boot read finishes | ~0.4 s |
-| Idle CPU | 0% |
+| Metric | GPU build (default) | Slim build (`--no-default-features`) |
+|---|---|---|
+| CPU per painted scroll frame | 1–2 ms | 12–13 ms |
+| Sustained CPU while scrolling | 1–6% of one core | 40–82% of one core |
+| Idle CPU | 0% | 0% |
+| Idle RSS | 103–120 MB | 24–26 MB |
+| Threads | ~22 | ~11 |
+| Binary | 13.1 MB | 7.1 MB |
+| Needs a GPU driver | yes (DX12/Vulkan/Metal) | no |
 
-The app serializes reads through one worker, sets `DO_NOT_TRACK=1` on every CLI
-invocation, and gives each read a 30-second deadline. `scripts/measure-memory.py`
-reproduces the RSS measurement on Linux.
+The GPU path is roughly an order of magnitude cheaper per frame, which is what keeps
+scrolling smooth; the software path saturates most of a core once wheel events arrive
+faster than it can paint. The GPU path's memory is almost entirely graphics-driver
+overhead: an empty iced window on the same backend already costs 108 MB, and the full
+UI costs nothing on top of that. Shrinking the window or minimizing it does not change
+the figure, so the UI itself is already as slim as it can be.
+
+The GPU build prefers DX12 on Windows (`WGPU_BACKEND` overrides it, e.g. `vulkan`,
+`gl`; `WGPU_POWER_PREF` selects a different adapter). If no adapter can be created it
+falls back to `tiny-skia` at runtime, so the app still starts without a GPU driver.
+The design gallery is software-rendered by default; add `--features gpu` for the GPU
+path.
+
+Independent of the renderer: the app serializes reads through one worker, sets
+`DO_NOT_TRACK=1` on every CLI invocation, and gives each read a 30-second deadline.
+`scripts/measure-memory.py` reproduces the RSS measurement on Linux.
 
 ## How the CLI is invoked
 
@@ -292,10 +328,10 @@ CLI beta.15 removed the `list` subcommands and deprecated a few flags, so the ad
 uses the current spellings: `unity projects --all`, `unity modules <version>`,
 `unity releases --offset`, and `unity install-modules --editor-version`.
 
-The adapter is aligned to CLI beta.16:
+The adapter is aligned to CLI 1.0.0:
 
-- Exit codes `17` (`UNAVAILABLE`) and `18` (`AWAITING_INPUT`) are mapped and treated as
-  retryable.
+- Exit codes `17` (`UNAVAILABLE`) and `18` (`AWAITING_INPUT`) are still part of the 1.0.0
+  table (verified with `unity commands --format json`), mapped, and treated as retryable.
 - `unity install-modules` exiting `0` when every named module is already installed counts
   as success, even when no result frame is written.
 - `unity projects upgrade` refuses a project that is open in an Editor; the upgrade job
@@ -303,6 +339,10 @@ The adapter is aligned to CLI beta.16:
 - The Overview running-Editor card merges `unity editors running` with
   `unity pipeline editors` to show phase, Pipeline version, update availability, Safe Mode,
   and a blocking dialog. It stays read-only; dialogs are not answered from the app.
+- `self-update` does not emit NDJSON in 1.0.0 (it prints a two-column result line), so the
+  update job asks for human output and the app refreshes `unity version` afterwards.
+- 1.0.0 adds `unity close --if-saved` and `unity install --headless`; neither is wired into
+  the UI yet. See [`docs/unity-cli-1.0-upgrade.md`](docs/unity-cli-1.0-upgrade.md).
 
 Resolution order for the binary:
 
@@ -319,12 +359,17 @@ Resolution order for the binary:
 - Tables are built from header and row containers rather than `iced::widget::table`;
   the table widget caused a rendering stall with live data in iced 0.14.
 - Dialogs replace the shell with a full-screen view instead of using `stack!`. Stacked
-  layers over the scrollable shell miscomposite in iced's tiny-skia backend, and
+  layers over the scrollable shell miscomposite in iced's tiny-skia fallback, and
   dialog drop shadows are omitted because tiny-skia repaints them over the card on
   partial redraws.
+- The renderer is iced's `wgpu` backend by default, with `tiny-skia` kept as the
+  runtime fallback. `gpu` is a Cargo feature (`--no-default-features` builds the
+  software-only binary), so a single UI has two build profiles.
 - Job polling is event-driven: `JobManager` wakes a subscription only when it has
   an event, coalescing bursts into one UI poll every 100 ms. An idle window does not
-  wake the update loop, and the queued event/log buffers are bounded.
+  wake the update loop, and the queued event/log buffers are bounded. The log tail is
+  rendered once per line and shared as an `Arc<str>`, so a progress-only update neither
+  copies nor reshapes the scrollback.
 - CLI reads run through one serialized worker with a 30 s timeout, so only one
   `unity` process is alive at a time. Every invocation sets `DO_NOT_TRACK=1`; this
   avoids the CLI's analytics call, which otherwise adds roughly one second and extra
@@ -351,8 +396,10 @@ Resolution order for the binary:
   matching checkbox is checked.
 - Project upgrades require a second confirmation and warn that the project on disk can
   change. Commit or back up first.
-- No credentials are read, stored, or forwarded. Changelog Markdown is displayed as
-  plain text, never interpreted.
+- No credentials are read, stored, or forwarded. The app never passes
+  `--insecure-storage` to `unity auth login`, so a CLI 1.0.0 sign-in either uses the
+  system credential store or reports that no store is available. Changelog Markdown is
+  displayed as plain text, never interpreted.
 
 ## Known limitations (v1)
 

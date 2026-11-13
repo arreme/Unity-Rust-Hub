@@ -74,7 +74,7 @@ impl std::fmt::Display for UnityError {
 
 impl std::error::Error for UnityError {}
 
-/// Exit-code semantics from the Unity CLI reference (beta 16).
+/// Exit-code semantics from the Unity CLI 1.0.0 reference.
 pub fn is_retryable_exit_code(code: i32) -> bool {
     matches!(code, 7 | 9 | 10 | 12 | 14 | 17 | 18 | 130 | 143)
 }
@@ -155,7 +155,7 @@ mod tests {
     }
 
     #[test]
-    fn beta16_exit_codes_have_friendly_messages() {
+    fn newer_exit_codes_have_friendly_messages() {
         assert!(message_for_exit_code(17).contains("busy"));
         assert!(message_for_exit_code(18).contains("dialog"));
     }

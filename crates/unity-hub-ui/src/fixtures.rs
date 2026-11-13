@@ -6,8 +6,8 @@
 use unity_hub_model::{
     AccountCardVm, AuthVm, BadgeVm, BreakingChangeVm, ChangelogDataVm, ChangelogSectionVm,
     ChangelogVm, CliCardVm, CliConnectionVm, CliDetailsVm, EditorModulesVm, EditorRowVm, EditorsVm,
-    InstallCliVm, InstallEditorVm, JobLogVm, JobPhase, JobVm, LicenseRowVm, LicenseVm, LoadState,
-    ModalVm, ModuleOptionVm, OverviewVm, Page, PageVm, ProjectRowVm, ProjectsVm, ReleaseRowVm,
+    InstallCliVm, InstallEditorVm, JobPhase, JobVm, LicenseRowVm, LicenseVm, LoadState, ModalVm,
+    ModuleOptionVm, OverviewVm, Page, PageVm, ProjectRowVm, ProjectsVm, ReleaseRowVm,
     RunningEditorVm, SectionKind, SettingsVm, ShellVm, TextScaleOptionVm, Tone, UiError, UpdateVm,
     UpgradeProjectVm, ViewModel,
 };
@@ -74,7 +74,7 @@ fn shell(page: Page) -> ShellVm {
     ShellVm {
         page,
         cli: CliConnectionVm::Connected {
-            version: Some("1.0.0-beta.16".to_string()),
+            version: Some("1.0.0".to_string()),
         },
         notice: None,
         job: None,
@@ -96,26 +96,27 @@ fn overview() -> ViewModel {
         PageVm::Overview(OverviewVm {
             cli: CliCardVm::Ready {
                 details: CliDetailsVm {
-                    version: "1.0.0-beta.16".to_string(),
-                    channel: "beta".to_string(),
+                    version: "1.0.0".to_string(),
+                    channel: "stable".to_string(),
                     platform: "linux x86_64".to_string(),
                     runtime: "rust 1.99".to_string(),
                     executable: "/home/ada/.local/bin/unity".to_string(),
                     resolved_via: "PATH".to_string(),
                     install_path: "/home/ada/Unity/Editors".to_string(),
-                    build_date: "Oct 24, 2026".to_string(),
+                    build_date: "Nov 13, 2026".to_string(),
                 },
                 error: None,
             },
             update: LoadState::Ready(UpdateVm {
                 available: false,
-                current_version: "1.0.0-beta.16".to_string(),
-                latest_version: "1.0.0-beta.16".to_string(),
+                current_version: "1.0.0".to_string(),
+                latest_version: "1.0.0".to_string(),
             }),
             account: AccountCardVm {
                 auth: AuthVm::SignedIn {
                     name: "Ada Lovelace".to_string(),
                     email: "ada@example.com".to_string(),
+                    stale: false,
                 },
                 license: LicenseVm::Ready {
                     active: true,
@@ -314,13 +315,13 @@ fn changelog() -> ViewModel {
         Page::Changelog,
         PageVm::Changelog(ChangelogVm {
             loaded: true,
-            versions: vec!["1.0.0-beta.15".to_string(), "1.0.0-beta.16".to_string()],
-            selected_target: Some("1.0.0-beta.16".to_string()),
+            versions: vec!["1.0.0-beta.15".to_string(), "1.0.0".to_string()],
+            selected_target: Some("1.0.0".to_string()),
             show_raw: false,
             state: LoadState::Ready(ChangelogDataVm {
-                version: "1.0.0-beta.16".to_string(),
+                version: "1.0.0".to_string(),
                 source: "unity-changelog".to_string(),
-                source_detail: "Unity CLI 1.0.0-beta.16 release notes".to_string(),
+                source_detail: "Unity CLI 1.0.0 release notes".to_string(),
                 entry_count: 12,
                 breaking_changes: vec![BreakingChangeVm {
                     text: "The list subcommands were removed.".to_string(),
@@ -377,7 +378,7 @@ fn settings() -> ViewModel {
                 },
             ],
             text_scale_percent: 100,
-            engine_info: "1.0.0-beta.16 · beta · linux/x86_64".to_string(),
+            engine_info: "1.0.0 · stable · linux/x86_64".to_string(),
         }),
     )
 }
@@ -445,10 +446,7 @@ fn job_running() -> ViewModel {
         progress: 42.0,
         message: Some("Downloading modules…".to_string()),
         error: None,
-        logs: vec![JobLogVm {
-            is_stderr: false,
-            text: "downloaded 4.2 GB of 9.8 GB".to_string(),
-        }],
+        logs: "downloaded 4.2 GB of 9.8 GB\n".into(),
     });
     vm
 }
@@ -469,10 +467,7 @@ fn job_failed() -> ViewModel {
             message: "Project upgrade failed.".to_string(),
             detail: Some("The target Editor is not installed.".to_string()),
         }),
-        logs: vec![JobLogVm {
-            is_stderr: true,
-            text: "Editor 6000.3.0f1 is not installed.".to_string(),
-        }],
+        logs: "! Editor 6000.3.0f1 is not installed.\n".into(),
     });
     vm
 }

@@ -1,7 +1,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::io::{BufRead, BufReader};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -99,7 +99,7 @@ impl JobManager {
             self.counter.fetch_add(1, Ordering::Relaxed)
         );
 
-        let mut command = Command::new(&spec.program);
+        let mut command = unity_core::process::hidden(&spec.program);
         command
             .args(&spec.args)
             .stdin(Stdio::null())
@@ -478,8 +478,8 @@ mod tests {
 
     #[test]
     fn exit_zero_without_result_frames_is_success() {
-        // Beta 16: install-modules exits 0 (and may print only the human
-        // "already installed" line) when every named module is installed.
+        // The CLI exits 0 (and may print only the human "already installed"
+        // line) when every named module is installed.
         assert!(job_succeeded(true, None));
         assert!(!job_succeeded(false, None));
     }

@@ -1,4 +1,5 @@
 use std::fmt;
+use std::sync::Arc;
 
 /// Top-level screens. Labels and titles are owned by the UI crate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -112,12 +113,6 @@ pub enum JobPhase {
     Cancelled,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct JobLogVm {
-    pub is_stderr: bool,
-    pub text: String,
-}
-
 #[derive(Debug, Clone, PartialEq)]
 pub struct JobVm {
     pub kind: String,
@@ -126,7 +121,10 @@ pub struct JobVm {
     pub progress: f32,
     pub message: Option<String>,
     pub error: Option<UiError>,
-    pub logs: Vec<JobLogVm>,
+    /// The bounded log tail, preformatted by the controller: stderr lines are
+    /// prefixed with `!` and every line ends with a newline. Shared, so a view
+    /// that only changes progress does not copy or reshape the log.
+    pub logs: Arc<str>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -227,8 +225,15 @@ pub struct AccountCardVm {
 pub enum AuthVm {
     Idle,
     Loading,
-    SignedIn { name: String, email: String },
-    SignedOut { expired: bool },
+    SignedIn {
+        name: String,
+        email: String,
+        /// The CLI still has a session, but its token needs a refresh.
+        stale: bool,
+    },
+    SignedOut {
+        expired: bool,
+    },
     Failed(UiError),
 }
 

@@ -258,7 +258,7 @@ fn account_card(account: &AccountCardVm) -> Element<'_, UiAction> {
         AuthVm::Loading => {
             body = body.push(loading("Checking sign-in…"));
         }
-        AuthVm::SignedIn { name, email } => {
+        AuthVm::SignedIn { name, email, stale } => {
             body = body.push(
                 row![
                     avatar(name),
@@ -275,6 +275,24 @@ fn account_card(account: &AccountCardVm) -> Element<'_, UiAction> {
                 .spacing(12)
                 .align_y(Center),
             );
+
+            if *stale {
+                body = body.push(
+                    row![
+                        text(
+                            "Your session is still valid, but it needs a refresh. \
+                             Sign in again if a Unity command asks for it."
+                        )
+                        .size(font::SMALL)
+                        .style(theme::warning_text)
+                        .width(Fill),
+                        icon_button(icons::LOG_IN, "Sign in", ButtonKind::Secondary)
+                            .on_press(UiAction::SignIn),
+                    ]
+                    .spacing(10)
+                    .align_y(Center),
+                );
+            }
         }
         AuthVm::SignedOut { expired } => {
             let message = if *expired {
