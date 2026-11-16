@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+use crate::advisory::{remediation_from_value, Remediation};
+
 /// A structured failure from the Unity CLI or from the adapter itself.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -41,6 +43,17 @@ impl UnityError {
         self.exit_code = exit_code;
         self.retryable = exit_code.map(is_retryable_exit_code).unwrap_or(false);
         self
+    }
+
+    /// The fix the CLI suggested for this error, when its envelope carried one.
+    ///
+    /// `CliError` flattens unknown fields into [`UnityError::extra`], so an
+    /// error envelope's `remediation` survives here after being copied over by
+    /// [`crate::envelope::CliError::to_unity_error`].
+    pub fn remediation(&self) -> Option<Remediation> {
+        self.extra
+            .get("remediation")
+            .and_then(remediation_from_value)
     }
 
     pub fn cli_not_found() -> Self {
@@ -159,5 +172,50 @@ mod tests {
     fn newer_exit_codes_have_friendly_messages() {
         assert!(message_for_exit_code(17).contains("busy"));
         assert!(message_for_exit_code(18).contains("dialog"));
+    }
+
+    #[test]
+    fn remediation_reads_an_object_from_the_flattened_extra_field() {
+        let cli_error: crate::envelope::CliError = serde_json::from_value(serde_json::json!({
+            "code": "INSTALL_LOCKED",
+            "message": "Another Unity install is holding the install lock.",
+            "remediation": {
+                "command": "unity editors install --wait 6000.6.6f1",
+                "requiresUserApproval": false
+            }
+        }))
+        .expect("error parses");
+
+        let error = cli_error.to_unity_error(Some(9), "");
+        let remediation = error.remediation().expect("remediation is preserved");
+
+        assert_eq!(
+            remediation.command,
+            "unity editors install --wait 6000.6.6f1"
+        );
+        assert!(!remediation.requires_user_approval);
+    }
+
+    #[test]
+    fn remediation_reads_a_bare_string_and_requires_approval() {
+        let cli_error: crate::envelope::CliError = serde_json::from_value(serde_json::json!({
+            "code": "AUTH_ERROR",
+            "message": "Unity sign-in is required.",
+            "remediation": "unity auth login"
+        }))
+        .expect("error parses");
+
+        let error = cli_error.to_unity_error(Some(3), "");
+        let remediation = error.remediation().expect("remediation is preserved");
+
+        assert_eq!(remediation.command, "unity auth login");
+        assert!(remediation.requires_user_approval);
+    }
+
+    #[test]
+    fn remediation_is_absent_when_the_error_has_none() {
+        let error = UnityError::new("ERROR", "Something failed.");
+
+        assert!(error.remediation().is_none());
     }
 }

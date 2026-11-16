@@ -2,6 +2,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+use crate::advisory::{Advisory, AdvisoryKind};
 use crate::errors::{
     code_for_exit_code, is_retryable_exit_code, message_for_exit_code, UnityError,
 };
@@ -17,13 +18,29 @@ pub struct CliEnvelope<T> {
     pub data: Option<T>,
     #[serde(default)]
     pub errors: Vec<CliError>,
-    #[serde(default, skip)]
+    #[serde(default)]
     pub warnings: Vec<Value>,
-    #[serde(default, skip)]
+    #[serde(default)]
     pub notifications: Vec<Value>,
 }
 
 pub type ValueEnvelope = CliEnvelope<Value>;
+
+impl<T> CliEnvelope<T> {
+    /// Normalizes the envelope's `warnings` and `notifications` for the
+    /// notification centre. Unusable entries are silently dropped.
+    pub fn advisories(&self) -> Vec<Advisory> {
+        self.warnings
+            .iter()
+            .filter_map(|value| Advisory::from_value(AdvisoryKind::Warning, value))
+            .chain(
+                self.notifications
+                    .iter()
+                    .filter_map(|value| Advisory::from_value(AdvisoryKind::Notification, value)),
+            )
+            .collect()
+    }
+}
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -215,6 +232,66 @@ mod tests {
         let error = envelope.errors[0].to_unity_error(Some(12), "");
         assert_eq!(error.code, "STATUS_NO_INSTANCES");
         assert!(error.retryable);
+    }
+
+    #[test]
+    fn envelope_parses_populated_warnings_and_notifications() {
+        let envelope: ValueEnvelope = serde_json::from_value(serde_json::json!({
+            "success": true,
+            "command": "editors installed",
+            "warnings": ["Compatibility mode is on."],
+            "notifications": [{
+                "code": "CLI_UPDATE_AVAILABLE",
+                "message": "A new version of the Unity CLI is available.",
+                "data": { "current": "1.0.0-beta.8", "latest": "1.0.0-beta.9" },
+                "remediation": { "command": "unity self-update" }
+            }]
+        }))
+        .expect("warnings and notifications are no longer skipped");
+
+        assert_eq!(envelope.warnings.len(), 1);
+        assert_eq!(envelope.notifications.len(), 1);
+    }
+
+    #[test]
+    fn advisories_map_warnings_and_notifications_to_kinds() {
+        let envelope: ValueEnvelope = serde_json::from_value(serde_json::json!({
+            "success": false,
+            "errors": [{ "code": "SOME_ERROR", "message": "It failed." }],
+            "warnings": ["Compatibility mode is on.", { "message": "Slow network." }],
+            "notifications": [{
+                "code": "CLI_UPDATE_AVAILABLE",
+                "message": "A new version of the Unity CLI is available."
+            }]
+        }))
+        .expect("envelope parses");
+
+        let advisories = envelope.advisories();
+
+        assert_eq!(advisories.len(), 3);
+        assert_eq!(advisories[0].kind, AdvisoryKind::Warning);
+        assert_eq!(advisories[0].message, "Compatibility mode is on.");
+        assert_eq!(advisories[1].kind, AdvisoryKind::Warning);
+        assert_eq!(advisories[1].message, "Slow network.");
+        assert_eq!(advisories[2].kind, AdvisoryKind::Notification);
+        assert_eq!(advisories[2].code.as_deref(), Some("CLI_UPDATE_AVAILABLE"));
+    }
+
+    #[test]
+    fn advisories_skip_blank_entries_and_absent_arrays() {
+        let absent: ValueEnvelope = serde_json::from_value(serde_json::json!({
+            "success": true
+        }))
+        .expect("empty envelope parses");
+        assert!(absent.advisories().is_empty());
+
+        let blank: ValueEnvelope = serde_json::from_value(serde_json::json!({
+            "success": true,
+            "warnings": ["   ", { "message": "" }],
+            "notifications": []
+        }))
+        .expect("envelope parses");
+        assert!(blank.advisories().is_empty());
     }
 
     #[test]

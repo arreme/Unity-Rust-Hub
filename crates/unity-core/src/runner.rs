@@ -1,11 +1,12 @@
 use std::io::Read;
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
+use crate::advisory::Advisory;
 use crate::envelope::{parse_data, parse_envelope, parse_items, ValueEnvelope};
 use crate::errors::{message_for_exit_code, UnityError};
 use crate::models::{
@@ -161,6 +162,11 @@ impl UnityCli {
             err.exit_code = exit_code;
             err
         })?;
+
+        // Advisories ride along with successful and failed envelopes alike.
+        // Failures are still returned as errors below; they are not converted
+        // into advisories here.
+        self.record_advisories(envelope.advisories());
 
         if require_success && !envelope.success {
             return Err(envelope_error(&envelope, &stderr, exit_code));
@@ -823,6 +829,9 @@ pub struct Executed {
 #[derive(Clone)]
 pub struct UnityCli {
     override_path: Arc<RwLock<Option<PathBuf>>>,
+    /// Advisories collected from every envelope the CLI returned. Clones share
+    /// the sink so a worker thread's reads reach the app's single `UnityCli`.
+    advisories: Arc<Mutex<Vec<Advisory>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -841,7 +850,27 @@ impl UnityCli {
     pub fn new() -> Self {
         Self {
             override_path: Arc::new(RwLock::new(None)),
+            advisories: Arc::new(Mutex::new(Vec::new())),
         }
+    }
+
+    /// Takes the advisories recorded since the last drain.
+    pub fn drain_advisories(&self) -> Vec<Advisory> {
+        let mut advisories = self
+            .advisories
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        std::mem::take(&mut *advisories)
+    }
+
+    fn record_advisories(&self, advisories: Vec<Advisory>) {
+        if advisories.is_empty() {
+            return;
+        }
+        self.advisories
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .extend(advisories);
     }
 
     pub fn set_override_path(&self, path: Option<PathBuf>) {
@@ -1818,5 +1847,45 @@ mod tests {
 
         assert_eq!(running.instances.len(), 1);
         assert_eq!(running.instances[0].state.as_deref(), Some("starting"));
+    }
+
+    fn advisory_envelope() -> ValueEnvelope {
+        envelope(serde_json::json!({
+            "success": true,
+            "warnings": ["Compatibility mode is on."],
+            "notifications": [{
+                "code": "CLI_UPDATE_AVAILABLE",
+                "message": "A new version of the Unity CLI is available."
+            }]
+        }))
+    }
+
+    #[test]
+    fn drain_advisories_empties_the_sink() {
+        let cli = UnityCli::new();
+        cli.record_advisories(advisory_envelope().advisories());
+
+        let drained = cli.drain_advisories();
+
+        assert_eq!(drained.len(), 2);
+        assert!(cli.drain_advisories().is_empty());
+    }
+
+    #[test]
+    fn advisories_accumulate_across_two_records() {
+        let cli = UnityCli::new();
+        cli.record_advisories(advisory_envelope().advisories());
+        cli.record_advisories(advisory_envelope().advisories());
+
+        assert_eq!(cli.drain_advisories().len(), 4);
+    }
+
+    #[test]
+    fn cloned_clients_share_the_advisory_sink() {
+        let cli = UnityCli::new();
+        let worker = cli.clone();
+        worker.record_advisories(advisory_envelope().advisories());
+
+        assert_eq!(cli.drain_advisories().len(), 2);
     }
 }
