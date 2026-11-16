@@ -1,4 +1,4 @@
-use iced::widget::text::IntoFragment;
+use iced::widget::text::{IntoFragment, Wrapping};
 use iced::widget::{
     column, container, row, rule, space, Button, Checkbox, Column, Scrollable, TextInput,
 };
@@ -406,6 +406,17 @@ pub fn mono<'a>(value: impl IntoFragment<'a>) -> Element<'a, UiAction> {
         .size(font::MONO)
         .font(fonts::mono())
         .style(theme::muted_text)
+        .into()
+}
+
+/// Mono text that may break inside a token: CLI codes and ids have no spaces,
+/// so word wrapping cannot keep them inside a narrow card.
+pub fn mono_wrapping<'a>(value: impl IntoFragment<'a>) -> Element<'a, UiAction> {
+    text(value)
+        .size(font::MONO)
+        .font(fonts::mono())
+        .style(theme::muted_text)
+        .wrapping(Wrapping::WordOrGlyph)
         .into()
 }
 

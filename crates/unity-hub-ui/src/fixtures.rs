@@ -8,11 +8,12 @@ use unity_hub_model::{
     ChangelogVm, CliCardVm, CliConnectionVm, CliDetailsVm, EditorModulesVm, EditorRowVm, EditorsVm,
     InstallCliVm, InstallEditorVm, JobPhase, JobVm, LicenseRowVm, LicenseVm, LoadState, ModalVm,
     ModuleOptionVm, NewProjectEditorVm, NewProjectPreflightState, NewProjectPreflightVm,
-    NewProjectResultVm, NewProjectStep, NewProjectVm, OverviewVm, Page, PageVm, ProcessMetricsVm,
-    ProcessRowVm, ProcessesVm, ProjectRowVm, ProjectsVm, ReleaseRowVm, RemoveProjectVm,
-    RunningEditorVm, SectionKind, SettingsVm, ShellVm, TemplateAuthoringMode, TemplateAuthoringVm,
-    TemplateDetailVm, TemplateFormVm, TemplateKindFilter, TemplateRowVm, TemplatesVm,
-    TextScaleOptionVm, Tone, UiError, UpdateVm, UpgradeProjectVm, ViewModel,
+    NewProjectResultVm, NewProjectStep, NewProjectVm, NotificationActionState, NotificationVm,
+    OverviewVm, Page, PageVm, ProcessMetricsVm, ProcessRowVm, ProcessesVm, ProjectRowVm,
+    ProjectsVm, ReleaseRowVm, RemoveProjectVm, RunningEditorVm, SectionKind, SettingsVm, ShellVm,
+    TemplateAuthoringMode, TemplateAuthoringVm, TemplateDetailVm, TemplateFormVm,
+    TemplateKindFilter, TemplateRowVm, TemplatesVm, TextScaleOptionVm, ToastVm, Tone, UiError,
+    UpdateVm, UpgradeProjectVm, ViewModel,
 };
 
 pub struct Fixture {
@@ -137,6 +138,42 @@ pub fn all() -> Vec<Fixture> {
         Fixture {
             name: "Job · failed",
             view_model: job_failed(),
+        },
+        Fixture {
+            name: "Notifications · rail unread",
+            view_model: notifications_rail_unread(),
+        },
+        Fixture {
+            name: "Notifications · rail empty",
+            view_model: notifications_rail_empty(),
+        },
+        Fixture {
+            name: "Notifications · toast",
+            view_model: notifications_toast(),
+        },
+        Fixture {
+            name: "Notifications · long message",
+            view_model: notifications_long_message(),
+        },
+        Fixture {
+            name: "Notification · action available",
+            view_model: notification_action_available(),
+        },
+        Fixture {
+            name: "Notification · confirming",
+            view_model: notification_confirming(),
+        },
+        Fixture {
+            name: "Notification · running",
+            view_model: notification_running(),
+        },
+        Fixture {
+            name: "Notification · failed",
+            view_model: notification_failed(),
+        },
+        Fixture {
+            name: "Notifications · job-stream advisory",
+            view_model: notifications_job_stream_advisory(),
         },
     ]
 }
@@ -588,6 +625,153 @@ fn job_failed() -> ViewModel {
     vm
 }
 
+fn notification(id: u64, tone: Tone, label: &str, message: &str) -> NotificationVm {
+    NotificationVm {
+        id,
+        tone,
+        label: label.to_string(),
+        message: message.to_string(),
+        command: None,
+        can_run: false,
+        state: NotificationActionState::Idle,
+    }
+}
+
+fn notifications_rail_unread() -> ViewModel {
+    let mut vm = overview();
+
+    let mut advisory = notification(
+        3,
+        Tone::Info,
+        "CLI advisory",
+        "Unity CLI 1.0.1 is available. Run the upgrade command to update the CLI.",
+    );
+    advisory.command = Some("unity upgrade --channel stable".to_string());
+    advisory.can_run = true;
+
+    vm.shell.notifications = vec![
+        advisory,
+        notification(
+            2,
+            Tone::Warning,
+            "Warning",
+            "The project list came from a cache. Refresh to read the projects again.",
+        ),
+        notification(
+            1,
+            Tone::Success,
+            "Editor installed",
+            "Unity 6000.3.0f1 finished installing.",
+        ),
+    ];
+    vm.shell.unread = 3;
+    vm.shell.rail_open = true;
+
+    vm
+}
+
+fn notifications_rail_empty() -> ViewModel {
+    let mut vm = overview();
+    vm.shell.rail_open = true;
+    vm
+}
+
+fn notifications_toast() -> ViewModel {
+    let mut vm = overview();
+    vm.shell.toast = Some(ToastVm {
+        id: 7,
+        tone: Tone::Info,
+        message: "Unity CLI 1.0.1 is available.".to_string(),
+    });
+    vm
+}
+
+fn notifications_long_message() -> ViewModel {
+    let mut vm = overview();
+
+    let mut advisory = notification(
+        11,
+        Tone::Warning,
+        "Warning",
+        "The Unity CLI reported that the Editor installation cache is out of date and that the templates registry was read from a stale snapshot, so newly published templates may be missing from the list until the cache is refreshed. Refresh the cache to pick up the latest templates, or keep working with the templates already installed on this machine. No project files were changed, and no Editor installation was interrupted while the cache was being read. The next refresh runs in the background and can be cancelled at any time without losing the current view.",
+    );
+    advisory.command = Some(
+        "unity templates refresh --channel stable --include-preview --cache-dir /home/ada/.cache/unity-rust-hub/templates --format ndjson --no-pager --no-banner --non-interactive".to_string(),
+    );
+
+    vm.shell.notifications = vec![advisory];
+    vm.shell.unread = 1;
+    vm.shell.rail_open = true;
+
+    vm
+}
+
+fn notification_action_available() -> ViewModel {
+    let mut vm = overview();
+
+    let mut entry = notification(
+        21,
+        Tone::Warning,
+        "PROJECT_BACKUP_MISSING",
+        "No backup of this project exists. Create one before upgrading the Editor.",
+    );
+    entry.command = Some(
+        "unity projects backup /home/ada/Games/Orbital --output /home/ada/Backups".to_string(),
+    );
+    entry.can_run = true;
+
+    vm.shell.notifications = vec![entry];
+    vm.shell.unread = 1;
+    vm.shell.rail_open = true;
+
+    vm
+}
+
+fn notification_confirming() -> ViewModel {
+    let mut vm = notification_action_available();
+
+    if let Some(entry) = vm.shell.notifications.first_mut() {
+        entry.state = NotificationActionState::Confirming;
+    }
+
+    vm
+}
+
+fn notification_running() -> ViewModel {
+    let mut vm = notification_action_available();
+
+    if let Some(entry) = vm.shell.notifications.first_mut() {
+        entry.state = NotificationActionState::Running;
+    }
+
+    vm
+}
+
+fn notification_failed() -> ViewModel {
+    let mut vm = notification_action_available();
+
+    if let Some(entry) = vm.shell.notifications.first_mut() {
+        entry.state = NotificationActionState::Failed;
+    }
+
+    vm
+}
+
+fn notifications_job_stream_advisory() -> ViewModel {
+    let mut vm = job_running();
+
+    vm.shell.notifications = vec![notification(
+        31,
+        Tone::Warning,
+        "INSTALLER_DISK_SPACE",
+        "Only 6.4 GB is free on the install volume. The Editor install continues, but module downloads may fail.",
+    )];
+    vm.shell.unread = 1;
+    vm.shell.rail_open = true;
+
+    vm
+}
+
 fn template_rows() -> Vec<TemplateRowVm> {
     vec![
         TemplateRowVm {
@@ -918,4 +1102,119 @@ fn template_authoring(mode: TemplateAuthoringMode, existing: bool) -> ViewModel 
         job: None,
     })));
     vm
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fixture(name: &str) -> ViewModel {
+        all()
+            .into_iter()
+            .find(|fixture| fixture.name == name)
+            .map(|fixture| fixture.view_model)
+            .unwrap_or_else(|| panic!("missing fixture: {name}"))
+    }
+
+    fn only_entry(view_model: &ViewModel) -> &NotificationVm {
+        view_model
+            .shell
+            .notifications
+            .first()
+            .expect("fixture should carry one notification")
+    }
+
+    #[test]
+    fn rail_unread_fixture_sets_the_badge_and_entries() {
+        let vm = fixture("Notifications · rail unread");
+
+        assert!(vm.shell.rail_open);
+        assert_eq!(vm.shell.unread, 3);
+        assert_eq!(vm.shell.notifications.len(), 3);
+        assert!(vm.shell.toast.is_none());
+
+        assert_eq!(
+            vm.shell.notifications[0].state,
+            NotificationActionState::Idle
+        );
+        assert!(vm.shell.notifications[0].can_run);
+        assert!(vm.shell.notifications[0].command.is_some());
+        assert_eq!(vm.shell.notifications[1].tone, Tone::Warning);
+        assert!(vm.shell.notifications[1].command.is_none());
+        assert_eq!(vm.shell.notifications[2].tone, Tone::Success);
+    }
+
+    #[test]
+    fn rail_empty_fixture_is_open_without_entries() {
+        let vm = fixture("Notifications · rail empty");
+
+        assert!(vm.shell.rail_open);
+        assert_eq!(vm.shell.unread, 0);
+        assert!(vm.shell.notifications.is_empty());
+        assert!(vm.shell.toast.is_none());
+    }
+
+    #[test]
+    fn toast_fixture_shows_one_information_toast() {
+        let vm = fixture("Notifications · toast");
+
+        assert!(!vm.shell.rail_open);
+        assert_eq!(vm.shell.unread, 0);
+        assert!(vm.shell.notifications.is_empty());
+
+        let toast = vm.shell.toast.expect("toast fixture should carry a toast");
+        assert_eq!(toast.tone, Tone::Info);
+        assert!(!toast.message.is_empty());
+    }
+
+    #[test]
+    fn long_message_fixture_keeps_the_full_text_and_command() {
+        let vm = fixture("Notifications · long message");
+
+        assert!(vm.shell.rail_open);
+
+        let entry = only_entry(&vm);
+        assert!(
+            entry.message.chars().count() >= 400,
+            "message is too short: {}",
+            entry.message.chars().count()
+        );
+
+        let command = entry.command.as_deref().expect("fixture needs a command");
+        assert!(command.chars().count() > 80);
+    }
+
+    #[test]
+    fn action_fixtures_cover_every_state() {
+        let available = fixture("Notification · action available");
+        let entry = only_entry(&available);
+        assert_eq!(entry.state, NotificationActionState::Idle);
+        assert!(entry.can_run);
+        assert!(entry.command.is_some());
+
+        let confirming = fixture("Notification · confirming");
+        assert_eq!(
+            only_entry(&confirming).state,
+            NotificationActionState::Confirming
+        );
+
+        let running = fixture("Notification · running");
+        assert_eq!(only_entry(&running).state, NotificationActionState::Running);
+
+        let failed = fixture("Notification · failed");
+        assert_eq!(only_entry(&failed).state, NotificationActionState::Failed);
+        assert!(only_entry(&failed).command.is_some());
+    }
+
+    #[test]
+    fn job_stream_fixture_has_a_warning_and_a_running_job() {
+        let vm = fixture("Notifications · job-stream advisory");
+
+        assert!(vm.shell.rail_open);
+        assert_eq!(vm.shell.unread, 1);
+        assert_eq!(only_entry(&vm).tone, Tone::Warning);
+
+        let job = vm.shell.job.as_ref().expect("fixture needs a job");
+        assert_eq!(job.phase, JobPhase::Running);
+    }
 }
