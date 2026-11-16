@@ -23,15 +23,16 @@ use unity_hub_model::{
     InstallCliVm, InstallEditorVm, InstallPreviewVm, JobPhase, JobVm, LicenseRowVm, LicenseVm,
     LoadState, ModalVm, ModuleOptionVm, NewProjectEditorVm, NewProjectField, NewProjectFormVm,
     NewProjectPreflightState, NewProjectPreflightVm, NewProjectResultVm, NewProjectStep,
-    NewProjectVm, NoticeVm, OverviewVm, Page, PageVm, ProcessMetricsVm, ProcessRowVm, ProcessesVm,
+    NewProjectVm, OverviewVm, Page, PageVm, ProcessMetricsVm, ProcessRowVm, ProcessesVm,
     ProjectRowVm, ProjectsVm, ReleaseRowVm, RemoveProjectVm, RunningEditorVm, SectionKind,
     SettingsVm, ShellVm, TemplateAuthoringMode, TemplateAuthoringVm, TemplateDetailVm,
     TemplateField, TemplateFormVm, TemplateKindFilter, TemplateRowVm, TemplatesVm,
-    TextScaleOptionVm, Tone, UiAction, UiError, UpdateVm, UpgradeProjectVm, ViewModel,
+    TextScaleOptionVm, ToastVm, Tone, UiAction, UiError, UpdateVm, UpgradeProjectVm, ViewModel,
 };
 
 use crate::jobs::{JobManager, JobStarted, JobState, StreamKind};
 use crate::metrics::{ProcessMetrics, Sampler};
+use crate::notifications::{remediation_args, ActionState, NotificationLevel, NotificationStore};
 use crate::settings::{self, AppSettings, TextSize};
 use crate::util::{
     error_text, format_bytes, format_duration, format_epoch_millis, format_iso, open_folder,
@@ -298,61 +299,25 @@ fn needs_auth_broker() -> bool {
     cfg!(target_os = "linux") && std::env::var_os("UNITY_NO_AUTH_BROKER").is_none()
 }
 
-fn auth_broker_hint(error: &UnityError) -> String {
-    format!(
+fn broker_error(error: &UnityError) -> UnityError {
+    let mut adapted = error.clone();
+    adapted.message = format!(
         "The Unity CLI could not start its sign-in service, so each command may ask to unlock the system keyring. {}",
-        error_text(error).replace('\n', " ")
-    )
+        error.message
+    );
+    adapted
 }
 
 #[cfg(target_os = "linux")]
-fn broker_env_notice() -> Option<Notice> {
+fn broker_env_message() -> Option<&'static str> {
     std::env::var_os("UNITY_NO_AUTH_BROKER").map(|_| {
-        Notice::info(
-            "UNITY_NO_AUTH_BROKER is set, so every Unity CLI command reads the system keyring directly and may ask to unlock it repeatedly. Unset it to let the CLI share one sign-in session.",
-        )
+        "UNITY_NO_AUTH_BROKER is set, so every Unity CLI command reads the system keyring directly and may ask to unlock it repeatedly. Unset it to let the CLI share one sign-in session."
     })
 }
 
 #[cfg(not(target_os = "linux"))]
-fn broker_env_notice() -> Option<Notice> {
+fn broker_env_message() -> Option<&'static str> {
     None
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NoticeKind {
-    Info,
-    Success,
-    Error,
-}
-
-#[derive(Debug, Clone)]
-pub struct Notice {
-    pub kind: NoticeKind,
-    pub text: String,
-}
-
-impl Notice {
-    pub fn info(text: impl Into<String>) -> Self {
-        Self {
-            kind: NoticeKind::Info,
-            text: text.into(),
-        }
-    }
-
-    pub fn success(text: impl Into<String>) -> Self {
-        Self {
-            kind: NoticeKind::Success,
-            text: text.into(),
-        }
-    }
-
-    pub fn error(text: impl Into<String>) -> Self {
-        Self {
-            kind: NoticeKind::Error,
-            text: text.into(),
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -479,7 +444,9 @@ pub struct App {
     pub cli_path_input: String,
     pub config_dir: Option<String>,
     pub active_job: Option<ActiveJob>,
-    pub notice: Option<Notice>,
+    pub notifications: NotificationStore,
+    /// The notification whose remediation command is currently running.
+    pub remediating: Option<u64>,
     pub boot_background_started: bool,
 }
 
@@ -491,7 +458,18 @@ pub enum Message {
     Refresh,
     DismissJob,
     CancelJob,
-    DismissNotice,
+
+    // Notification centre
+    ToggleNotificationRail,
+    DismissNotification(u64),
+    ClearNotifications,
+    DismissToast(u64),
+    CopyNotificationCommand(u64),
+    RunNotificationCommand(u64),
+    ConfirmNotificationCommand(u64),
+    CancelNotificationCommand(u64),
+    ToastExpired(u64),
+
     SignIn,
     TextSizeChanged(TextSize),
     FontFamilyChanged(String),
@@ -597,9 +575,16 @@ impl From<UiAction> for Message {
         match action {
             UiAction::Navigate(page) => Self::Navigate(page),
             UiAction::Refresh => Self::Refresh,
-            UiAction::DismissNotice => Self::DismissNotice,
             UiAction::DismissJob => Self::DismissJob,
             UiAction::CancelJob => Self::CancelJob,
+            UiAction::ToggleNotificationRail => Self::ToggleNotificationRail,
+            UiAction::DismissNotification(id) => Self::DismissNotification(id),
+            UiAction::ClearNotifications => Self::ClearNotifications,
+            UiAction::DismissToast(id) => Self::DismissToast(id),
+            UiAction::CopyNotificationCommand(id) => Self::CopyNotificationCommand(id),
+            UiAction::RunNotificationCommand(id) => Self::RunNotificationCommand(id),
+            UiAction::ConfirmNotificationCommand(id) => Self::ConfirmNotificationCommand(id),
+            UiAction::CancelNotificationCommand(id) => Self::CancelNotificationCommand(id),
             UiAction::SignIn => Self::SignIn,
             UiAction::TextScaleChanged(percent) => {
                 Self::TextSizeChanged(TextSize::from_percent(percent))
@@ -690,7 +675,7 @@ impl App {
             }
         }
 
-        let app = Self {
+        let mut app = Self {
             cli: cli.clone(),
             jobs: JobManager::new(),
             page: Page::Overview,
@@ -738,9 +723,15 @@ impl App {
             app_settings,
             config_dir: settings::config_dir().map(|path| path.display().to_string()),
             active_job: None,
-            notice: broker_env_notice(),
+            notifications: NotificationStore::new(),
+            remediating: None,
             boot_background_started: false,
         };
+
+        if let Some(message) = broker_env_message() {
+            app.notifications
+                .push_event(NotificationLevel::Info, "Sign-in broker", message);
+        }
 
         // The status read is the only critical boot work. The rest of the
         // Overview is loaded after it succeeds, one CLI process at a time.
@@ -809,11 +800,29 @@ impl App {
             Subscription::none()
         };
 
-        Subscription::batch([job, processes])
+        // A toast dismisses itself after a few seconds. The id keys the
+        // subscription, so a newer toast replaces the pending timer.
+        let toast = match self.notifications.toast() {
+            Some(toast) => {
+                let id = toast.id;
+                Subscription::run_with(id, move |id| {
+                    let id = *id;
+                    let (sender, receiver) = futures::channel::mpsc::unbounded();
+                    std::thread::spawn(move || {
+                        std::thread::sleep(Duration::from_secs(5));
+                        let _ = sender.unbounded_send(Message::ToastExpired(id));
+                    });
+                    receiver
+                })
+            }
+            None => Subscription::none(),
+        };
+
+        Subscription::batch([job, processes, toast])
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
-        match message {
+        let task = match message {
             Message::Navigate(page) => {
                 self.page = page;
                 self.ensure_page(page)
@@ -868,7 +877,7 @@ impl App {
                             | "AUTH_BROKER_REFUSED"
                             | "CREDENTIAL_STORE_ACCESS_DENIED"
                     ) {
-                        self.notice = Some(Notice::error(auth_broker_hint(error)));
+                        self.notifications.push_error(&broker_error(error));
                     }
                 }
                 // A missing broker only means each read may prompt again; the
@@ -979,7 +988,7 @@ impl App {
                     Err(error) => {
                         self.preview = None;
                         self.preview_raw = None;
-                        self.notice = Some(Notice::error(error_text(&error)));
+                        self.notifications.push_error(&error);
                     }
                 }
                 Task::none()
@@ -1006,22 +1015,74 @@ impl App {
             Message::CancelJob => {
                 if let Some(job) = &self.active_job {
                     if self.jobs.cancel(&job.id) {
-                        self.notice = Some(Notice::info("Cancelling the job…"));
+                        self.notifications.push_event(
+                            NotificationLevel::Info,
+                            "Job",
+                            "Cancelling the job…",
+                        );
                     }
                 }
                 Task::none()
             }
-            Message::DismissNotice => {
-                self.notice = None;
+            Message::ToggleNotificationRail => {
+                let open = !self.notifications.rail_open();
+                self.notifications.set_rail_open(open);
                 Task::none()
             }
+            Message::DismissNotification(id) => {
+                self.notifications.dismiss(id);
+                Task::none()
+            }
+            Message::ClearNotifications => {
+                self.notifications.clear();
+                Task::none()
+            }
+            Message::DismissToast(id) => {
+                self.notifications.toast_expired(id);
+                Task::none()
+            }
+            Message::ToastExpired(id) => {
+                self.notifications.toast_expired(id);
+                Task::none()
+            }
+            Message::CopyNotificationCommand(id) => {
+                match self
+                    .notifications
+                    .get(id)
+                    .and_then(|notification| notification.command.clone())
+                {
+                    Some(command) => iced::clipboard::write(command),
+                    None => Task::none(),
+                }
+            }
+            Message::RunNotificationCommand(id) => {
+                if self
+                    .notifications
+                    .get(id)
+                    .is_some_and(|notification| notification.can_run)
+                {
+                    self.notifications.set_state(id, ActionState::Confirming);
+                }
+                Task::none()
+            }
+            Message::CancelNotificationCommand(id) => {
+                if self
+                    .notifications
+                    .get(id)
+                    .is_some_and(|notification| notification.state == ActionState::Confirming)
+                {
+                    self.notifications.set_state(id, ActionState::Idle);
+                }
+                Task::none()
+            }
+            Message::ConfirmNotificationCommand(id) => self.confirm_notification(id),
             Message::SignIn => {
                 match self.cli.auth_login_spec() {
                     Ok(spec) => {
                         self.start_job("auth-login", spec);
                     }
                     Err(error) => {
-                        self.notice = Some(Notice::error(error_text(&error)));
+                        self.notifications.push_error(&error);
                     }
                 }
                 Task::none()
@@ -1030,10 +1091,14 @@ impl App {
                 self.app_settings.text_scale_percent = size.percent();
                 match settings::save(&self.app_settings) {
                     Ok(()) => {
-                        self.notice = Some(Notice::success(format!("Text size set to {size}.")));
+                        self.notifications.push_event(
+                            NotificationLevel::Success,
+                            "Notification",
+                            format!("Text size set to {size}."),
+                        );
                     }
                     Err(error) => {
-                        self.notice = Some(Notice::error(error_text(&error)));
+                        self.notifications.push_error(&error);
                     }
                 }
                 Task::none()
@@ -1047,13 +1112,14 @@ impl App {
                 };
                 match settings::save(&self.app_settings) {
                     Ok(()) => {
-                        self.notice = Some(Notice::success(format!(
-                            "Font set to {}.",
-                            self.app_settings.font_family
-                        )));
+                        self.notifications.push_event(
+                            NotificationLevel::Success,
+                            "Notification",
+                            format!("Font set to {}.", self.app_settings.font_family),
+                        );
                     }
                     Err(error) => {
-                        self.notice = Some(Notice::error(error_text(&error)));
+                        self.notifications.push_error(&error);
                     }
                 }
                 Task::none()
@@ -1088,7 +1154,7 @@ impl App {
                         self.start_job("cli-update", spec);
                     }
                     Err(error) => {
-                        self.notice = Some(Notice::error(error_text(&error)));
+                        self.notifications.push_error(&error);
                     }
                 }
                 Task::none()
@@ -1164,7 +1230,7 @@ impl App {
                         }
                     }
                     Err(error) => {
-                        self.notice = Some(Notice::error(error_text(&error)));
+                        self.notifications.push_error(&error);
                     }
                 }
                 Task::none()
@@ -1239,7 +1305,7 @@ impl App {
                         }
                     }
                     Err(error) => {
-                        self.notice = Some(Notice::error(error_text(&error)));
+                        self.notifications.push_error(&error);
                     }
                 }
                 Task::none()
@@ -1253,7 +1319,11 @@ impl App {
             }
             Message::ProjectFolderPicked(Some(path)) => {
                 let path = path.display().to_string();
-                self.notice = Some(Notice::info(format!("Adding {path}…")));
+                self.notifications.push_event(
+                    NotificationLevel::Info,
+                    "Notification",
+                    format!("Adding {path}…"),
+                );
                 Task::perform(
                     run_blocking({
                         let cli = self.cli.clone();
@@ -1284,7 +1354,11 @@ impl App {
                 let path = project.path.clone();
                 let title = project.title.clone();
                 self.modal = Modal::None;
-                self.notice = Some(Notice::info(format!("Removing {title} from the registry…")));
+                self.notifications.push_event(
+                    NotificationLevel::Info,
+                    "Notification",
+                    format!("Removing {title} from the registry…"),
+                );
                 Task::perform(
                     run_blocking({
                         let cli = self.cli.clone();
@@ -1325,22 +1399,26 @@ impl App {
             }
             Message::ProjectMutationDone(mutation, result) => match result {
                 Ok(()) => {
-                    self.notice = Some(Notice::success(match mutation {
-                        ProjectMutation::Added => "Project added to the registry.".to_string(),
-                        ProjectMutation::Removed(title) => {
-                            format!("{title} removed from the registry.")
-                        }
-                        ProjectMutation::Pinned(title, true) => {
-                            format!("{title} marked as a favorite.")
-                        }
-                        ProjectMutation::Pinned(title, false) => {
-                            format!("{title} removed from favorites.")
-                        }
-                    }));
+                    self.notifications.push_event(
+                        NotificationLevel::Success,
+                        "Notification",
+                        match mutation {
+                            ProjectMutation::Added => "Project added to the registry.".to_string(),
+                            ProjectMutation::Removed(title) => {
+                                format!("{title} removed from the registry.")
+                            }
+                            ProjectMutation::Pinned(title, true) => {
+                                format!("{title} marked as a favorite.")
+                            }
+                            ProjectMutation::Pinned(title, false) => {
+                                format!("{title} removed from favorites.")
+                            }
+                        },
+                    );
                     self.load_projects_page(true)
                 }
                 Err(error) => {
-                    self.notice = Some(Notice::error(error_text(&error)));
+                    self.notifications.push_error(&error);
                     Task::none()
                 }
             },
@@ -1352,7 +1430,11 @@ impl App {
                     .and_then(|projects| projects.iter().find(|project| project.path == path))
                     .map(|project| project.title.clone())
                     .unwrap_or_else(|| project_name_from_path(&path));
-                self.notice = Some(Notice::info(format!("Opening {title}…")));
+                self.notifications.push_event(
+                    NotificationLevel::Info,
+                    "Notification",
+                    format!("Opening {title}…"),
+                );
                 let ensure_broker = needs_auth_broker();
                 Task::perform(
                     run_blocking({
@@ -1373,10 +1455,14 @@ impl App {
             Message::ProjectOpened(result) => {
                 match result {
                     Ok(()) => {
-                        self.notice = Some(Notice::success("Unity Editor is launching."));
+                        self.notifications.push_event(
+                            NotificationLevel::Success,
+                            "Notification",
+                            "Unity Editor is launching.",
+                        );
                     }
                     Err(error) => {
-                        self.notice = Some(Notice::error(error_text(&error)));
+                        self.notifications.push_error(&error);
                     }
                 }
                 Task::none()
@@ -1423,9 +1509,13 @@ impl App {
                         .project_path
                         .clone()
                         .unwrap_or_else(|| project_path.clone());
-                    self.notice = Some(Notice::error(format!(
-                        "Close the running Unity Editor for {label} before upgrading this project."
-                    )));
+                    self.notifications.push_event(
+                        NotificationLevel::Danger,
+                        "Error",
+                        format!(
+                            "Close the running Unity Editor for {label} before upgrading this project."
+                        ),
+                    );
                     return Task::none();
                 }
                 match self.cli.upgrade_project_spec(&project_path, &target) {
@@ -1435,7 +1525,7 @@ impl App {
                         }
                     }
                     Err(error) => {
-                        self.notice = Some(Notice::error(error_text(&error)));
+                        self.notifications.push_error(&error);
                     }
                 }
                 Task::none()
@@ -1495,9 +1585,11 @@ impl App {
                 if !value.is_empty() {
                     let path = PathBuf::from(&value);
                     if !path.is_file() {
-                        self.notice = Some(Notice::error(format!(
-                            "`{value}` is not a file. Choose the unity executable."
-                        )));
+                        self.notifications.push_event(
+                            NotificationLevel::Danger,
+                            "Error",
+                            format!("`{value}` is not a file. Choose the unity executable."),
+                        );
                         return Task::none();
                     }
                 }
@@ -1507,11 +1599,15 @@ impl App {
                         self.cli.set_override_path(
                             self.app_settings.cli_path.as_ref().map(PathBuf::from),
                         );
-                        self.notice = Some(Notice::success("CLI path saved."));
+                        self.notifications.push_event(
+                            NotificationLevel::Success,
+                            "Notification",
+                            "CLI path saved.",
+                        );
                         self.refresh_status()
                     }
                     Err(error) => {
-                        self.notice = Some(Notice::error(error_text(&error)));
+                        self.notifications.push_error(&error);
                         Task::none()
                     }
                 }
@@ -1522,11 +1618,15 @@ impl App {
                 match settings::save(&self.app_settings) {
                     Ok(()) => {
                         self.cli.set_override_path(None);
-                        self.notice = Some(Notice::success("CLI path override cleared."));
+                        self.notifications.push_event(
+                            NotificationLevel::Success,
+                            "Notification",
+                            "CLI path override cleared.",
+                        );
                         self.refresh_status()
                     }
                     Err(error) => {
-                        self.notice = Some(Notice::error(error_text(&error)));
+                        self.notifications.push_error(&error);
                         Task::none()
                     }
                 }
@@ -1682,7 +1782,9 @@ impl App {
                     .map(|path| path.display().to_string())
                     .unwrap_or_default();
                 self.modal = Modal::NewProject(Box::new(state));
-                self.notice = None;
+                if let Some(id) = self.notifications.toast().map(|toast| toast.id) {
+                    self.notifications.toast_expired(id);
+                }
                 Task::batch([
                     load_new_project_editors(self.cli.clone()),
                     load_new_project_license(self.cli.clone()),
@@ -1978,21 +2080,33 @@ impl App {
                     self.sample_processes();
                 }
                 if let Err(error) = settings::save(&self.app_settings) {
-                    self.notice = Some(Notice::error(error_text(&error)));
+                    self.notifications.push_error(&error);
                 }
                 Task::none()
             }
             Message::CopyText(text) => {
-                self.notice = Some(Notice::success("Copied to the clipboard."));
+                self.notifications.push_event(
+                    NotificationLevel::Success,
+                    "Notification",
+                    "Copied to the clipboard.",
+                );
                 iced::clipboard::write(text)
             }
             Message::OpenFolder(path) => {
                 if let Err(error) = open_folder(&path) {
-                    self.notice = Some(Notice::error(error_text(&error)));
+                    self.notifications.push_error(&error);
                 }
                 Task::none()
             }
+        };
+
+        // Every CLI read appends its warnings and notifications to the sink.
+        // Draining after each message is what makes them reach the rail.
+        for advisory in self.cli.drain_advisories() {
+            self.notifications.push_advisory(&advisory);
         }
+
+        task
     }
 
     fn new_project_state(&self) -> Option<&NewProjectState> {
@@ -2141,18 +2255,26 @@ impl App {
             .map(ActiveJob::is_running)
             .unwrap_or(false)
         {
-            self.notice = Some(Notice::error("Another job is already running."));
+            self.notifications.push_event(
+                NotificationLevel::Danger,
+                "Job",
+                "Another job is already running.",
+            );
             return false;
         }
 
         match self.jobs.start(kind, spec) {
             Ok(started) => {
-                self.notice = Some(Notice::info(format!("Started: {}", started.command)));
+                self.notifications.push_event(
+                    NotificationLevel::Info,
+                    "Job",
+                    format!("Started: {}", started.command),
+                );
                 self.active_job = Some(ActiveJob::new(started));
                 true
             }
             Err(error) => {
-                self.notice = Some(Notice::error(error_text(&error)));
+                self.notifications.push_error(&error);
                 false
             }
         }
@@ -2163,6 +2285,10 @@ impl App {
         let mut finished: Option<(String, JobState, Option<UnityError>)> = None;
 
         for event in events {
+            for advisory in &event.advisories {
+                self.notifications.push_advisory(advisory);
+            }
+
             let Some(job) = self.active_job.as_mut() else {
                 continue;
             };
@@ -2209,22 +2335,32 @@ impl App {
 
         match state {
             JobState::Succeeded => {
-                self.notice = Some(Notice::success("Job finished successfully."));
+                self.notifications.push_event(
+                    NotificationLevel::Success,
+                    "Job",
+                    "Job finished successfully.",
+                );
             }
-            JobState::Failed => {
-                let message = error
-                    .as_ref()
-                    .map(error_text)
-                    .unwrap_or_else(|| "The job failed.".to_string());
-                self.notice = Some(Notice::error(message));
-            }
+            JobState::Failed => match &error {
+                Some(error) => {
+                    self.notifications.push_error(error);
+                }
+                None => {
+                    self.notifications.push_event(
+                        NotificationLevel::Danger,
+                        "Job",
+                        "The job failed.",
+                    );
+                }
+            },
             JobState::Cancelled => {
-                self.notice = Some(Notice::info("Job cancelled."));
+                self.notifications
+                    .push_event(NotificationLevel::Info, "Job", "Job cancelled.");
             }
             JobState::Running => {}
         }
 
-        match kind.as_str() {
+        let mut task = match kind.as_str() {
             "cli-install" | "cli-update" => {
                 Task::batch(vec![self.refresh_status(), self.load_overview_data(true)])
             }
@@ -2286,7 +2422,74 @@ impl App {
                 }
             }
             _ => Task::none(),
+        };
+
+        if kind == "remediation" {
+            if let Some(id) = self.remediating.take() {
+                match state {
+                    JobState::Succeeded => {
+                        self.notifications.set_state(id, ActionState::Idle);
+                        task = Task::batch(vec![task, self.refresh_page()]);
+                    }
+                    JobState::Failed | JobState::Cancelled => {
+                        self.notifications.set_state(id, ActionState::Failed);
+                    }
+                    JobState::Running => {}
+                }
+            }
         }
+
+        task
+    }
+
+    /// Starts the stored remediation command after the user's confirmation.
+    /// Nothing here retries or runs on its own.
+    fn confirm_notification(&mut self, id: u64) -> Task<Message> {
+        let Some(notification) = self.notifications.get(id) else {
+            return Task::none();
+        };
+        if notification.state != ActionState::Confirming {
+            return Task::none();
+        }
+        let Some(command) = notification.command.clone() else {
+            return Task::none();
+        };
+        let Some(remaining) = remediation_args(&command) else {
+            self.notifications.set_state(id, ActionState::Failed);
+            return Task::none();
+        };
+
+        if self
+            .active_job
+            .as_ref()
+            .map(ActiveJob::is_running)
+            .unwrap_or(false)
+        {
+            self.notifications.set_state(id, ActionState::Idle);
+            self.notifications.push_event(
+                NotificationLevel::Danger,
+                "Job",
+                "Another job is already running.",
+            );
+            return Task::none();
+        }
+
+        match self.cli.spec(&remaining, "ndjson") {
+            Ok(spec) => {
+                if self.start_job("remediation", spec) {
+                    self.remediating = Some(id);
+                    self.notifications.set_state(id, ActionState::Running);
+                } else {
+                    self.notifications.set_state(id, ActionState::Failed);
+                }
+            }
+            Err(error) => {
+                self.notifications.push_error(&error);
+                self.notifications.set_state(id, ActionState::Failed);
+            }
+        }
+
+        Task::none()
     }
 
     /// Starts missing Overview reads. `force` reloads data that is already
@@ -2448,11 +2651,15 @@ impl App {
         ShellVm {
             page: self.page,
             cli,
-            notice: self.notice.as_ref().map(|notice| NoticeVm {
-                tone: notice_tone(notice.kind),
-                text: notice.text.clone(),
-            }),
             job: self.active_job.as_ref().map(job_vm),
+            notifications: self.notifications.snapshot(),
+            unread: self.notifications.unread(),
+            rail_open: self.notifications.rail_open(),
+            toast: self.notifications.toast().map(|toast| ToastVm {
+                id: toast.id,
+                tone: notification_tone(toast.level),
+                message: toast.message.clone(),
+            }),
         }
     }
 
@@ -3466,11 +3673,12 @@ fn load_state<T, U>(loadable: &Loadable<T>, map: impl Fn(&T) -> U) -> LoadState<
     }
 }
 
-fn notice_tone(kind: NoticeKind) -> Tone {
-    match kind {
-        NoticeKind::Info => Tone::Info,
-        NoticeKind::Success => Tone::Success,
-        NoticeKind::Error => Tone::Danger,
+fn notification_tone(level: NotificationLevel) -> Tone {
+    match level {
+        NotificationLevel::Info => Tone::Info,
+        NotificationLevel::Success => Tone::Success,
+        NotificationLevel::Warning => Tone::Warning,
+        NotificationLevel::Danger => Tone::Danger,
     }
 }
 
@@ -4197,5 +4405,149 @@ mod tests {
         assert!(!AppSettings::default().process_metrics);
         let settings: AppSettings = serde_json::from_str("{}").unwrap();
         assert!(!settings.process_metrics);
+    }
+
+    fn store_advisory(
+        code: &str,
+        message: &str,
+        remediation: Option<serde_json::Value>,
+    ) -> unity_core::advisory::Advisory {
+        let mut value = serde_json::json!({ "code": code, "message": message });
+        if let Some(remediation) = remediation {
+            value["remediation"] = remediation;
+        }
+        unity_core::advisory::Advisory::from_value(
+            unity_core::advisory::AdvisoryKind::Warning,
+            &value,
+        )
+        .expect("test advisory is valid")
+    }
+
+    #[test]
+    fn view_model_exposes_notifications_unread_rail_and_toast() {
+        let (mut app, _) = App::boot();
+        app.notifications.clear();
+        app.notifications
+            .push_event(NotificationLevel::Info, "Notification", "One.");
+        app.notifications
+            .push_event(NotificationLevel::Warning, "Warning", "Two.");
+        app.notifications.set_rail_open(true);
+
+        let vm = app.view_model();
+
+        assert_eq!(vm.shell.notifications.len(), 2);
+        assert_eq!(vm.shell.notifications[0].message, "Two.");
+        assert_eq!(vm.shell.notifications[0].tone, Tone::Warning);
+        assert_eq!(vm.shell.notifications[0].label, "Warning");
+        assert_eq!(vm.shell.unread, 0);
+        assert!(vm.shell.rail_open);
+        let toast = vm.shell.toast.as_ref().expect("newest entry is toasted");
+        assert_eq!(toast.message, "Two.");
+        assert_eq!(toast.tone, Tone::Warning);
+    }
+
+    #[test]
+    fn a_hydrated_store_survives_the_view_model_mapping() {
+        let (mut app, _) = App::boot();
+        app.notifications.clear();
+        app.notifications.push_advisory(&store_advisory(
+            "CLI_COMPATIBILITY",
+            "Compatibility mode is on.",
+            Some(serde_json::json!({
+                "command": "unity status",
+                "requiresUserApproval": false
+            })),
+        ));
+        let id = app.notifications.snapshot()[0].id;
+        app.notifications.set_state(id, ActionState::Confirming);
+
+        let vm = app.view_model();
+        let entry = vm
+            .shell
+            .notifications
+            .first()
+            .expect("the hydrated entry is mapped");
+
+        assert_eq!(entry.id, id);
+        assert_eq!(entry.label, "CLI_COMPATIBILITY");
+        assert_eq!(entry.message, "Compatibility mode is on.");
+        assert_eq!(entry.command.as_deref(), Some("unity status"));
+        assert!(entry.can_run);
+        assert_eq!(
+            entry.state,
+            unity_hub_model::NotificationActionState::Confirming
+        );
+        assert_eq!(vm.shell.unread, 1);
+    }
+
+    #[test]
+    fn the_confirmation_gate_blocks_run_for_approval_required_remediation() {
+        let (mut app, _) = App::boot();
+        app.notifications.clear();
+        app.notifications.push_advisory(&store_advisory(
+            "CLI_UPDATE_AVAILABLE",
+            "A new CLI version is available.",
+            Some(serde_json::json!({
+                "command": "unity self-update",
+                "requiresUserApproval": true
+            })),
+        ));
+        let id = app.notifications.snapshot()[0].id;
+
+        let _ = app.update(Message::RunNotificationCommand(id));
+        assert_eq!(
+            app.notifications.get(id).map(|entry| entry.state),
+            Some(ActionState::Idle),
+            "approval-required entries have no Run action"
+        );
+
+        let _ = app.update(Message::ConfirmNotificationCommand(id));
+        assert_eq!(
+            app.notifications.get(id).map(|entry| entry.state),
+            Some(ActionState::Idle)
+        );
+        assert!(app.active_job.is_none());
+    }
+
+    #[test]
+    fn a_runnable_notification_waits_in_the_confirming_state() {
+        let (mut app, _) = App::boot();
+        app.notifications.clear();
+        app.notifications.push_advisory(&store_advisory(
+            "CLI_COMPATIBILITY",
+            "Compatibility mode is on.",
+            Some(serde_json::json!({
+                "command": "unity status",
+                "requiresUserApproval": false
+            })),
+        ));
+        let id = app.notifications.snapshot()[0].id;
+
+        let _ = app.update(Message::RunNotificationCommand(id));
+        assert_eq!(
+            app.notifications.get(id).map(|entry| entry.state),
+            Some(ActionState::Confirming)
+        );
+
+        let _ = app.update(Message::CancelNotificationCommand(id));
+        assert_eq!(
+            app.notifications.get(id).map(|entry| entry.state),
+            Some(ActionState::Idle)
+        );
+    }
+
+    #[test]
+    fn the_same_advisory_is_admitted_only_once() {
+        let (mut app, _) = App::boot();
+        app.notifications.clear();
+        let advisory = store_advisory(
+            "CLI_UPDATE_AVAILABLE",
+            "A new CLI version is available.",
+            None,
+        );
+
+        assert!(app.notifications.push_advisory(&advisory));
+        assert!(!app.notifications.push_advisory(&advisory));
+        assert_eq!(app.notifications.snapshot().len(), 1);
     }
 }

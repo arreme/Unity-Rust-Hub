@@ -10,9 +10,19 @@ use crate::{NewProjectField, Page, TemplateAuthoringMode, TemplateField, Templat
 pub enum UiAction {
     Navigate(Page),
     Refresh,
-    DismissNotice,
     DismissJob,
     CancelJob,
+
+    // Notification centre
+    ToggleNotificationRail,
+    DismissNotification(u64),
+    ClearNotifications,
+    DismissToast(u64),
+    CopyNotificationCommand(u64),
+    RunNotificationCommand(u64),
+    ConfirmNotificationCommand(u64),
+    CancelNotificationCommand(u64),
+
     SignIn,
     TextScaleChanged(u16),
     FontFamilyChanged(String),

@@ -1,11 +1,9 @@
 use iced::widget::{button, column, container, row, space};
 use iced::{Center, Element, Fill, Padding};
 
-use unity_hub_model::{
-    CliConnectionVm, JobPhase, JobVm, NoticeVm, Page, Tone, UiAction, ViewModel,
-};
+use unity_hub_model::{CliConnectionVm, JobPhase, JobVm, Page, Tone, UiAction, ViewModel};
 
-use crate::components::{self, badge, icon_tile, notice, scroll, status_dot, ButtonKind};
+use crate::components::{self, badge, icon_tile, scroll, status_dot, ButtonKind};
 use crate::fonts;
 use crate::icons::{self, icon};
 use crate::pages;
@@ -27,10 +25,6 @@ pub fn view(vm: &ViewModel) -> Element<'_, UiAction> {
             bottom: 48.0,
             left: spacing::PAGE_X,
         });
-
-    if let Some(notice) = &vm.shell.notice {
-        content = content.push(notice_view(notice));
-    }
 
     content = content.push(pages::view(&vm.page));
 
@@ -155,29 +149,6 @@ fn sidebar(vm: &ViewModel) -> Element<'_, UiAction> {
     .padding([24.0, 16.0])
     .style(theme::sidebar)
     .into()
-}
-
-fn notice_view(notice_vm: &NoticeVm) -> Element<'_, UiAction> {
-    let glyph = match notice_vm.tone {
-        Tone::Success => icons::CIRCLE_CHECK,
-        Tone::Danger => icons::CIRCLE_ALERT,
-        Tone::Warning => icons::TRIANGLE_ALERT,
-        _ => icons::INFO,
-    };
-
-    notice(
-        notice_vm.tone,
-        glyph,
-        row![
-            text(notice_vm.text.as_str()).size(font::BODY).width(Fill),
-            button(icon(icons::X, font::ICON_SMALL))
-                .on_press(UiAction::DismissNotice)
-                .padding(6)
-                .style(theme::button_ghost),
-        ]
-        .spacing(10)
-        .align_y(Center),
-    )
 }
 
 fn job_view(job: &JobVm) -> Element<'_, UiAction> {

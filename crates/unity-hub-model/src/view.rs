@@ -103,10 +103,35 @@ pub struct BadgeVm {
     pub tone: Tone,
 }
 
+/// Where a notification's remediation command stands. The UI only offers the
+/// actions the current state allows; nothing advances without a user click.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotificationActionState {
+    Idle,
+    Confirming,
+    Running,
+    Failed,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NoticeVm {
+pub struct NotificationVm {
+    pub id: u64,
     pub tone: Tone,
-    pub text: String,
+    /// The CLI code when the entry has one, else a short kind label such as
+    /// "Notification", "Warning", "Job" or "Error".
+    pub label: String,
+    pub message: String,
+    pub command: Option<String>,
+    /// True only when the remediation may run without an explicit approval.
+    pub can_run: bool,
+    pub state: NotificationActionState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToastVm {
+    pub id: u64,
+    pub tone: Tone,
+    pub message: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -142,8 +167,14 @@ pub enum CliConnectionVm {
 pub struct ShellVm {
     pub page: Page,
     pub cli: CliConnectionVm,
-    pub notice: Option<NoticeVm>,
     pub job: Option<JobVm>,
+    /// Notification-centre entries, newest first.
+    pub notifications: Vec<NotificationVm>,
+    /// How many entries arrived since the rail was last opened.
+    pub unread: u32,
+    pub rail_open: bool,
+    /// The newest entry, shown inline above the page content until it expires.
+    pub toast: Option<ToastVm>,
 }
 
 // One snapshot exists per frame, so the variant size gap costs nothing worth

@@ -147,7 +147,10 @@ fn shell(page: Page) -> ShellVm {
         cli: CliConnectionVm::Connected {
             version: Some("1.0.0".to_string()),
         },
-        notice: None,
+        notifications: Vec::new(),
+        unread: 0,
+        rail_open: false,
+        toast: None,
         job: None,
     }
 }
@@ -570,10 +573,6 @@ fn job_running() -> ViewModel {
 
 fn job_failed() -> ViewModel {
     let mut vm = overview();
-    vm.shell.notice = Some(unity_hub_model::NoticeVm {
-        tone: Tone::Danger,
-        text: "The job failed.".to_string(),
-    });
     vm.shell.job = Some(JobVm {
         kind: "project-upgrade".to_string(),
         command: "unity projects upgrade /games/orbital --to 6000.3.0f1 --yes".to_string(),
