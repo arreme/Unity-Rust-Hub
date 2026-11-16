@@ -322,6 +322,57 @@ fn format_signal() -> &'static Regex {
     })
 }
 
+/// Script-facing output changes: a piped table gained a header row, a bare
+/// value became a table, or the notes now tell scripts to pass
+/// `--format human`. These break pipelines without renaming a command.
+fn script_output_wording() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r"(?isx)
+            \bnow\s+starts?\s+with\b.{0,140}?\b(?:header\s+row|key\s+and\s+value)\b
+            | \bnow\s+captures?\s+a\s+table\b
+            | \bcaptures?\s+a\s+table\b
+            | \bbare\b.{0,120}?\b--format\s+human\b
+            | \b--format\s+human\b.{0,120}?\bbare\b
+            | \bnow\s+(?:prints?|returns?|writes?)\b.{0,160}?\bnot\s+the\s+bare\b
+            ",
+        )
+        .expect("valid regex")
+    })
+}
+
+/// Option values that used to be coerced are now refused. Callers that pass
+/// `7rows`, `1e3` or `0x50` where a whole number is expected break.
+fn strict_value_wording() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r"(?isx)
+            \bplain\s+whole\s+numbers?\b
+            | \b(?:are|is)\s+now\s+usage\s+errors?\b
+            | \bnow\s+usage\s+errors?\b
+            ",
+        )
+        .expect("valid regex")
+    })
+}
+
+/// A search or filter moved to a different expression language, so existing
+/// patterns are refused instead of being reinterpreted.
+fn syntax_change_wording() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r"(?isx)
+            \bregular\s+expression\s+syntax\b.{0,180}?\b(?:refus(?:ed|es)|lookahead|lookbehind|backreferences?)\b
+            | \b(?:lookahead|lookbehind|backreferences?)\b.{0,180}?\brefus(?:ed|es)\b
+            ",
+        )
+        .expect("valid regex")
+    })
+}
+
 fn editor_signal() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
@@ -346,6 +397,9 @@ fn fix_contract_wording(text: &str) -> bool {
         || (fix_reverse_exit_change_wording().is_match(text) && format_signal().is_match(text))
         || (fix_now_exit_wording().is_match(text) && fix_exit_contract_marker().is_match(text))
         || (fix_output_change_wording().is_match(text) && format_signal().is_match(text))
+        || script_output_wording().is_match(text)
+        || strict_value_wording().is_match(text)
+        || syntax_change_wording().is_match(text)
 }
 
 fn markdown_link() -> &'static Regex {
@@ -498,6 +552,13 @@ fn find_breaking_changes(sections: &[ChangelogSection]) -> Vec<BreakingChange> {
                 Some("deprecated functionality")
             } else if is_fix_or_security {
                 fix_contract_wording(&text_lower).then_some("behavior or output-shape change")
+            } else if script_output_wording().is_match(&text_lower)
+                || strict_value_wording().is_match(&text_lower)
+                || syntax_change_wording().is_match(&text_lower)
+            {
+                // Report the output shape before a stray "removed" elsewhere in
+                // the same entry turns a silent script break into a removal.
+                Some("behavior or output-shape change")
             } else if breaking_wording().is_match(&text_lower) {
                 // Do not blanket-flag every Changed entry: a release's Changed
                 // section is mostly ordinary behavior updates. Only wording
@@ -608,6 +669,30 @@ mod tests {
 
 - **Breaking:** `unity close` and `unity projects close` fail with exit `11` and `PROJECTS_CLOSE_NOT_A_PROJECT` when the path isn't a Unity project (no `Assets` or `ProjectSettings` folder), such as a mistyped name. They used to succeed with `reason: "not_open"`.
 - `unity install` and `unity install-modules` write their module notices, such as an added dependency or a skipped unknown module, to stderr under `--format json`, `ndjson` and `tsv`, so stdout holds only the output a script parses.
+"#;
+
+    const V1_0_1: &str = r#"## 1.0.1
+
+### Changed
+
+- `unity analytics status`, `unity skill install`, the summary lines of `unity projects report` and the signed-out message of `unity cloud` now print their intro, tip and refusal lines on stderr instead of stdout, so `--quiet` no longer changes what stdout holds. Under `--format github` the signed-out `unity cloud` message is now an error annotation on stdout.
+- `unity commands --format json` and `--format ndjson` now give every command a `path` key, the full command path such as `analytics opt-in`, so the `path` column of `--format tsv` names a key in the JSON output.
+- `--format tsv` (the default when output is piped) now starts with a `key` and `value` header row, then one row per field, for `unity version`, `unity --version --format tsv`, `unity config get`, `set`, `unset`, `path`, `resolve` and `update-check`, `unity cache key`, `unity language`, and `unity upgrade` with `--check` or `--dry-run`. The field names are the ones `--json` uses. `--no-header` leaves the header out. To capture the bare cache key in a script, run `unity cache key --format human`; a GitHub Actions workflow made by an earlier `unity ci init` fails at its cache key step until you add that flag or regenerate it with `unity ci init --overwrite`.
+- `unity upgrade --format ndjson` with `--check` or `--dry-run`, or when the CLI is already up to date, prints one result frame with the same fields as `--json`, where it used to print a tab-separated row.
+- `--format tsv` (the default when output is piped) now starts with a header row for `unity editors`, `unity cloud org current`, `unity auth token`, `unity license`, `unity doctor --ci`, `unity docs --url`, `unity assets export` and the `unity command` dialog answer; `--no-header` leaves it out. A piped `$(unity auth token)`, `unity editors path` or `unity docs --url` now captures a table, so scripts pass `--format human` for the bare value. `unity doctor --ci` tsv now prints its `--json` fields as `key` and `value` rows (`verdict`, then `checks.0.id`, `checks.0.status` and so on), where it printed `verdict`, `check.<id>` and `hint.<id>` rows.
+- `unity editors path --format ndjson` now prints the same data as `--json` as one result line, not the bare path.
+- `--format tsv` (the default when output is piped) now starts with a header row for `unity setup` (every client and `setup all`), `unity skill install --all` and `unity self-install --print-target`. `setup` and `self-install --print-target` print `key` and `value` rows, one per field; `skill install --all` prints one row per skill record under the `--json` keys. `--no-header` leaves the header out. To capture the bare `--print-target` path in a script, run it with `--format human`.
+- **Breaking:** `unity completion <shell>` with `--json`, `--format json` or `--format ndjson` writes the standard JSON envelope, with the shell name in `data.shell` and the script in `data.script`, instead of the raw script. To save a script, run `unity completion <shell>` without a machine format. The command keeps its documented JSON contract.
+- `unity commands --grep` patterns use Rust regular expression syntax, so lookahead, lookbehind and backreferences are refused with a usage error, and a literal brace needs escaping (`\{json\}`). With `--shard` and `--rerun-failed`, a `--filter` entry that is not a valid Rust expression is refused with the reason instead of matching no tests. A plain `unity test --filter` is still passed to the Editor unchanged.
+- `unity test`, `unity test --affected` and `unity build` now sort names by code point. Only names that mix an emoji with a full-width or other character at U+E000 or above can notice. A `last-build.json` that escapes a lone surrogate now counts as no previous build.
+- Numeric options such as `--port`, `--pid`, `--lines`, `--tail` and `--limit` take plain whole numbers. Values like `7rows`, `1e3` and `0x50` are now usage errors instead of being read as a number.
+- `unity ci init` no longer refuses a project whose root is spelled with a trailing slash when a symlink sits above that root.
+- A folder whose `ProjectSettings/ProjectVersion.txt` is a link to nothing, a pipe or a device is no longer treated as a Unity project. Only a regular file, or a link to one, counts.
+
+### Fixed
+
+- `unity builds log` and `unity jobs logs` now print a `line` header row under `--format tsv`, then one row per log line, as every other command does. `unity jobs logs` no longer prints its per-step banner lines under tsv, so every row is a log line. `--no-header` leaves the header out, and an empty log is the header alone. Human, GitHub, json and ndjson output is unchanged.
+- `unity install modules` installs modules for a Unity version that is promoted but not yet published, on Windows. The module list now comes from the release data for that version instead of being refused as unverifiable.
 "#;
 
     #[test]
@@ -743,5 +828,58 @@ mod tests {
                 .any(|change| change.text.contains("module notices")),
             "an install fix that only moves notices to stderr is not a breaking change"
         );
+    }
+
+    #[test]
+    fn v1_0_1_script_output_changes_are_flagged() {
+        let parsed = parse_changelog(V1_0_1);
+
+        for needle in [
+            "analytics status",
+            "cache key",
+            "unity upgrade --format ndjson",
+            "captures a table",
+            "unity editors path",
+            "print-target",
+            "completion",
+            "regular expression syntax",
+            "Numeric options",
+            "builds log",
+        ] {
+            let change = parsed
+                .breaking_changes
+                .iter()
+                .find(|change| change.text.contains(needle))
+                .unwrap_or_else(|| panic!("{needle} should be flagged"));
+            assert!(
+                matches!(
+                    change.reason.as_str(),
+                    "explicitly marked breaking" | "behavior or output-shape change"
+                ),
+                "{needle} should be an output or behavior change, got {:?}",
+                change.reason
+            );
+        }
+    }
+
+    #[test]
+    fn v1_0_1_additive_and_fix_entries_stay_quiet() {
+        let parsed = parse_changelog(V1_0_1);
+
+        for needle in [
+            "every command a `path` key",
+            "sort names by code point",
+            "`unity ci init` no longer refuses",
+            "ProjectVersion.txt",
+            "promoted but not yet published",
+        ] {
+            assert!(
+                !parsed
+                    .breaking_changes
+                    .iter()
+                    .any(|change| change.text.contains(needle)),
+                "{needle} is additive or a fix, not a breaking change"
+            );
+        }
     }
 }

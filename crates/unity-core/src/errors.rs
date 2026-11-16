@@ -74,7 +74,8 @@ impl std::fmt::Display for UnityError {
 
 impl std::error::Error for UnityError {}
 
-/// Exit-code semantics from the Unity CLI 1.0.0 reference.
+/// Exit-code semantics from the Unity CLI 1.0.1 reference (unchanged since
+/// 1.0.0).
 pub fn is_retryable_exit_code(code: i32) -> bool {
     matches!(code, 7 | 9 | 10 | 12 | 14 | 17 | 18 | 130 | 143)
 }

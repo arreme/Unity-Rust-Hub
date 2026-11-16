@@ -579,7 +579,7 @@ pub struct TemplateInfo {
     pub version: String,
     #[serde(default)]
     pub status: String,
-    /// Missing or blank for Universal 2D in CLI 1.0.0.
+    /// Missing or blank for Universal 2D in CLI 1.0.x.
     #[serde(default)]
     pub render_pipeline: Option<String>,
     #[serde(default)]

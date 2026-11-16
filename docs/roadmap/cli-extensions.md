@@ -3,6 +3,11 @@
 Investigation of the Unity CLI `1.0.0` command surface against the app's current
 coverage, with a proposed catalogue of extensions, tools, and follow-ups.
 
+> Re-verified against CLI `1.0.1` on 2026-11-17. 1.0.1 adds `commands[].path`, and
+> the ignored live suite now asserts the adapter's command surface with it. The
+> 1.0.0 upgrade notes and their remaining open items are in
+> [`../unity-cli-1.0.1-upgrade.md`](../unity-cli-1.0.1-upgrade.md).
+
 The app today exposes five pages — Overview, Editors, Projects, Changelog, Settings —
 and deliberately treats the CLI as the source of truth for every mutation. Most of the
 CLI is therefore unused. This document lists what is worth adding, why, and what it
@@ -268,7 +273,7 @@ These are for the repo, not the user, and they protect the CLI-as-source-of-trut
 
 | Tool | What it does | Effort |
 |---|---|---|
-| **CLI schema snapshot test** | Run `unity commands --format json` in CI, diff the subset of commands/flags the app uses, fail on removal or rename. Would have caught `projects create --path` → `--output-dir`. | M |
+| **CLI schema snapshot test** | Run `unity commands --format json` in CI, diff the subset of commands/flags the app uses, fail on removal or rename. Would have caught `projects create --path` → `--output-dir`. The ignored live suite already asserts the adapter's 29 command paths against `commands[].path`; the CI snapshot diff remains proposed. | M |
 | **Envelope fixture recorder** | Capture real, redacted `--format json`/`ndjson` envelopes from a live CLI into `unity-core/tests/fixtures`, so parser tests do not hand-write shapes that drift. | M |
 | **Command-spec tests** | One test per new command: exact argv, `--format`, `--non-interactive`, timeout, and env (`DO_NOT_TRACK=1`). | S per command |
 | **Stream-contract tests** | Assert where each command writes frames, log, and result (`install` stdout, `build` stderr, `self-update` human). | M |

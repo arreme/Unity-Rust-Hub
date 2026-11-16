@@ -494,9 +494,11 @@ impl UnityCli {
         Ok(info)
     }
 
-    /// `unity self-update` does not emit NDJSON in 1.0.0: it prints a two-column
-    /// result line even under `--format ndjson`. Use human output for the job
-    /// log, then refresh `unity version` once the job finishes.
+    /// `unity self-update` (alias `upgrade`) does not emit NDJSON for the
+    /// update itself in 1.0.x: it prints a two-column result line even under
+    /// `--format ndjson`. 1.0.1 added a result frame for `--check`, `--dry-run`
+    /// and an already-up-to-date run, but not for an install. Use human output
+    /// for the job log, then refresh `unity version` once the job finishes.
     pub fn self_update_spec(&self) -> Result<CommandSpec, UnityError> {
         self.spec(&svec(&["self-update", "--yes"]), "human")
     }

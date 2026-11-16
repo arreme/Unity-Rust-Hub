@@ -13,6 +13,45 @@ use unity_core::changelog::{
 use unity_core::models::TemplateFilter;
 use unity_core::UnityCli;
 
+use std::collections::BTreeSet;
+
+use serde_json::Value;
+
+/// Every command path the adapter builds in `runner.rs`. A bump that renames
+/// or removes one of them breaks the app even when the JSON shape still looks
+/// familiar, so the live suite asserts the surface before the app ships.
+const REQUIRED_COMMANDS: &[&str] = &[
+    "version",
+    "install-path",
+    "editors",
+    "editors running",
+    "editors info",
+    "pipeline editors",
+    "status",
+    "releases",
+    "modules",
+    "projects",
+    "projects add",
+    "projects remove",
+    "projects pin",
+    "projects unpin",
+    "projects create",
+    "projects upgrade",
+    "templates",
+    "templates info",
+    "templates create",
+    "templates pack",
+    "open",
+    "changelog",
+    "auth status",
+    "auth login",
+    "auth broker ensure",
+    "license status",
+    "install",
+    "install-modules",
+    "self-update",
+];
+
 #[test]
 #[ignore = "requires the Unity CLI"]
 fn reads_real_cli_data() {
@@ -139,5 +178,50 @@ fn reads_real_cli_data() {
     println!("breaking by section: {by_section:?}");
     for change in parsed.breaking_changes.iter().take(25) {
         println!("  [{}] {}", change.reason, change.text);
+    }
+}
+
+#[test]
+#[ignore = "requires the Unity CLI"]
+fn app_command_surface_is_still_exposed() {
+    let cli = UnityCli::new();
+    let executed = cli
+        .run_args(&["commands".to_string()], "json")
+        .expect("unity commands --format json");
+    let data = executed
+        .envelope
+        .data
+        .expect("`unity commands` should return data");
+    let commands = data
+        .get("commands")
+        .and_then(Value::as_array)
+        .expect("`data.commands` should be an array");
+
+    let mut paths = BTreeSet::new();
+    collect_command_paths(commands, &mut paths);
+
+    let missing: Vec<&str> = REQUIRED_COMMANDS
+        .iter()
+        .copied()
+        .filter(|path| !paths.contains(*path))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "the CLI no longer exposes commands the app builds: {missing:?}"
+    );
+    println!(
+        "checked {} command paths against `unity commands` (1.0.1 exposes `path` on every node)",
+        REQUIRED_COMMANDS.len()
+    );
+}
+
+fn collect_command_paths(nodes: &[Value], paths: &mut BTreeSet<String>) {
+    for node in nodes {
+        if let Some(path) = node.get("path").and_then(Value::as_str) {
+            paths.insert(path.to_string());
+        }
+        if let Some(children) = node.get("subcommands").and_then(Value::as_array) {
+            collect_command_paths(children, paths);
+        }
     }
 }

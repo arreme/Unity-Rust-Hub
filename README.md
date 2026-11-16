@@ -10,7 +10,7 @@ No webview, no Node toolchain, no HTML/JS layer. The release build is a single R
 binary that renders through iced's `wgpu` backend, with iced's `tiny-skia` software
 renderer kept as an automatic fallback when no usable GPU adapter is available.
 
-The Unity CLI is at `1.0.0` (stable). This app is built against its JSON envelope and
+The Unity CLI is at `1.0.1` (stable). This app is built against its JSON envelope and
 treats the CLI as the source of truth for every mutation.
 
 ## Download
@@ -359,9 +359,9 @@ CLI beta.15 removed the `list` subcommands and deprecated a few flags, so the ad
 uses the current spellings: `unity projects --all`, `unity modules <version>`,
 `unity releases --offset`, and `unity install-modules --editor-version`.
 
-The adapter is aligned to CLI 1.0.0:
+The adapter is aligned to CLI 1.0.1:
 
-- Exit codes `17` (`UNAVAILABLE`) and `18` (`AWAITING_INPUT`) are still part of the 1.0.0
+- Exit codes `17` (`UNAVAILABLE`) and `18` (`AWAITING_INPUT`) are still part of the 1.0.1
   table (verified with `unity commands --format json`), mapped, and treated as retryable.
 - `unity install-modules` exiting `0` when every named module is already installed counts
   as success, even when no result frame is written.
@@ -370,10 +370,18 @@ The adapter is aligned to CLI 1.0.0:
 - The Overview running-Editor card merges `unity editors running` with
   `unity pipeline editors` to show phase, Pipeline version, update availability, Safe Mode,
   and a blocking dialog. It stays read-only; dialogs are not answered from the app.
-- `self-update` does not emit NDJSON in 1.0.0 (it prints a two-column result line), so the
-  update job asks for human output and the app refreshes `unity version` afterwards.
+- `self-update` does not emit NDJSON for the update itself in 1.0.x (it prints a two-column
+  result line), so the update job asks for human output and the app refreshes `unity
+  version` afterwards. 1.0.1 added a result frame for `--check`, `--dry-run` and an
+  already-up-to-date run; the check still uses `--format json`.
+- 1.0.1 made `--format tsv` (the default when piped) start with a header row for many
+  commands, and `unity completion` now returns a JSON envelope under a machine format. The
+  app always requests JSON and never calls `completion`, so neither change affects it.
+- `unity commands --format json` now gives every command a `path`. The ignored live suite
+  uses those paths to assert the app's command surface before a CLI bump.
 - 1.0.0 adds `unity close --if-saved` and `unity install --headless`; neither is wired into
-  the UI yet. See [`docs/unity-cli-1.0-upgrade.md`](docs/unity-cli-1.0-upgrade.md).
+  the UI yet. See [`docs/unity-cli-1.0-upgrade.md`](docs/unity-cli-1.0-upgrade.md) and
+  [`docs/unity-cli-1.0.1-upgrade.md`](docs/unity-cli-1.0.1-upgrade.md).
 
 Resolution order for the binary:
 
@@ -433,7 +441,7 @@ Resolution order for the binary:
   refuse a destination inside the source project. Replacing an existing archive or
   template requires an explicit confirmation.
 - No credentials are read, stored, or forwarded. The app never passes
-  `--insecure-storage` to `unity auth login`, so a CLI 1.0.0 sign-in either uses the
+  `--insecure-storage` to `unity auth login`, so a CLI 1.0.x sign-in either uses the
   system credential store or reports that no store is available. Changelog Markdown is
   displayed as plain text, never interpreted.
 

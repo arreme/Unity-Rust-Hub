@@ -1,5 +1,9 @@
 # Unity CLI 1.0.0 upgrade audit
 
+> Superseded for the current CLI by
+> [`unity-cli-1.0.1-upgrade.md`](unity-cli-1.0.1-upgrade.md). This file remains the
+> 1.0.0 baseline and the source of the open items still tracked there.
+
 The app was aligned to Unity CLI `1.0.0-beta.16`. The stable `1.0.0` release is
 now installed, and this document records what still works, what needed a small
 fix, and what 1.0.0 enables next.
