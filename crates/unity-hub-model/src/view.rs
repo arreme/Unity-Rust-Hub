@@ -170,7 +170,7 @@ pub struct ShellVm {
     pub job: Option<JobVm>,
     /// Notification-centre entries, newest first.
     pub notifications: Vec<NotificationVm>,
-    /// How many entries arrived since the rail was last opened.
+    /// How many entries are still unread.
     pub unread: u32,
     pub rail_open: bool,
     /// The newest entry, shown inline above the page content until it expires.

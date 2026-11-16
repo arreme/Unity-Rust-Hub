@@ -39,6 +39,8 @@ pub struct Notification {
     pub command: Option<String>,
     pub can_run: bool,
     pub state: ActionState,
+    /// New entries start unread; opening the rail marks them read.
+    pub read: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,7 +54,6 @@ pub struct Toast {
 #[derive(Debug, Clone, Default)]
 pub struct NotificationStore {
     entries: Vec<Notification>,
-    unread: u32,
     rail_open: bool,
     toast: Option<Toast>,
     /// Stable keys already admitted this session, so repeated advisories and
@@ -140,18 +141,19 @@ impl NotificationStore {
 
     pub fn clear(&mut self) {
         self.entries.clear();
-        self.unread = 0;
         self.toast = None;
         // `seen` is deliberately kept: a refresh that repeats a cleared
         // advisory must not resurrect it.
     }
 
-    /// Opening the rail marks everything read; closing it leaves the badge at
-    /// zero until the next entry arrives.
+    /// Opening the rail marks every entry read. Entries that arrive afterwards
+    /// stay unread until the rail is opened again.
     pub fn set_rail_open(&mut self, open: bool) {
         self.rail_open = open;
         if open {
-            self.unread = 0;
+            for entry in &mut self.entries {
+                entry.read = true;
+            }
         }
     }
 
@@ -173,7 +175,8 @@ impl NotificationStore {
     }
 
     pub fn unread(&self) -> u32 {
-        self.unread
+        let unread = self.entries.iter().filter(|entry| !entry.read).count();
+        u32::try_from(unread).unwrap_or(u32::MAX)
     }
 
     pub fn rail_open(&self) -> bool {
@@ -236,9 +239,9 @@ impl NotificationStore {
                 command,
                 can_run,
                 state: ActionState::Idle,
+                read: false,
             },
         );
-        self.unread = self.unread.saturating_add(1);
         true
     }
 }
@@ -353,23 +356,38 @@ mod tests {
     }
 
     #[test]
-    fn every_new_entry_raises_unread_and_opens_with_the_rail() {
+    fn the_badge_counts_entries_that_are_still_unread() {
         let mut store = NotificationStore::new();
         store.push_event(NotificationLevel::Success, "Job", "One.");
         store.push_event(NotificationLevel::Success, "Job", "Two.");
 
         assert_eq!(store.unread(), 2);
 
+        let newest = store.snapshot()[0].id;
+        store.dismiss(newest);
+        assert_eq!(
+            store.unread(),
+            1,
+            "dismissing an unread entry lowers the badge"
+        );
+
         store.set_rail_open(true);
         assert!(store.rail_open());
-        assert_eq!(store.unread(), 0);
+        assert_eq!(store.unread(), 0, "opening the rail marks everything read");
 
         store.push_event(NotificationLevel::Success, "Job", "Three.");
-        assert_eq!(store.unread(), 1);
+        assert_eq!(
+            store.unread(),
+            1,
+            "an arrival while the rail is open is unread until the next open"
+        );
+
+        store.set_rail_open(true);
+        assert_eq!(store.unread(), 0);
 
         store.set_rail_open(false);
         assert!(!store.rail_open());
-        assert_eq!(store.unread(), 1);
+        assert_eq!(store.unread(), 0);
     }
 
     #[test]
@@ -465,13 +483,20 @@ mod tests {
             remediation_args("unity self-update"),
             Some(vec!["self-update".to_string()])
         );
+        // `Path` treats `/` as a separator on every supported platform.
         assert_eq!(
-            remediation_args(r"C:\Tools\unity\unity.exe install lts"),
-            Some(vec!["install".to_string(), "lts".to_string()])
+            remediation_args("/usr/local/bin/unity status"),
+            Some(vec!["status".to_string()])
         );
         assert_eq!(
             remediation_args("/usr/local/bin/UNITY status"),
             Some(vec!["status".to_string()])
+        );
+        // A Windows drive path only parses where `\` separates components.
+        #[cfg(windows)]
+        assert_eq!(
+            remediation_args(r"C:\Tools\unity\unity.exe install lts"),
+            Some(vec!["install".to_string(), "lts".to_string()])
         );
         assert_eq!(remediation_args("unity"), Some(Vec::new()));
     }
