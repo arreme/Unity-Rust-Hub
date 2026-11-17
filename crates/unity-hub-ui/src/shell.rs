@@ -268,16 +268,10 @@ fn notification_card(notification: &NotificationVm) -> Element<'_, UiAction> {
 
     if let Some(command) = &notification.command {
         body = body.push(
-            container(
-                text(command.as_str())
-                    .size(font::MONO)
-                    .font(fonts::mono())
-                    .style(theme::muted_text)
-                    .width(Fill),
-            )
-            .padding([spacing::SMALL, 10.0])
-            .width(Fill)
-            .style(theme::inset),
+            container(mono_wrapping(command.as_str()))
+                .padding([spacing::SMALL, 10.0])
+                .width(Fill)
+                .style(theme::inset),
         );
 
         if let Some(actions) = notification_actions(notification) {

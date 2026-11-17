@@ -1182,6 +1182,10 @@ mod tests {
 
         let command = entry.command.as_deref().expect("fixture needs a command");
         assert!(command.chars().count() > 80);
+        assert!(
+            command.contains("/home/ada/.cache/unity-rust-hub/templates"),
+            "the fixture needs an unspaced token wider than the inset"
+        );
     }
 
     #[test]
