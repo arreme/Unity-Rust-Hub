@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use iced::{Subscription, Task};
 use serde_json::Value;
+use unity_core::advisory::Advisory;
 use unity_core::bootstrap;
 use unity_core::changelog::{ChangelogRequest, ChangelogView, CliChangelogProvider};
 use unity_core::models::{
@@ -1051,7 +1052,14 @@ impl App {
                     .get(id)
                     .and_then(|notification| notification.command.clone())
                 {
-                    Some(command) => iced::clipboard::write(command),
+                    Some(command) => {
+                        self.notifications.push_event(
+                            NotificationLevel::Success,
+                            "Notification",
+                            "Copied to the clipboard.",
+                        );
+                        iced::clipboard::write(command)
+                    }
                     None => Task::none(),
                 }
             }
@@ -2285,9 +2293,9 @@ impl App {
         let mut finished: Option<(String, JobState, Option<UnityError>)> = None;
 
         for event in events {
-            for advisory in &event.advisories {
-                self.notifications.push_advisory(advisory);
-            }
+            // Ingest before the active-job guard: a stream's advisories belong
+            // to the job, not to whichever job the UI currently tracks.
+            self.ingest_job_advisories(&event.advisories);
 
             let Some(job) = self.active_job.as_mut() else {
                 continue;
@@ -2360,7 +2368,7 @@ impl App {
             JobState::Running => {}
         }
 
-        let mut task = match kind.as_str() {
+        let task = match kind.as_str() {
             "cli-install" | "cli-update" => {
                 Task::batch(vec![self.refresh_status(), self.load_overview_data(true)])
             }
@@ -2424,22 +2432,49 @@ impl App {
             _ => Task::none(),
         };
 
-        if kind == "remediation" {
-            if let Some(id) = self.remediating.take() {
-                match state {
-                    JobState::Succeeded => {
-                        self.notifications.set_state(id, ActionState::Idle);
-                        task = Task::batch(vec![task, self.refresh_page()]);
-                    }
-                    JobState::Failed | JobState::Cancelled => {
-                        self.notifications.set_state(id, ActionState::Failed);
-                    }
-                    JobState::Running => {}
-                }
-            }
-        }
+        // The helper passes non-remediation work through unchanged.
+        self.apply_job_terminal(&kind, state, task)
+    }
 
-        task
+    /// Applies a finished job to a running remediation notification.
+    ///
+    /// A successful remediation returns the entry to Idle and refreshes the
+    /// page the command may have changed; a failed or cancelled one stays
+    /// visible as Failed. Other job kinds pass their follow-up work through
+    /// untouched.
+    fn apply_job_terminal(
+        &mut self,
+        kind: &str,
+        state: JobState,
+        task: Task<Message>,
+    ) -> Task<Message> {
+        if kind != "remediation" {
+            return task;
+        }
+        let Some(id) = self.remediating.take() else {
+            return task;
+        };
+
+        match state {
+            JobState::Succeeded => {
+                self.notifications.set_state(id, ActionState::Idle);
+                Task::batch(vec![task, self.refresh_page()])
+            }
+            JobState::Failed | JobState::Cancelled => {
+                self.notifications.set_state(id, ActionState::Failed);
+                task
+            }
+            JobState::Running => task,
+        }
+    }
+
+    /// Adds the advisories attached to one job stream event. The store
+    /// deduplicates them, so a stream that repeats a warning does not repeat
+    /// the entry.
+    fn ingest_job_advisories(&mut self, advisories: &[Advisory]) {
+        for advisory in advisories {
+            self.notifications.push_advisory(advisory);
+        }
     }
 
     /// Starts the stored remediation command after the user's confirmation.
@@ -4549,5 +4584,114 @@ mod tests {
         assert!(app.notifications.push_advisory(&advisory));
         assert!(!app.notifications.push_advisory(&advisory));
         assert_eq!(app.notifications.snapshot().len(), 1);
+    }
+
+    #[test]
+    fn a_successful_remediation_returns_to_idle_and_refreshes_the_page() {
+        let (mut app, _) = App::boot();
+        app.notifications.clear();
+        app.notifications.push_advisory(&store_advisory(
+            "CLI_COMPATIBILITY",
+            "Compatibility mode is on.",
+            Some(serde_json::json!({
+                "command": "unity status",
+                "requiresUserApproval": false
+            })),
+        ));
+        let id = app.notifications.snapshot()[0].id;
+        app.remediating = Some(id);
+        app.notifications.set_state(id, ActionState::Running);
+
+        let task = app.apply_job_terminal("remediation", JobState::Succeeded, Task::none());
+
+        assert_eq!(
+            app.notifications.get(id).map(|entry| entry.state),
+            Some(ActionState::Idle),
+            "a successful remediation is runnable again"
+        );
+        assert!(app.remediating.is_none(), "the finished job is taken");
+        assert!(
+            task.units() > 0,
+            "the success path batches the page refresh"
+        );
+    }
+
+    #[test]
+    fn a_failed_remediation_stays_failed_without_a_refresh() {
+        let (mut app, _) = App::boot();
+        app.notifications.clear();
+        app.notifications.push_advisory(&store_advisory(
+            "CLI_COMPATIBILITY",
+            "Compatibility mode is on.",
+            Some(serde_json::json!({
+                "command": "unity status",
+                "requiresUserApproval": false
+            })),
+        ));
+        let id = app.notifications.snapshot()[0].id;
+        app.remediating = Some(id);
+        app.notifications.set_state(id, ActionState::Running);
+
+        let task = app.apply_job_terminal("remediation", JobState::Failed, Task::none());
+
+        assert_eq!(
+            app.notifications.get(id).map(|entry| entry.state),
+            Some(ActionState::Failed)
+        );
+        assert!(app.remediating.is_none(), "the finished job is taken");
+        assert_eq!(task.units(), 0, "a failed remediation does not refresh");
+    }
+
+    #[test]
+    fn job_advisories_are_ingested_once_each() {
+        let (mut app, _) = App::boot();
+        app.notifications.clear();
+        let warning = store_advisory(
+            "INSTALLER_DISK_SPACE",
+            "Only 6.4 GB is free on the install volume.",
+            None,
+        );
+
+        app.ingest_job_advisories(&[warning.clone(), warning.clone()]);
+        assert_eq!(
+            app.notifications.snapshot().len(),
+            1,
+            "a repeated job warning collapses"
+        );
+
+        let distinct = store_advisory(
+            "INSTALLER_DISK_SPACE",
+            "Only 2.1 GB is free on the install volume.",
+            None,
+        );
+        app.ingest_job_advisories(&[distinct]);
+        assert_eq!(
+            app.notifications.snapshot().len(),
+            2,
+            "a different warning is a second entry"
+        );
+    }
+
+    #[test]
+    fn copying_a_notification_command_confirms_on_the_clipboard() {
+        let (mut app, _) = App::boot();
+        app.notifications.clear();
+        app.notifications.push_advisory(&store_advisory(
+            "CLI_UPDATE_AVAILABLE",
+            "A new CLI version is available.",
+            Some(serde_json::json!({
+                "command": "unity self-update",
+                "requiresUserApproval": true
+            })),
+        ));
+        let id = app.notifications.snapshot()[0].id;
+
+        let _ = app.update(Message::CopyNotificationCommand(id));
+
+        assert_eq!(
+            app.notifications.snapshot()[0].message,
+            "Copied to the clipboard."
+        );
+        assert_eq!(app.notifications.unread(), 2);
     }
 }

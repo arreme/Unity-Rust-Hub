@@ -7,8 +7,8 @@
 //! cargo test -p unity-core --test live -- --ignored --nocapture
 //! ```
 //!
-//! Written against Unity CLI 1.0.1. Every test is read-only: nothing is
-//! installed, created, packed, upgraded, removed, or self-updated.
+//! Written against Unity CLI 1.0.1. No test installs, creates, packs, upgrades,
+//! removes or self-updates anything; one test starts the auth broker.
 
 use unity_core::changelog::{
     parse_changelog, ChangelogProvider, ChangelogRequest, CliChangelogProvider,

@@ -63,8 +63,9 @@ fixture when a new state needs review.
 - Page header: title, subtitle, and actions (Refresh on Overview, Editors,
   Projects).
 - Sidebar notifications affordance: unread badge, collapsed by default.
-- Notification rail: unread, empty, long message, and one item per action state
-  (action available, confirming, running, failed).
+- Notification rail: unread, empty, long message, dismissed, and one item per
+  action state (action available, confirming, running, failed). A dismissed
+  entry disappears from the rail, and the gallery covers that post-dismiss state.
 - Toast: inline above the page, auto-expires after about five seconds, dismissible.
 - Job card: running with progress, succeeded, failed with error detail,
   cancelled, with collapsible-looking log area.

@@ -86,8 +86,10 @@ Files: `crates/unity-core/src/advisory.rs` (new), `src/lib.rs`, `src/envelope.rs
    - string → message; object → `message` (fallback `text`, then `detail`), `code`, `data`,
      `remediation` object or bare string.
    - `requiresUserApproval` defaults to `true`.
-   - `dedupe_key`: `code` plus canonicalised `data` (serde_json renders maps in sorted key order),
-     otherwise the message. Blank/whitespace-only entries are dropped.
+   - `dedupe_key`: `code` plus canonicalised `data` (serde_json renders maps in sorted key order)
+     when `data` is present; `code` plus the message when `data` is absent, so two warnings that
+     share a code stay distinct; the message alone when there is no code.
+     Blank/whitespace-only entries are dropped.
 2. `CliEnvelope`: drop `skip` from `warnings`/`notifications`; keep `#[serde(default)]`.
    Add `impl<T> CliEnvelope<T> { pub fn advisories(&self) -> Vec<Advisory> }` mapping warnings →
    `Warning` and notifications → `Notification`.

@@ -148,6 +148,10 @@ pub fn all() -> Vec<Fixture> {
             view_model: notifications_rail_empty(),
         },
         Fixture {
+            name: "Notifications · dismissed",
+            view_model: notifications_dismissed(),
+        },
+        Fixture {
             name: "Notifications · toast",
             view_model: notifications_toast(),
         },
@@ -676,6 +680,31 @@ fn notifications_rail_empty() -> ViewModel {
     vm
 }
 
+/// Three entries were present and the newest (id 4) was dismissed. Dismissal
+/// removes the entry, so the honest rendered state is the remaining rail.
+fn notifications_dismissed() -> ViewModel {
+    let mut vm = overview();
+
+    vm.shell.notifications = vec![
+        notification(
+            3,
+            Tone::Warning,
+            "Warning",
+            "The project list came from a cache. Refresh to read the projects again.",
+        ),
+        notification(
+            2,
+            Tone::Success,
+            "Editor installed",
+            "Unity 6000.3.0f1 finished installing.",
+        ),
+    ];
+    vm.shell.unread = 2;
+    vm.shell.rail_open = true;
+
+    vm
+}
+
 fn notifications_toast() -> ViewModel {
     let mut vm = overview();
     vm.shell.toast = Some(ToastVm {
@@ -1152,6 +1181,27 @@ mod tests {
         assert_eq!(vm.shell.unread, 0);
         assert!(vm.shell.notifications.is_empty());
         assert!(vm.shell.toast.is_none());
+    }
+
+    #[test]
+    fn dismissed_fixture_drops_the_dismissed_entry() {
+        let vm = fixture("Notifications · dismissed");
+
+        assert!(vm.shell.rail_open);
+        assert_eq!(vm.shell.unread, 2);
+        assert!(vm.shell.toast.is_none());
+
+        let ids: Vec<u64> = vm
+            .shell
+            .notifications
+            .iter()
+            .map(|entry| entry.id)
+            .collect();
+        assert_eq!(ids, vec![3, 2], "the two survivors keep their order");
+        assert!(
+            !ids.contains(&4),
+            "the dismissed entry is gone from the rail"
+        );
     }
 
     #[test]

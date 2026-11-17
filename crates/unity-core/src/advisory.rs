@@ -85,13 +85,14 @@ impl Advisory {
 
     /// The identity used to collapse repeats of the same advisory.
     ///
-    /// Entries with a code are keyed by the code plus canonicalised `data`, so
-    /// two identical refreshes produce the same key. Entries without a code
-    /// fall back to their message.
+    /// Entries with a code and `data` are keyed by the code plus canonicalised
+    /// `data`, so two identical refreshes produce the same key. Entries with a
+    /// code but no `data` include the message, because two different warnings
+    /// can share a code. Entries without a code fall back to their message.
     pub fn dedupe_key(&self) -> String {
         match (&self.code, &self.data) {
-            (Some(code), Some(data)) => format!("{code}:{}", canonical_data(data)),
-            (Some(code), None) => code.clone(),
+            (Some(code), Some(data)) => format!("{code}:data:{}", canonical_data(data)),
+            (Some(code), None) => format!("{code}:message:{}", self.message),
             (None, _) => self.message.clone(),
         }
     }
@@ -343,5 +344,44 @@ mod tests {
         .expect("valid");
 
         assert_eq!(advisory.dedupe_key(), "Compatibility mode is on.");
+    }
+
+    #[test]
+    fn dedupe_key_includes_the_message_when_a_code_has_no_data() {
+        let first = Advisory::from_value(
+            AdvisoryKind::Warning,
+            &serde_json::json!({
+                "code": "CLI_CACHE_STALE",
+                "message": "The Editor cache is out of date."
+            }),
+        )
+        .expect("valid");
+        let second = Advisory::from_value(
+            AdvisoryKind::Warning,
+            &serde_json::json!({
+                "code": "CLI_CACHE_STALE",
+                "message": "The templates cache is out of date."
+            }),
+        )
+        .expect("valid");
+
+        assert_ne!(
+            first.dedupe_key(),
+            second.dedupe_key(),
+            "two warnings that share a code must not collapse"
+        );
+    }
+
+    #[test]
+    fn dedupe_key_is_stable_for_the_same_code_and_message_without_data() {
+        let value = serde_json::json!({
+            "code": "CLI_CACHE_STALE",
+            "message": "The Editor cache is out of date."
+        });
+
+        let first = Advisory::from_value(AdvisoryKind::Warning, &value).expect("valid");
+        let second = Advisory::from_value(AdvisoryKind::Warning, &value).expect("valid");
+
+        assert_eq!(first.dedupe_key(), second.dedupe_key());
     }
 }

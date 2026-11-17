@@ -2,8 +2,10 @@
 //!
 //! Everything here is session-only. The store deduplicates CLI advisories by
 //! their stable key so a refresh that repeats the same warning does not raise
-//! the unread badge or toast again. Remediation commands are only ever stored
-//! as validated argument vectors; no shell is involved.
+//! the unread badge or toast again. Events and errors are never deduplicated: a
+//! second successful install or a retried failure must always be announced.
+//! Remediation commands are only ever stored as validated argument vectors; no
+//! shell is involved.
 
 use std::collections::HashSet;
 
@@ -56,8 +58,8 @@ pub struct NotificationStore {
     entries: Vec<Notification>,
     rail_open: bool,
     toast: Option<Toast>,
-    /// Stable keys already admitted this session, so repeated advisories and
-    /// repeated events never duplicate an entry.
+    /// Advisory keys already admitted this session, so a refresh that repeats
+    /// the same warning never duplicates an entry.
     seen: HashSet<String>,
     next_id: u64,
 }
@@ -67,8 +69,9 @@ impl NotificationStore {
         Self::default()
     }
 
-    /// Adds a CLI advisory. Returns false when the same code+data (or message,
-    /// for codeless advisories) was already shown this session.
+    /// Adds a CLI advisory. Returns false when the same advisory — same code
+    /// plus `data`, same code plus message, or the same codeless message — was
+    /// already shown this session.
     pub fn push_advisory(&mut self, advisory: &Advisory) -> bool {
         let key = advisory.dedupe_key();
         if self.seen.contains(&key) {
@@ -88,19 +91,14 @@ impl NotificationStore {
             None => (None, false),
         };
 
-        self.admit(
-            key,
-            level,
-            label,
-            advisory.message.clone(),
-            command,
-            can_run,
-        )
+        self.seen.insert(key);
+        self.admit(level, label, advisory.message.clone(), command, can_run);
+        true
     }
 
     /// Adds a structured failure, keeping its code, detail and remediation.
+    /// A repeated failure is a genuine event, so it is always admitted.
     pub fn push_error(&mut self, error: &UnityError) -> bool {
-        let key = format!("{}|{}", error.code, error_text(error));
         let (command, can_run) = match error.remediation() {
             Some(remediation) => (
                 Some(remediation.command.clone()),
@@ -110,25 +108,25 @@ impl NotificationStore {
         };
 
         self.admit(
-            key,
             NotificationLevel::Danger,
             error.code.clone(),
             error_text(error),
             command,
             can_run,
-        )
+        );
+        true
     }
 
     /// Adds a plain message, e.g. a job outcome or a local settings error.
+    /// Repeated messages are genuine events and are always admitted.
     pub fn push_event(
         &mut self,
         level: NotificationLevel,
         label: &str,
         message: impl Into<String>,
     ) -> bool {
-        let message = message.into();
-        let key = format!("{label}|{message}");
-        self.admit(key, level, label.to_string(), message, None, false)
+        self.admit(level, label.to_string(), message.into(), None, false);
+        true
     }
 
     pub fn dismiss(&mut self, id: u64) {
@@ -208,19 +206,16 @@ impl NotificationStore {
             .collect()
     }
 
+    /// Mints the id, replaces the toast and inserts the entry as unread.
+    /// Deduplication is the caller's job: only advisories consult `seen`.
     fn admit(
         &mut self,
-        key: String,
         level: NotificationLevel,
         label: String,
         message: String,
         command: Option<String>,
         can_run: bool,
-    ) -> bool {
-        if !self.seen.insert(key) {
-            return false;
-        }
-
+    ) {
         self.next_id = self.next_id.saturating_add(1);
         let id = self.next_id;
         // A new entry replaces the toast instead of queueing behind it.
@@ -242,7 +237,6 @@ impl NotificationStore {
                 read: false,
             },
         );
-        true
     }
 }
 
@@ -346,11 +340,45 @@ mod tests {
     }
 
     #[test]
-    fn repeated_events_are_ignored() {
+    fn repeated_events_are_admitted_each_time() {
         let mut store = NotificationStore::new();
 
-        assert!(store.push_event(NotificationLevel::Info, "Job", "Started."));
-        assert!(!store.push_event(NotificationLevel::Info, "Job", "Started."));
+        assert!(store.push_event(
+            NotificationLevel::Success,
+            "Job",
+            "Job finished successfully."
+        ));
+        assert!(store.push_event(
+            NotificationLevel::Success,
+            "Job",
+            "Job finished successfully."
+        ));
+
+        let snapshot = store.snapshot();
+        assert_eq!(
+            snapshot.len(),
+            2,
+            "a second identical job outcome is still news"
+        );
+        assert_eq!(snapshot[0].message, snapshot[1].message);
+        assert_eq!(store.unread(), 2);
+        assert_eq!(
+            store.toast().map(|toast| toast.message.as_str()),
+            Some("Job finished successfully.")
+        );
+    }
+
+    #[test]
+    fn repeated_advisories_collapse_to_one_entry() {
+        let mut store = NotificationStore::new();
+        let advisory = advisory(
+            AdvisoryKind::Warning,
+            json!({ "code": "CLI_COMPATIBILITY", "message": "Compatibility mode is on." }),
+        );
+
+        assert!(store.push_advisory(&advisory));
+        assert!(!store.push_advisory(&advisory));
+
         assert_eq!(store.snapshot().len(), 1);
         assert_eq!(store.unread(), 1);
     }
@@ -543,10 +571,14 @@ mod tests {
         );
 
         assert!(store.push_error(&error));
-        assert!(!store.push_error(&error));
+        assert!(
+            store.push_error(&error),
+            "a retried identical failure is a new failure"
+        );
 
         let snapshot = store.snapshot();
-        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot.len(), 2);
+        assert_eq!(store.unread(), 2);
         let entry = &snapshot[0];
         assert_eq!(entry.label, "PROJECT_OPEN_IN_EDITOR");
         assert_eq!(entry.tone, Tone::Danger);
