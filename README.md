@@ -94,6 +94,11 @@ update target.
   a focused heuristic for **possible breaking changes**, plus a raw Markdown view.
 - **Provider-ready changelog** — `ChangelogProvider` is a trait; v1 uses
   `CliChangelogProvider`. A remote JSON/docs feed can be added without changing the UI.
+- **Notifications** — every CLI envelope's `warnings[]` and `notifications[]`, job
+  outcomes, and app errors land in a collapsible right-hand rail with an unread badge.
+  New items raise a dismissible toast. Remediation commands are shown in full with Copy,
+  and Run is offered only when the CLI marks a command safe to run, after a second
+  explicit confirmation. History is session-only.
 - **Settings** — explicit CLI path override with auto-detection fallback, a persisted
   text-size setting (100%, 110%, 125%, 150%), and a persisted font family chosen from the
   fonts installed on the PC (default Tahoma).
@@ -130,7 +135,7 @@ crates/unity-hub-ui/        Visual layer; depends only on unity-hub-model + iced
   src/components.rs         Shared cards, badges, tables, headers.
   src/pages/                overview, editors, projects, templates, processes,
                             changelog, settings.
-  src/shell.rs              Sidebar, notice and job cards.
+  src/shell.rs              Sidebar, notification rail and toast, job cards.
   src/modals.rs             Full-screen dialog screens.
   src/fixtures.rs           Deterministic content for every screen/state.
   src/bin/gallery.rs        CLI-free design gallery.
@@ -347,8 +352,8 @@ On Linux, the CLI reads the stored sign-in through its resident auth broker. Whe
 broker is not running, every command reads the Secret Service keyring itself, and a
 locked keyring shows its unlock prompt once per command. Before the first credential
 read (and before `unity open`), the app runs `unity auth broker ensure` so the whole
-batch shares one session. `UNITY_NO_AUTH_BROKER` defeats this, so the app shows a notice
-when it is set.
+batch shares one session. `UNITY_NO_AUTH_BROKER` defeats this, so the app shows a
+notification when it is set.
 
 Set `UNITY_HUB_CLI_TRACE=1` to append every CLI invocation (`argv`, start time, exit code,
 elapsed time) to `cli-trace.log` next to `cli-install.json`. It is the fastest way to
@@ -395,6 +400,8 @@ Resolution order for the binary:
 
 - The shell is a fixed sidebar plus a scrollable content area; each page draws its
   own title and actions, so there is no top bar.
+- The notification rail is a third column that reflows the page instead of overlaying
+  it (no `stack!`), and the toast is an inline banner above the page content.
 - Tables are built from header and row containers rather than `iced::widget::table`;
   the table widget caused a rendering stall with live data in iced 0.14.
 - Dialogs replace the shell with a full-screen view instead of using `stack!`. Stacked
@@ -452,6 +459,7 @@ Resolution order for the binary:
 - Project upgrades are restricted to installed Editors.
 - Changelog breaking flags are heuristics over English release notes, not a guarantee.
 - Jobs are not persisted across app restarts; closing the window cancels them.
+- Notification history is session-only; there are no OS-level notifications.
 - Only one job may run at a time.
 - Linux is the most exercised platform. macOS/Windows builds run in CI, but the runtime
   behavior there is less tested than on Linux.

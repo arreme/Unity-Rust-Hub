@@ -62,7 +62,10 @@ fixture when a new state needs review.
 - Sidebar footer: CLI status (checking / connected with version / missing).
 - Page header: title, subtitle, and actions (Refresh on Overview, Editors,
   Projects).
-- Notice banner: info, success, error.
+- Sidebar notifications affordance: unread badge, collapsed by default.
+- Notification rail: unread, empty, long message, and one item per action state
+  (action available, confirming, running, failed).
+- Toast: inline above the page, auto-expires after about five seconds, dismissible.
 - Job card: running with progress, succeeded, failed with error detail,
   cancelled, with collapsible-looking log area.
 - Minimum window 1040×680; default 1280×840.
@@ -165,7 +168,7 @@ fixture when a new state needs review.
   locked keyring asks to unlock once per command. The app runs
   `unity auth broker ensure` before its first credential read and before
   `unity open`. `UNITY_NO_AUTH_BROKER` disables that sharing, so it is surfaced
-  as a notice.
+  as a notification.
 
 ## Design gallery
 
@@ -174,9 +177,10 @@ cargo run -p unity-hub-ui --bin unity-hub-design-gallery
 ```
 
 The gallery renders every fixture without a Unity CLI and is the fastest way to
-review loading/error/modal/job states against Figma. `cargo test -p unity-hub-ui`
-also constructs every fixture, so a broken screen fails CI without opening a
-window.
+review loading/error/modal/job states against Figma. It covers the notification rail,
+the inline toast, and the four notification action states without a CLI installed.
+`cargo test -p unity-hub-ui` also constructs every fixture, so a broken screen fails
+CI without opening a window.
 
 Environment variables for review:
 
