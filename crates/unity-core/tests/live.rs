@@ -6,11 +6,14 @@
 //! ```text
 //! cargo test -p unity-core --test live -- --ignored --nocapture
 //! ```
+//!
+//! Written against Unity CLI 1.0.1. Every test is read-only: nothing is
+//! installed, created, packed, upgraded, removed, or self-updated.
 
 use unity_core::changelog::{
     parse_changelog, ChangelogProvider, ChangelogRequest, CliChangelogProvider,
 };
-use unity_core::models::TemplateFilter;
+use unity_core::models::{CreateProjectOptions, TemplateFilter};
 use unity_core::UnityCli;
 
 use std::collections::BTreeSet;
@@ -179,6 +182,125 @@ fn reads_real_cli_data() {
     for change in parsed.breaking_changes.iter().take(25) {
         println!("  [{}] {}", change.reason, change.text);
     }
+}
+
+/// `doctor` and `env` describe the machine the CLI runs on. Both must parse
+/// and report success, so a diagnostic taken right after a CLI bump is
+/// trustworthy.
+#[test]
+#[ignore = "requires the Unity CLI"]
+fn doctor_and_env_return_success_envelopes() {
+    let cli = UnityCli::new();
+
+    for command in ["doctor", "env"] {
+        let executed = cli
+            .run_args(&[command.to_string()], "json")
+            .unwrap_or_else(|error| panic!("`unity {command} --format json` failed: {error}"));
+        assert!(
+            executed.envelope.success,
+            "`unity {command}` returned success: false"
+        );
+        let data = executed
+            .envelope
+            .data
+            .as_ref()
+            .unwrap_or_else(|| panic!("`unity {command}` should return data"));
+        println!(
+            "{command}: success (cliVersion {})",
+            data.get("cliVersion")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+        );
+    }
+}
+
+/// Templates are read per installed Editor. A machine with no Editor cannot
+/// answer the read, so print a note and pass instead of failing.
+#[test]
+#[ignore = "requires the Unity CLI"]
+fn templates_for_the_first_installed_editor() {
+    let cli = UnityCli::new();
+    let editors = cli.editors_installed().expect("unity editors --installed");
+
+    let Some(editor) = editors.first() else {
+        println!("no installed Editor; skipping the templates read");
+        return;
+    };
+
+    let templates = cli
+        .templates(&editor.version, TemplateFilter::All, false)
+        .expect("unity templates --brief");
+    println!(
+        "templates for {}: {} (first: {})",
+        editor.version,
+        templates.len(),
+        templates
+            .first()
+            .map(|template| template.name.as_str())
+            .unwrap_or("-")
+    );
+}
+
+/// `unity status` exits 12 when no Editor is connected; the adapter turns that
+/// into an empty list, so `Ok` is the whole contract. An empty list is normal
+/// on a machine with no Editor running.
+#[test]
+#[ignore = "requires the Unity CLI"]
+fn status_returns_ok_with_or_without_running_editors() {
+    let cli = UnityCli::new();
+    let instances = cli.status_instances().expect("unity status");
+    println!("status instances: {}", instances.len());
+}
+
+/// `projects create` is never spawned here: only the argv the wizard would run
+/// is checked. The spec is built from a synthetic output path and nothing is
+/// written to disk.
+#[test]
+#[ignore = "requires the Unity CLI"]
+fn projects_create_spec_passes_the_non_interactive_flags() {
+    let cli = UnityCli::new();
+    let options = CreateProjectOptions {
+        name: "NotificationSmoke".to_string(),
+        output_dir: std::env::temp_dir()
+            .join("unity-rust-hub-live-smoke")
+            .display()
+            .to_string(),
+        editor_version: "6000.3.15f1".to_string(),
+        template: "com.unity.template.urp-blank".to_string(),
+        architecture: "x86_64".to_string(),
+        open: false,
+        bare: false,
+    };
+
+    let spec = cli
+        .create_project_spec(&options)
+        .expect("`unity projects create` spec");
+    println!("projects create: {}", spec.display());
+
+    assert_eq!(spec.args.first().map(String::as_str), Some("projects"));
+    assert_eq!(spec.args.get(1).map(String::as_str), Some("create"));
+
+    for flag in [
+        "--no-cloud",
+        "--format",
+        "--non-interactive",
+        "--no-pager",
+        "--no-banner",
+    ] {
+        assert!(
+            spec.args.iter().any(|arg| arg == flag),
+            "argv is missing `{flag}`: {:?}",
+            spec.args
+        );
+    }
+
+    assert!(
+        spec.args
+            .windows(2)
+            .any(|pair| pair[0] == "--format" && pair[1] == "ndjson"),
+        "argv should request ndjson: {:?}",
+        spec.args
+    );
 }
 
 #[test]
