@@ -3,8 +3,10 @@
 A native desktop GUI for the [Unity CLI](https://docs.unity.com/en-us/unity-cli/unity-cli),
 written in Rust with [iced](https://iced.rs). It wraps the official `unity` binary so
 you can inspect the local toolchain, manage Editors and modules, create and change
-projects, browse and author project templates, watch running Editors, and read
-release notes without keeping a terminal open.
+projects, browse and author project templates, watch running Editors, read release
+notes, check machine readiness with diagnostics, install the Unity agent skill across
+AI clients, and review CLI advisories as notifications — without keeping a terminal
+open.
 
 No webview, no Node toolchain, no HTML/JS layer. The release build is a single Rust
 binary that renders through iced's `wgpu` backend, with iced's `tiny-skia` software
@@ -33,7 +35,7 @@ The AppImage embeds its version so
 Install it through Shelly instead of copying it into place:
 
 ```bash
-mv UnityRustHub-0.3.0-linux-x86_64.AppImage UnityRustHub.AppImage
+mv UnityRustHub-0.4.0-linux-x86_64.AppImage UnityRustHub.AppImage
 shelly install appimage ./UnityRustHub.AppImage
 shelly list appimage  # note the exact Name Shelly stored
 shelly sync appimage UnityRustHub arreme/Unity-Rust-Hub GitHub
@@ -379,9 +381,11 @@ cargo test -p unity-core --test live -- --ignored --nocapture
 ```
 
 This only reads data: version, Editors, modules, releases, projects, templates
-(`--brief` and `info`), running Editors, `unity status`, auth/license, update check,
-and the installed changelog. It never installs an Editor, creates or packs a project,
-changes a project, or updates the CLI.
+(`--brief` and `info`), running Editors, `unity status`, machine diagnostics
+(`doctor` and `env`), auth/license, update check, and the installed changelog. It
+never installs an Editor, creates or packs a project, changes a project, or
+updates the CLI; the `projects create` smoke covers only the argv the wizard
+would run.
 
 ## Performance
 
