@@ -172,13 +172,15 @@ jobs:
           grep -qx "X-AppImage-Version=${VERSION}" "$desktop"
 
           # The launcher must be the passthrough script, never a build that
-          # exports interpreter or loader paths into the session.
+          # exports interpreter or loader paths into the session. Match
+          # assignments, not mentions: the passthrough script documents the
+          # injected variables in comments and may scrub them with `unset`.
           apprun="$extract_dir/squashfs-root/AppRun"
           if [[ ! -f "$apprun" ]]; then
             echo "no AppRun found in AppImage" >&2
             exit 1
           fi
-          if grep -qE 'PYTHONHOME|PYTHONPATH|LD_LIBRARY_PATH' "$apprun"; then
+          if grep -qE '(^|[[:space:];&])(export[[:space:]]+)?(PYTHONHOME|PYTHONPATH|LD_LIBRARY_PATH)=' "$apprun"; then
             echo "AppRun exports launcher-injected environment paths" >&2
             exit 1
           fi
