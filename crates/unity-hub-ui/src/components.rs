@@ -122,13 +122,24 @@ pub fn checkbox<'a>(
         .style(theme::checkbox)
 }
 
+/// Width of the thumb drawn by [`scroll`] and [`scroll_horizontal`].
+pub const SCROLLBAR_WIDTH: f32 = 6.0;
+/// Blank space iced keeps between the scroll edge and the scrollbar thumb.
+pub const SCROLLBAR_MARGIN: f32 = 2.0;
+/// The lane the vertical scrollbar paints over, measured from the scroll edge.
+/// iced draws scrollbars on top of the content instead of reserving layout
+/// space, so edge-to-edge content must keep clear of it (see the rail).
+pub const SCROLLBAR_LANE: f32 = 2.0 * SCROLLBAR_MARGIN + SCROLLBAR_WIDTH;
+/// Right padding that keeps edge-to-edge content out of the scrollbar lane.
+pub const SCROLL_GUTTER: f32 = SCROLLBAR_LANE + spacing::XS;
+
 pub fn scroll<'a>(content: impl Into<Element<'a, UiAction>>) -> Scrollable<'a, UiAction> {
     iced::widget::scrollable(content)
         .direction(iced::widget::scrollable::Direction::Vertical(
             iced::widget::scrollable::Scrollbar::new()
-                .width(6)
-                .scroller_width(6)
-                .margin(2),
+                .width(SCROLLBAR_WIDTH)
+                .scroller_width(SCROLLBAR_WIDTH)
+                .margin(SCROLLBAR_MARGIN),
         ))
         .style(theme::scrollable)
 }
@@ -140,9 +151,9 @@ pub fn scroll_horizontal<'a>(
     iced::widget::scrollable(content)
         .direction(iced::widget::scrollable::Direction::Horizontal(
             iced::widget::scrollable::Scrollbar::new()
-                .width(6)
-                .scroller_width(6)
-                .margin(2),
+                .width(SCROLLBAR_WIDTH)
+                .scroller_width(SCROLLBAR_WIDTH)
+                .margin(SCROLLBAR_MARGIN),
         ))
         .width(Fill)
         .style(theme::scrollable)
@@ -545,3 +556,20 @@ pub fn hint<'a>(label: impl IntoFragment<'a>) -> Element<'a, UiAction> {
 
 /// The padding a pick list needs to match the inputs.
 pub const PICK_LIST_PADDING: [f32; 2] = [10.0, 14.0];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// iced paints the scrollbar over the scroll area's right edge instead of
+    /// reserving a layout lane, so edge-to-edge content (the notification rail
+    /// cards) has to keep a gutter clear of it. The gutter must cover the whole
+    /// painted lane, margins included, or cards run under the thumb.
+    #[test]
+    fn scroll_gutter_clears_the_scrollbar_lane() {
+        let gutter = SCROLL_GUTTER;
+        let lane = 2.0 * SCROLLBAR_MARGIN + SCROLLBAR_WIDTH;
+
+        assert!(gutter > lane);
+    }
+}

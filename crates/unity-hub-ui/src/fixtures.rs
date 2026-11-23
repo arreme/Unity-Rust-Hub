@@ -329,6 +329,10 @@ pub fn all() -> Vec<Fixture> {
             view_model: notifications_rail_empty(),
         },
         Fixture {
+            name: "Notifications · rail overflow",
+            view_model: notifications_rail_overflow(),
+        },
+        Fixture {
             name: "Notifications · dismissed",
             view_model: notifications_dismissed(),
         },
@@ -2085,6 +2089,71 @@ fn notifications_rail_unread() -> ViewModel {
 fn notifications_rail_empty() -> ViewModel {
     let mut vm = overview();
     vm.shell.rail_open = true;
+    vm
+}
+
+/// A rail long enough to scroll, so the gallery shows the scrollbar floating
+/// over its reserved lane instead of the cards.
+fn notifications_rail_overflow() -> ViewModel {
+    let mut vm = overview();
+
+    let mut advisory = notification(
+        12,
+        Tone::Info,
+        "CLI advisory",
+        "Unity CLI 1.0.2 is available. Run the upgrade command to update the CLI.",
+    );
+    advisory.command = Some("unity upgrade --channel stable".to_string());
+    advisory.can_run = true;
+
+    vm.shell.notifications = vec![
+        advisory,
+        notification(
+            11,
+            Tone::Warning,
+            "Warning",
+            "The project list came from a cache. Refresh to read the projects again.",
+        ),
+        notification(
+            10,
+            Tone::Success,
+            "Editor installed",
+            "Unity 6000.3.1f1 finished installing.",
+        ),
+        notification(
+            9,
+            Tone::Warning,
+            "Warning",
+            "The template registry was read from a stale snapshot. Refresh to pick up newly published templates.",
+        ),
+        notification(
+            8,
+            Tone::Success,
+            "Editor installed",
+            "Unity 6000.2.1f1 finished installing.",
+        ),
+        notification(
+            7,
+            Tone::Warning,
+            "Warning",
+            "The Editor list came from a cache. Refresh to read the Editors again.",
+        ),
+        notification(
+            6,
+            Tone::Success,
+            "Project created",
+            "rhythm-sampler was created from the Universal 2D template.",
+        ),
+        notification(
+            5,
+            Tone::Danger,
+            "Editor install failed",
+            "Unity 6000.3.2f1 could not be installed. The download stopped mid-way.",
+        ),
+    ];
+    vm.shell.unread = 8;
+    vm.shell.rail_open = true;
+
     vm
 }
 

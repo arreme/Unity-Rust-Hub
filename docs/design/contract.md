@@ -64,9 +64,11 @@ fixture when a new state needs review.
 - Page header: title, subtitle, and actions (Refresh on Overview, Editors,
   Projects; Refresh plus Copy report on Diagnostics).
 - Sidebar notifications affordance: unread badge, collapsed by default.
-- Notification rail: unread, empty, long message, dismissed, and one item per
-  action state (action available, confirming, running, failed). A dismissed
-  entry disappears from the rail, and the gallery covers that post-dismiss state.
+- Notification rail: unread, empty, overflow, long message, dismissed, and one
+  item per action state (action available, confirming, running, failed). A
+  dismissed entry disappears from the rail, and the gallery covers that
+  post-dismiss state. The scrolling list keeps the scrollbar's painted lane
+  clear of the cards.
   Advisory entries come from the CLI's `notifications[]` and `warnings[]` on any
   read or streamed job frame: a CLI update notice keeps its code as the label
   and shows the exact remediation command with Copy, a plugin beta warning shows
