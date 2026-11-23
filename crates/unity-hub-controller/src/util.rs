@@ -5,7 +5,7 @@ use std::process::{Command, Stdio};
 use std::sync::{mpsc, OnceLock};
 
 use chrono::{DateTime, Utc};
-use unity_core::UnityError;
+use unity_core::{scrub_appimage_env, UnityError};
 
 type ReadJob = Box<dyn FnOnce() + Send + 'static>;
 
@@ -158,7 +158,11 @@ pub fn open_folder(path: &str) -> Result<(), UnityError> {
         "xdg-open"
     };
 
-    std::process::Command::new(program)
+    let mut command = std::process::Command::new(program);
+    // The file manager is a child of a possibly AppImage-launched GUI; it must
+    // resolve its own runtime, not the launcher's ephemeral paths.
+    scrub_appimage_env(&mut command);
+    command
         .arg(path)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
@@ -252,7 +256,11 @@ pub fn open_external_url(url: &str) -> Result<(), String> {
     let candidates = opener_commands(url)?;
     let mut last_error = None;
     for candidate in candidates {
-        match Command::new(candidate.program)
+        let mut command = Command::new(candidate.program);
+        // The browser opener is a child of a possibly AppImage-launched GUI;
+        // it must resolve its own runtime, not the launcher's ephemeral paths.
+        scrub_appimage_env(&mut command);
+        match command
             .args(&candidate.args)
             .stdin(Stdio::null())
             .stdout(Stdio::null())

@@ -101,6 +101,46 @@ jobs:
           VERSION: ${{ needs.verify.outputs.version }}
         run: cargo packager --config Packager.toml --formats appimage,deb,pacman
 
+      # cargo-packager embeds a stock compiled AppRun that exports PYTHONHOME,
+      # PYTHONPATH, LD_LIBRARY_PATH and friends pointing into the AppImage's
+      # ephemeral /tmp/.mount_* mount. Those values leak into every process the
+      # app starts and outlive the mount, breaking downstream interpreters
+      # (observed in the wild: graphify could not start Python). Replace the
+      # launcher with the passthrough script in packaging/appimage/AppRun, then
+      # verify the patched image below.
+      - name: Replace the stock AppImage launcher
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mapfile -t appimages < <(find dist -maxdepth 1 -type f -name '*.AppImage' -print)
+          if [[ "${#appimages[@]}" -ne 1 ]]; then
+            printf 'expected exactly one AppImage in dist, found %d\n' "${#appimages[@]}" >&2
+            printf '%s\n' "${appimages[@]}" >&2
+            exit 1
+          fi
+          appimage="${appimages[0]}"
+
+          workdir="$(mktemp -d)"
+          trap 'rm -rf "$workdir"' EXIT
+          extract_dir="$workdir/squashfs-root"
+          mkdir "$extract_dir"
+
+          (
+            cd "$extract_dir"
+            "$GITHUB_WORKSPACE/$appimage" --appimage-extract >/dev/null
+          )
+
+          install -m 755 packaging/appimage/AppRun "$extract_dir/squashfs-root/AppRun"
+
+          curl -fsSL -o "$workdir/appimagetool" \
+            https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x "$workdir/appimagetool"
+
+          "$workdir/appimagetool" --appimage-extract-and-run \
+            "$extract_dir/squashfs-root" "$appimage.patched"
+          mv "$appimage.patched" "$appimage"
+
       - name: Verify AppImage version metadata
         shell: bash
         run: |
@@ -130,6 +170,18 @@ jobs:
           fi
 
           grep -qx "X-AppImage-Version=${VERSION}" "$desktop"
+
+          # The launcher must be the passthrough script, never a build that
+          # exports interpreter or loader paths into the session.
+          apprun="$extract_dir/squashfs-root/AppRun"
+          if [[ ! -f "$apprun" ]]; then
+            echo "no AppRun found in AppImage" >&2
+            exit 1
+          fi
+          if grep -qE 'PYTHONHOME|PYTHONPATH|LD_LIBRARY_PATH' "$apprun"; then
+            echo "AppRun exports launcher-injected environment paths" >&2
+            exit 1
+          fi
 
       - name: Rename packages and add raw binary
         shell: bash

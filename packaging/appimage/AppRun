@@ -1,0 +1,20 @@
+#!/bin/sh
+# Minimal launcher for the Unity Rust Hub AppImage.
+#
+# cargo-packager's stock compiled AppRun exports PYTHONHOME, PYTHONPATH,
+# PYTHONDONTWRITEBYTECODE, LD_LIBRARY_PATH, PERLLIB, GSETTINGS_SCHEMA_DIR,
+# QT_PLUGIN_PATH, GST_PLUGIN_SYSTEM_PATH and XDG_DATA_DIRS, each pointing into
+# the AppImage's ephemeral /tmp/.mount_* directory. Those values outlive the
+# mount: every process started from the session (an Editor, a terminal, a
+# Python tool such as graphify) inherits them and then cannot find its own
+# standard library, because the path it was told to trust no longer exists.
+# The bundled binary is a self-contained Rust executable that needs none of
+# them, so this launcher starts it with the environment passed through
+# untouched and lets the process tree resolve everything from the system.
+#
+# The release workflow copies this file over the stock AppRun after
+# cargo-packager assembles the AppImage.
+set -eu
+
+HERE="$(dirname "$(readlink -f "$0")")"
+exec "$HERE/usr/bin/unity-rust-hub" "$@"

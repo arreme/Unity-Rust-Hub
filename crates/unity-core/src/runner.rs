@@ -38,9 +38,34 @@ pub const DO_NOT_TRACK_ENV: &str = "DO_NOT_TRACK";
 /// installs the new CLI AppImage over that path, replacing the GUI binary.
 pub const APPIMAGE_ENV_VARS: [&str; 4] = ["APPIMAGE", "APPDIR", "OWD", "ARGV0"];
 
-/// Strips [`APPIMAGE_ENV_VARS`] from a child's inherited environment.
+/// Interpreter, loader, and toolkit paths an AppImage launcher prepends with
+/// its own ephemeral mount (for example `PYTHONHOME=/tmp/.mount_X/usr/`).
+/// They outlive the mount and then break every process that trusts them: a
+/// Python tool started from a session the AppImage touched cannot find its
+/// standard library anymore. The GUI's own process may inherit such values
+/// (its AppRun sets them), so every child gets them removed and resolves its
+/// own interpreter, libraries, and data files from the system instead.
+pub const LAUNCHER_INJECTED_ENV_VARS: [&str; 11] = [
+    "PYTHONHOME",
+    "PYTHONPATH",
+    "PYTHONDONTWRITEBYTECODE",
+    "LD_LIBRARY_PATH",
+    "PERLLIB",
+    "XDG_DATA_DIRS",
+    "GSETTINGS_SCHEMA_DIR",
+    "QT_PLUGIN_PATH",
+    "GST_PLUGIN_SYSTEM_PATH",
+    "GST_PLUGIN_SYSTEM_PATH_1_0",
+    "PYTHONUSERBASE",
+];
+
+/// Strips [`APPIMAGE_ENV_VARS`] and [`LAUNCHER_INJECTED_ENV_VARS`] from a
+/// child's inherited environment.
 pub fn scrub_appimage_env(command: &mut Command) {
     for key in APPIMAGE_ENV_VARS {
+        command.env_remove(key);
+    }
+    for key in LAUNCHER_INJECTED_ENV_VARS {
         command.env_remove(key);
     }
 }
@@ -3505,6 +3530,48 @@ mod tests {
         let stdout = String::from_utf8_lossy(&output.stdout);
 
         assert_eq!(stdout, "unset|unset|unset|unset");
+    }
+
+    /// The GUI's own AppImage launcher (the compiled AppRun cargo-packager
+    /// embeds) exports PYTHONHOME, PYTHONPATH and friends pointing into its
+    /// ephemeral `/tmp/.mount_*` mount. Those values outlive the mount and
+    /// then break every interpreter started from a session the AppImage
+    /// touched. A CLI child must therefore never inherit them.
+    #[cfg(unix)]
+    #[test]
+    fn cli_children_do_not_inherit_launcher_injected_interpreter_paths() {
+        const VARS: [&str; 3] = ["PYTHONHOME", "PYTHONPATH", "PYTHONDONTWRITEBYTECODE"];
+
+        struct Restore;
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                for key in VARS {
+                    std::env::remove_var(key);
+                }
+            }
+        }
+
+        // The exact shapes a UnityRustHub AppImage session produced in the
+        // wild: paths into a mount that no longer exists.
+        std::env::set_var("PYTHONHOME", "/tmp/.mount_UnityRclEhaG/usr/");
+        std::env::set_var(
+            "PYTHONPATH",
+            "/tmp/.mount_UnityRclEhaG/usr/share/pyshared/:",
+        );
+        std::env::set_var("PYTHONDONTWRITEBYTECODE", "1");
+        let _restore = Restore;
+
+        let spec = CommandSpec::new(
+            "sh",
+            svec(&[
+                "-c",
+                r#"printf '%s|%s|%s' "${PYTHONHOME-unset}" "${PYTHONPATH-unset}" "${PYTHONDONTWRITEBYTECODE-unset}""#,
+            ]),
+        );
+        let output = run_command(&spec, Duration::from_secs(10)).expect("sh should run");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+
+        assert_eq!(stdout, "unset|unset|unset");
     }
 
     #[test]

@@ -551,6 +551,14 @@ Resolution order for the binary:
   started a mutation.
 - Project upgrades require a second confirmation and warn that the project on disk can
   change. Commit or back up first.
+- Every child the app starts (CLI reads, streamed jobs, folder and browser openers)
+  inherits a scrubbed environment: the AppImage self-identity variables (`APPIMAGE`,
+  `APPDIR`, `OWD`, `ARGV0`) and the launcher-injected interpreter and loader paths
+  (`PYTHONHOME`, `PYTHONPATH`, `PYTHONDONTWRITEBYTECODE`, `LD_LIBRARY_PATH`, and the
+  Perl/Qt/GStreamer equivalents) are removed first. An AppImage launcher exports those
+  pointing into its ephemeral `/tmp/.mount_*` directory; they outlive the mount and break
+  any later interpreter that trusts them. The AppImage's own launcher is likewise
+  replaced at build time with a passthrough `AppRun` that exports nothing.
 - New projects always pass `--no-cloud`; Cloud and VCS linking are not offered in this
   version, and the app never collects a Git token.
 - Template create/pack forms validate the package id and destination before running, and
