@@ -7,14 +7,20 @@
 pub mod advisory;
 pub mod bootstrap;
 pub mod changelog;
+pub mod docs;
 pub mod envelope;
 pub mod errors;
 pub mod models;
 pub mod process;
 pub mod runner;
+pub mod surface;
 pub mod trace;
 pub mod versions;
 
-pub use advisory::{Advisory, AdvisoryKind, Remediation};
+pub use advisory::{AdvisoryOrigin, AdvisorySink, CliAdvisory};
+pub use docs::{DocsLookup, DocsPage, DocsScope};
 pub use errors::UnityError;
-pub use runner::{CommandSpec, Executed, UnityCli};
+pub use runner::{
+    scrub_appimage_env, CommandSpec, DiagnoseTopic, DoctorRead, EditorVerifyRead, Executed,
+    InstallOptions, ModuleInstallOptions, SkillInstallOptions, SkillRefreshOptions, UnityCli,
+};

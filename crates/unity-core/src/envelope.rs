@@ -2,7 +2,6 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use crate::advisory::{Advisory, AdvisoryKind};
 use crate::errors::{
     code_for_exit_code, is_retryable_exit_code, message_for_exit_code, UnityError,
 };
@@ -18,28 +17,78 @@ pub struct CliEnvelope<T> {
     pub data: Option<T>,
     #[serde(default)]
     pub errors: Vec<CliError>,
-    #[serde(default)]
-    pub warnings: Vec<Value>,
-    #[serde(default)]
-    pub notifications: Vec<Value>,
+    /// Free-form advisories. The CLI sends strings or objects, so the DTO
+    /// accepts both instead of dropping the array.
+    #[serde(default, deserialize_with = "null_as_empty_vec")]
+    pub warnings: Vec<CliWarning>,
+    #[serde(default, deserialize_with = "null_as_empty_vec")]
+    pub notifications: Vec<CliNotification>,
 }
 
 pub type ValueEnvelope = CliEnvelope<Value>;
 
-impl<T> CliEnvelope<T> {
-    /// Normalizes the envelope's `warnings` and `notifications` for the
-    /// notification centre. Unusable entries are silently dropped.
-    pub fn advisories(&self) -> Vec<Advisory> {
-        self.warnings
-            .iter()
-            .filter_map(|value| Advisory::from_value(AdvisoryKind::Warning, value))
-            .chain(
-                self.notifications
-                    .iter()
-                    .filter_map(|value| Advisory::from_value(AdvisoryKind::Notification, value)),
-            )
-            .collect()
-    }
+/// A `notifications[]` entry. Every field is optional because an older or
+/// newer CLI may omit parts of the shape.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CliNotification {
+    #[serde(default, deserialize_with = "null_as_default_string")]
+    pub code: String,
+    #[serde(default, deserialize_with = "null_as_default_string")]
+    pub message: String,
+    /// Per-code payload. Known codes have documented fields; unknown codes are
+    /// carried through untouched.
+    #[serde(default)]
+    pub data: Option<Value>,
+    #[serde(default)]
+    pub remediation: Option<CliRemediation>,
+}
+
+/// A command the CLI names as the remedy for an advisory.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CliRemediation {
+    #[serde(default, deserialize_with = "null_as_default_string")]
+    pub command: String,
+    /// The CLI's own request for an explicit human decision. The app never
+    /// runs any remediation on its own, and this flag requires a click too.
+    #[serde(default, deserialize_with = "null_as_false")]
+    pub requires_user_approval: bool,
+}
+
+/// The CLI can send `null` for an optional string field; a missing value and an
+/// explicit null must both fall back to the default.
+fn null_as_default_string<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<String>::deserialize(deserializer)?.unwrap_or_default())
+}
+
+fn null_as_false<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<bool>::deserialize(deserializer)?.unwrap_or(false))
+}
+
+/// A CLI that writes `null` for an optional array must not fail the read.
+fn null_as_empty_vec<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Ok(Option::<Vec<T>>::deserialize(deserializer)?.unwrap_or_default())
+}
+
+/// A `warnings[]` entry: a string or an object. `Other` keeps an unexpected
+/// scalar from failing the whole envelope.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(untagged)]
+pub enum CliWarning {
+    Text(String),
+    Record(CliNotification),
+    Other(Value),
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -235,63 +284,101 @@ mod tests {
     }
 
     #[test]
-    fn envelope_parses_populated_warnings_and_notifications() {
-        let envelope: ValueEnvelope = serde_json::from_value(serde_json::json!({
-            "success": true,
-            "command": "editors installed",
-            "warnings": ["Compatibility mode is on."],
-            "notifications": [{
-                "code": "CLI_UPDATE_AVAILABLE",
-                "message": "A new version of the Unity CLI is available.",
-                "data": { "current": "1.0.0-beta.8", "latest": "1.0.0-beta.9" },
-                "remediation": { "command": "unity self-update" }
-            }]
-        }))
-        .expect("warnings and notifications are no longer skipped");
-
-        assert_eq!(envelope.warnings.len(), 1);
-        assert_eq!(envelope.notifications.len(), 1);
-    }
-
-    #[test]
-    fn advisories_map_warnings_and_notifications_to_kinds() {
+    fn cli_error_remediation_reaches_the_structured_error_and_wins() {
+        // The exact path a failed read takes: envelope → CliError →
+        // UnityError.extra → remediation table. The CLI remediation must win
+        // over the NETWORK_UNREACHABLE code mapping.
         let envelope: ValueEnvelope = serde_json::from_value(serde_json::json!({
             "success": false,
-            "errors": [{ "code": "SOME_ERROR", "message": "It failed." }],
-            "warnings": ["Compatibility mode is on.", { "message": "Slow network." }],
-            "notifications": [{
-                "code": "CLI_UPDATE_AVAILABLE",
-                "message": "A new version of the Unity CLI is available."
+            "errors": [{
+                "code": "NETWORK_UNREACHABLE",
+                "message": "A Unity service could not be reached.",
+                "detail": "connect ECONNREFUSED",
+                "remediation": {
+                    "command": "unity diagnose proxy",
+                    "requiresUserApproval": true
+                }
             }]
         }))
-        .expect("envelope parses");
+        .unwrap();
 
-        let advisories = envelope.advisories();
+        let error = envelope.errors[0].to_unity_error(Some(7), "");
+        assert_eq!(
+            error
+                .extra
+                .get("remediation")
+                .and_then(|value| value.get("command")),
+            Some(&Value::String("unity diagnose proxy".to_string()))
+        );
 
-        assert_eq!(advisories.len(), 3);
-        assert_eq!(advisories[0].kind, AdvisoryKind::Warning);
-        assert_eq!(advisories[0].message, "Compatibility mode is on.");
-        assert_eq!(advisories[1].kind, AdvisoryKind::Warning);
-        assert_eq!(advisories[1].message, "Slow network.");
-        assert_eq!(advisories[2].kind, AdvisoryKind::Notification);
-        assert_eq!(advisories[2].code.as_deref(), Some("CLI_UPDATE_AVAILABLE"));
+        let remediation = crate::errors::remediation_for(&error, None).expect("remediation");
+        assert_eq!(
+            remediation.kind,
+            crate::errors::RemediationKind::ShowCommand
+        );
+        assert_eq!(remediation.command.as_deref(), Some("unity diagnose proxy"));
     }
 
     #[test]
-    fn advisories_skip_blank_entries_and_absent_arrays() {
-        let absent: ValueEnvelope = serde_json::from_value(serde_json::json!({
-            "success": true
-        }))
-        .expect("empty envelope parses");
-        assert!(absent.advisories().is_empty());
+    fn parses_typed_warnings_and_notifications() {
+        let envelope = parse_envelope(
+            r#"{
+                "success": true,
+                "warnings": [
+                    "This plugin is a beta release.",
+                    { "code": null, "message": "The --skip flag is deprecated." }
+                ],
+                "notifications": [{
+                    "code": "CLI_UPDATE_AVAILABLE",
+                    "message": "Update available.",
+                    "data": { "current": "1.0.0-beta.16", "latest": "1.0.0-beta.17" },
+                    "remediation": { "command": "unity self-update", "requiresUserApproval": true }
+                }]
+            }"#,
+        )
+        .unwrap();
 
-        let blank: ValueEnvelope = serde_json::from_value(serde_json::json!({
-            "success": true,
-            "warnings": ["   ", { "message": "" }],
-            "notifications": []
-        }))
-        .expect("envelope parses");
-        assert!(blank.advisories().is_empty());
+        assert!(
+            matches!(&envelope.warnings[0], CliWarning::Text(text) if text == "This plugin is a beta release.")
+        );
+        assert!(
+            matches!(&envelope.warnings[1], CliWarning::Record(record) if record.message == "The --skip flag is deprecated.")
+        );
+
+        let notification = &envelope.notifications[0];
+        assert_eq!(notification.code, "CLI_UPDATE_AVAILABLE");
+        assert_eq!(notification.message, "Update available.");
+        assert_eq!(
+            notification
+                .data
+                .as_ref()
+                .and_then(|data| data.get("latest"))
+                .and_then(Value::as_str),
+            Some("1.0.0-beta.17")
+        );
+        let remediation = notification.remediation.as_ref().expect("remediation");
+        assert_eq!(remediation.command, "unity self-update");
+        assert!(remediation.requires_user_approval);
+    }
+
+    #[test]
+    fn missing_and_null_advisories_do_not_fail_the_envelope() {
+        for envelope in [
+            parse_envelope(r#"{"success":true}"#),
+            parse_envelope(r#"{"success":true,"warnings":null,"notifications":null}"#),
+        ] {
+            let envelope = envelope.unwrap();
+            assert!(envelope.warnings.is_empty());
+            assert!(envelope.notifications.is_empty());
+        }
+
+        let envelope =
+            parse_envelope(r#"{"success":true,"notifications":[{"code":"FUTURE_CODE"},{}]}"#)
+                .unwrap();
+        assert_eq!(envelope.notifications.len(), 2);
+        assert_eq!(envelope.notifications[0].code, "FUTURE_CODE");
+        assert!(envelope.notifications[0].message.is_empty());
+        assert!(envelope.notifications[1].code.is_empty());
     }
 
     #[test]

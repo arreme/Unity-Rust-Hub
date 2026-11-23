@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 use std::future::Future;
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::process::{Command, Stdio};
 use std::sync::{mpsc, OnceLock};
 
 use chrono::{DateTime, Utc};
@@ -96,6 +97,30 @@ pub fn format_iso(value: Option<&str>) -> String {
         .unwrap_or_else(|| "—".to_string())
 }
 
+/// Walks up from `start` looking for a Unity project root.
+///
+/// A Unity project is identified by `ProjectSettings/ProjectVersion.txt`, the
+/// file the Editor itself writes. The app never guesses a project from a folder
+/// name: without that marker, `--local` has no honest context and stays off.
+pub fn detect_unity_project(start: &std::path::Path) -> Option<std::path::PathBuf> {
+    start
+        .ancestors()
+        .find(|directory| {
+            directory
+                .join("ProjectSettings")
+                .join("ProjectVersion.txt")
+                .is_file()
+        })
+        .map(std::path::Path::to_path_buf)
+}
+
+/// The project context of this process, if it was launched from a Unity project
+/// (or one of its subfolders).
+pub fn project_context() -> Option<String> {
+    let directory = std::env::current_dir().ok()?;
+    detect_unity_project(&directory).map(|path| path.display().to_string())
+}
+
 pub fn short_path(path: &str, max: usize) -> Cow<'_, str> {
     if path.chars().count() <= max {
         return Cow::Borrowed(path);
@@ -162,12 +187,127 @@ pub fn format_duration(duration: std::time::Duration) -> String {
     }
 }
 
+/// One OS-opener invocation. Kept separate from spawning so tests can assert
+/// the shape without launching anything.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenerCommand {
+    pub program: &'static str,
+    pub args: Vec<String>,
+}
+
+/// The ordered candidates for opening `url`. Linux tries the desktop opener
+/// first and then two standard fallbacks; Windows and macOS have one each.
+///
+/// The HTTP(S)-only rule is `unity_core::docs::is_safe_docs_url`, the same
+/// predicate the adapter uses before handing a URL to the view model, so the
+/// trust boundary has one definition.
+pub fn opener_commands(url: &str) -> Result<Vec<OpenerCommand>, String> {
+    if !unity_core::docs::is_safe_docs_url(url) {
+        return Err("Only http(s) links can be opened.".to_string());
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        return Ok(vec![OpenerCommand {
+            program: "cmd",
+            args: vec![
+                "/C".to_string(),
+                "start".to_string(),
+                String::new(),
+                url.to_string(),
+            ],
+        }]);
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        return Ok(vec![OpenerCommand {
+            program: "open",
+            args: vec![url.to_string()],
+        }]);
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        Ok(vec![
+            OpenerCommand {
+                program: "xdg-open",
+                args: vec![url.to_string()],
+            },
+            OpenerCommand {
+                program: "gio",
+                args: vec!["open".to_string(), url.to_string()],
+            },
+            OpenerCommand {
+                program: "sensible-browser",
+                args: vec![url.to_string()],
+            },
+        ])
+    }
+}
+
+/// Opens a resolved docs URL in the user's browser. The app never calls this
+/// during a lookup; it runs only from an explicit click.
+pub fn open_external_url(url: &str) -> Result<(), String> {
+    let candidates = opener_commands(url)?;
+    let mut last_error = None;
+    for candidate in candidates {
+        match Command::new(candidate.program)
+            .args(&candidate.args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            Ok(mut child) => {
+                // The opener is fire-and-forget, but its child must be reaped
+                // or every click leaves a zombie on Unix. Wait on a detached
+                // thread so the click still returns immediately.
+                std::thread::spawn(move || {
+                    let _ = child.wait();
+                });
+                return Ok(());
+            }
+            Err(error) => last_error = Some(format!("{}: {error}", candidate.program)),
+        }
+    }
+    Err(format!(
+        "No system opener could open the link ({}).",
+        last_error.unwrap_or_else(|| "no opener configured".to_string())
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
+
+    #[test]
+    fn project_context_requires_the_editor_marker_and_walks_up() {
+        let root = std::env::temp_dir().join(format!(
+            "unity-rust-hub-project-context-{}",
+            std::process::id()
+        ));
+        let project = root.join("Game");
+        let nested = project.join("Assets");
+        std::fs::create_dir_all(&nested).unwrap();
+
+        assert_eq!(detect_unity_project(&nested), None);
+
+        std::fs::create_dir_all(project.join("ProjectSettings")).unwrap();
+        std::fs::write(
+            project.join("ProjectSettings").join("ProjectVersion.txt"),
+            "m_EditorVersion: 6000.3.15f1\n",
+        )
+        .unwrap();
+
+        assert_eq!(detect_unity_project(&nested), Some(project.clone()));
+        assert_eq!(detect_unity_project(&project), Some(project));
+
+        std::fs::remove_dir_all(root).ok();
+    }
 
     #[test]
     fn blocking_reads_are_serialized() {
@@ -192,5 +332,38 @@ mod tests {
         }
 
         assert_eq!(max_active.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn opener_accepts_http_links_and_refuses_other_schemes() {
+        for url in [
+            "https://docs.unity3d.com/6000.3/Documentation/ScriptReference/Start.html",
+            "http://example.com/docs",
+        ] {
+            assert!(opener_commands(url).is_ok(), "{url} should be openable");
+        }
+        for url in ["file:///etc/passwd", "javascript:alert(1)", "not a url", ""] {
+            assert!(
+                opener_commands(url).is_err(),
+                "{url} must never reach the OS opener"
+            );
+        }
+    }
+
+    #[test]
+    fn opener_candidate_is_platform_shaped() {
+        let commands = opener_commands("https://docs.unity3d.com/").unwrap();
+        assert!(!commands.is_empty());
+        assert!(commands.iter().all(|command| !command.args.is_empty()));
+
+        #[cfg(target_os = "windows")]
+        assert_eq!(commands[0].program, "cmd");
+        #[cfg(target_os = "macos")]
+        assert_eq!(commands[0].program, "open");
+        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+        {
+            assert_eq!(commands[0].program, "xdg-open");
+            assert!(commands.iter().any(|command| command.program == "gio"));
+        }
     }
 }

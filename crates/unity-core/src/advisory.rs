@@ -1,387 +1,420 @@
-//! Advisories the Unity CLI attaches to its JSON envelope.
+//! Advisories the CLI attaches to an invocation.
 //!
-//! The CLI reports update notices, deprecations and similar hints in the
-//! `warnings` and `notifications` arrays of an envelope. They are not failures,
-//! so they never become [`crate::UnityError`]s; the app collects them for the
-//! notification centre instead.
+//! Both `notifications[]` and `warnings[]` in the standard JSON envelope are
+//! advisory data: they never make a command fail, and the app must show them
+//! without inventing semantics. [`CliAdvisory`] normalizes both arrays into one
+//! shape; [`AdvisorySink`] carries them from every read and every streamed job
+//! result frame to the controller, which decides what to display.
 
-use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
 
-use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
+use serde_json::Value;
 
-/// How the CLI classified an advisory.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum AdvisoryKind {
-    Warning,
+use crate::envelope::{CliEnvelope, CliNotification, CliRemediation, CliWarning};
+
+/// Which envelope array an advisory came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdvisoryOrigin {
     Notification,
-    Error,
+    Warning,
 }
 
-/// A command the CLI suggests for resolving an advisory or an error.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Remediation {
-    pub command: String,
-    /// When true the GUI must not run the command without an explicit
-    /// confirmation from the user.
-    pub requires_user_approval: bool,
-}
-
-/// One advisory entry, normalized from the loose shapes the CLI emits.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Advisory {
-    pub kind: AdvisoryKind,
+/// One normalized advisory.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CliAdvisory {
+    pub origin: AdvisoryOrigin,
+    /// Notification code. Warnings only carry one when the CLI sent an object
+    /// with a `code` field; a plain string warning has none.
     pub code: Option<String>,
+    /// The CLI's (localized) message, or the warning text.
     pub message: String,
+    /// Per-code payload. Only known codes have documented fields; unknown ones
+    /// are passed through untouched.
     pub data: Option<Value>,
-    pub remediation: Option<Remediation>,
+    pub remediation: Option<CliRemediation>,
 }
 
-impl Advisory {
-    /// Parses one entry from `warnings` or `notifications`.
-    ///
-    /// A bare string is a message with no code; an object reads `message`
-    /// (falling back to `text`, then `detail`), `code`, `data` and
-    /// `remediation`. Entries without usable text are dropped.
-    pub fn from_value(kind: AdvisoryKind, value: &Value) -> Option<Self> {
-        match value {
-            Value::String(text) => {
-                let message = text.trim();
-                if message.is_empty() {
-                    return None;
-                }
+impl CliAdvisory {
+    fn from_notification(notification: &CliNotification, origin: AdvisoryOrigin) -> Option<Self> {
+        let code = non_empty(&notification.code);
+        let message = non_empty(&notification.message)
+            .or_else(|| code.clone())
+            .unwrap_or_default();
+        if message.is_empty() {
+            // A notification with neither a code nor a message cannot be
+            // rendered; dropping it is better than an empty banner.
+            return None;
+        }
+        Some(Self {
+            origin,
+            code,
+            message,
+            data: notification.data.clone(),
+            remediation: notification
+                .remediation
+                .as_ref()
+                .filter(|remediation| non_empty(&remediation.command).is_some())
+                .cloned(),
+        })
+    }
+
+    fn from_warning(warning: &CliWarning) -> Option<Self> {
+        match warning {
+            CliWarning::Text(text) => {
+                let message = non_empty(text)?;
                 Some(Self {
-                    kind,
+                    origin: AdvisoryOrigin::Warning,
                     code: None,
-                    message: message.to_string(),
+                    message,
                     data: None,
                     remediation: None,
                 })
             }
-            Value::Object(object) => {
-                let message = message_from(object)?;
-                let code = object
-                    .get("code")
-                    .and_then(Value::as_str)
-                    .map(str::trim)
-                    .filter(|code| !code.is_empty())
-                    .map(str::to_string);
-                let data = object.get("data").filter(|data| !data.is_null()).cloned();
-                let remediation = object.get("remediation").and_then(remediation_from_value);
+            CliWarning::Record(notification) => {
+                Self::from_notification(notification, AdvisoryOrigin::Warning)
+            }
+            CliWarning::Other(value) => {
+                let message = match value {
+                    Value::String(text) => non_empty(text),
+                    other => non_empty(&other.to_string()),
+                }?;
                 Some(Self {
-                    kind,
-                    code,
+                    origin: AdvisoryOrigin::Warning,
+                    code: None,
                     message,
-                    data,
-                    remediation,
+                    data: None,
+                    remediation: None,
                 })
             }
-            _ => None,
         }
     }
 
-    /// The identity used to collapse repeats of the same advisory.
+    /// Stable identity for deduplication and dismissal.
     ///
-    /// Entries with a code and `data` are keyed by the code plus canonicalised
-    /// `data`, so two identical refreshes produce the same key. Entries with a
-    /// code but no `data` include the message, because two different warnings
-    /// can share a code. Entries without a code fall back to their message.
-    pub fn dedupe_key(&self) -> String {
-        match (&self.code, &self.data) {
-            (Some(code), Some(data)) => format!("{code}:data:{}", canonical_data(data)),
-            (Some(code), None) => format!("{code}:message:{}", self.message),
-            (None, _) => self.message.clone(),
+    /// `code` plus the `data` fields the CLI documents as stable for that code.
+    /// Unknown codes have no documented stable fields, so their (localized)
+    /// message joins the identity: a polled refresh collapses, while two
+    /// genuinely different unknown advisories stay separate. Plain warnings
+    /// are identified by their text.
+    pub fn identity(&self) -> String {
+        let origin = match self.origin {
+            AdvisoryOrigin::Notification => "notification",
+            AdvisoryOrigin::Warning => "warning",
+        };
+        let Some(code) = self.code.as_deref() else {
+            return format!("{origin}:{}", self.message.trim());
+        };
+
+        let mut identity = format!("{origin}:{code}");
+        for key in stable_data_keys(code) {
+            let Some(value) = self.data.as_ref().and_then(|data| data.get(*key)) else {
+                continue;
+            };
+            identity.push(':');
+            identity.push_str(key);
+            identity.push('=');
+            identity.push_str(&scalar_text(value));
         }
+        if stable_data_keys(code).is_empty() {
+            identity.push(':');
+            identity.push_str(self.message.trim());
+        }
+        identity
     }
 }
 
-/// Reads the first non-blank of `message`, `text`, then `detail`.
-fn message_from(object: &Map<String, Value>) -> Option<String> {
-    ["message", "text", "detail"].iter().find_map(|key| {
-        object
-            .get(*key)
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|message| !message.is_empty())
-            .map(str::to_string)
-    })
+/// The `data` fields that identify one advisory for a known code.
+fn stable_data_keys(code: &str) -> &'static [&'static str] {
+    match code {
+        "CLI_UPDATE_AVAILABLE" => &["current", "latest"],
+        "PLUGIN_UPDATE_AVAILABLE" => &["plugin", "current", "latest"],
+        "FEX_EMU_EXPERIMENTAL" | "AGENT_PLUGIN_AVAILABLE" => &[],
+        _ => &[],
+    }
 }
 
-/// Parses a `remediation` field, which is either an object or a bare command.
-pub(crate) fn remediation_from_value(value: &Value) -> Option<Remediation> {
+fn scalar_text(value: &Value) -> String {
     match value {
-        Value::String(command) => {
-            let command = command.trim();
-            if command.is_empty() {
-                return None;
-            }
-            Some(Remediation {
-                command: command.to_string(),
-                requires_user_approval: true,
-            })
-        }
-        Value::Object(object) => {
-            let command = object
-                .get("command")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|command| !command.is_empty())?;
-            let requires_user_approval = object
-                .get("requiresUserApproval")
-                .and_then(Value::as_bool)
-                .unwrap_or(true);
-            Some(Remediation {
-                command: command.to_string(),
-                requires_user_approval,
-            })
-        }
-        _ => None,
+        Value::String(text) => text.clone(),
+        Value::Null => String::new(),
+        other => other.to_string(),
     }
 }
 
-/// Renders `data` with sorted object keys so repeated refreshes compare equal.
+fn non_empty(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+/// Normalizes every advisory an envelope carries, notifications first.
+pub fn advisories_from_envelope<T>(envelope: &CliEnvelope<T>) -> Vec<CliAdvisory> {
+    normalize(&envelope.notifications, &envelope.warnings)
+}
+
+/// Advisories from a raw JSON frame.
 ///
-/// `serde_json` normally keeps object keys sorted, but that depends on the
-/// `preserve_order` feature not being enabled anywhere in the dependency graph,
-/// so sort the top level explicitly.
-fn canonical_data(data: &Value) -> String {
-    match data {
-        Value::Object(object) => {
-            let sorted: BTreeMap<&String, &Value> = object.iter().collect();
-            serde_json::to_string(&sorted).unwrap_or_else(|_| data.to_string())
+/// Streamed `result` frames are close to, but not guaranteed to be, a complete
+/// envelope. Reading the two arrays directly means a frame missing `success`
+/// still delivers its advisory instead of losing it.
+pub fn advisories_from_value(value: &Value) -> Vec<CliAdvisory> {
+    let notifications = value
+        .get("notifications")
+        .cloned()
+        .and_then(|value| serde_json::from_value::<Vec<CliNotification>>(value).ok())
+        .unwrap_or_default();
+    let warnings = value
+        .get("warnings")
+        .cloned()
+        .and_then(|value| serde_json::from_value::<Vec<CliWarning>>(value).ok())
+        .unwrap_or_default();
+
+    normalize(&notifications, &warnings)
+}
+
+fn normalize(notifications: &[CliNotification], warnings: &[CliWarning]) -> Vec<CliAdvisory> {
+    notifications
+        .iter()
+        .filter_map(|notification| {
+            CliAdvisory::from_notification(notification, AdvisoryOrigin::Notification)
+        })
+        .chain(warnings.iter().filter_map(CliAdvisory::from_warning))
+        .collect()
+}
+
+/// A bounded hand-off between the CLI adapter/jobs and the controller.
+///
+/// Reads and job threads push; the controller drains after every update, so no
+/// advisory can be lost between an envelope and the view model. The bound only
+/// protects against a sink nobody drains.
+#[derive(Debug, Clone, Default)]
+pub struct AdvisorySink {
+    advisories: Arc<Mutex<Vec<CliAdvisory>>>,
+}
+
+const MAX_PENDING_ADVISORIES: usize = 512;
+
+impl AdvisorySink {
+    pub fn push(&self, advisories: impl IntoIterator<Item = CliAdvisory>) {
+        let mut pending = self.pending();
+        pending.extend(advisories);
+        if pending.len() > MAX_PENDING_ADVISORIES {
+            let overflow = pending.len() - MAX_PENDING_ADVISORIES;
+            pending.drain(..overflow);
         }
-        other => other.to_string(),
+    }
+
+    pub fn drain(&self) -> Vec<CliAdvisory> {
+        std::mem::take(&mut *self.pending())
+    }
+
+    fn pending(&self) -> std::sync::MutexGuard<'_, Vec<CliAdvisory>> {
+        self.advisories.lock().expect("advisory lock poisoned")
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::envelope::ValueEnvelope;
+
+    fn envelope(value: Value) -> ValueEnvelope {
+        serde_json::from_value(value).expect("envelope should deserialize")
+    }
 
     #[test]
-    fn a_bare_string_becomes_a_message_without_a_code() {
-        let advisory = Advisory::from_value(
-            AdvisoryKind::Warning,
-            &Value::String("The CLI is running in compatibility mode.".to_string()),
-        )
-        .expect("a non-blank string is an advisory");
+    fn normalizes_notifications_and_warnings_in_order() {
+        let envelope = envelope(serde_json::json!({
+            "success": true,
+            "notifications": [
+                {
+                    "code": "CLI_UPDATE_AVAILABLE",
+                    "message": "A new CLI build is available.",
+                    "data": { "current": "1.0.0-beta.16", "latest": "1.0.0-beta.17" },
+                    "remediation": { "command": "unity self-update", "requiresUserApproval": true }
+                },
+                { "code": "FEX_EMU_EXPERIMENTAL", "message": "Running under FEX-Emu." }
+            ],
+            "warnings": [
+                "The plugin is a beta release.",
+                { "message": "The --skip flag is deprecated.", "code": null }
+            ]
+        }));
 
-        assert_eq!(advisory.kind, AdvisoryKind::Warning);
+        let advisories = advisories_from_envelope(&envelope);
+        assert_eq!(advisories.len(), 4);
+
+        assert_eq!(advisories[0].origin, AdvisoryOrigin::Notification);
+        assert_eq!(advisories[0].code.as_deref(), Some("CLI_UPDATE_AVAILABLE"));
         assert_eq!(
-            advisory.message,
-            "The CLI is running in compatibility mode."
+            advisories[0]
+                .remediation
+                .as_ref()
+                .map(|remediation| remediation.command.as_str()),
+            Some("unity self-update")
         );
-        assert!(advisory.code.is_none());
-        assert!(advisory.data.is_none());
-        assert!(advisory.remediation.is_none());
+        assert!(advisories[0]
+            .remediation
+            .as_ref()
+            .is_some_and(|remediation| remediation.requires_user_approval));
+
+        assert_eq!(advisories[1].code.as_deref(), Some("FEX_EMU_EXPERIMENTAL"));
+        assert!(advisories[1].remediation.is_none());
+
+        assert_eq!(advisories[2].origin, AdvisoryOrigin::Warning);
+        assert_eq!(advisories[2].code, None);
+        assert_eq!(advisories[2].message, "The plugin is a beta release.");
+
+        assert_eq!(advisories[3].message, "The --skip flag is deprecated.");
+        assert_eq!(advisories[3].origin, AdvisoryOrigin::Warning);
     }
 
     #[test]
-    fn a_notification_keeps_data_and_object_remediation() {
-        let value = serde_json::json!({
-            "code": "CLI_UPDATE_AVAILABLE",
-            "message": "A new version of the Unity CLI is available: 1.0.0-beta.8 → 1.0.0-beta.9",
-            "data": { "current": "1.0.0-beta.8", "latest": "1.0.0-beta.9" },
-            "remediation": { "command": "unity self-update", "requiresUserApproval": true }
-        });
+    fn unknown_notification_codes_and_missing_fields_survive() {
+        let envelope = envelope(serde_json::json!({
+            "success": true,
+            "notifications": [{ "code": "FUTURE_CODE" }]
+        }));
 
-        let advisory =
-            Advisory::from_value(AdvisoryKind::Notification, &value).expect("object is valid");
-
-        assert_eq!(advisory.kind, AdvisoryKind::Notification);
-        assert_eq!(advisory.code.as_deref(), Some("CLI_UPDATE_AVAILABLE"));
-        assert_eq!(
-            advisory.data.as_ref().and_then(|data| data.get("latest")),
-            Some(&Value::String("1.0.0-beta.9".to_string()))
-        );
-        assert_eq!(
-            advisory.remediation,
-            Some(Remediation {
-                command: "unity self-update".to_string(),
-                requires_user_approval: true,
-            })
-        );
+        let advisories = advisories_from_envelope(&envelope);
+        assert_eq!(advisories.len(), 1);
+        assert_eq!(advisories[0].code.as_deref(), Some("FUTURE_CODE"));
+        // No message: the code is the only thing the CLI gave us.
+        assert_eq!(advisories[0].message, "FUTURE_CODE");
+        assert!(advisories[0].data.is_none());
+        assert!(advisories[0].remediation.is_none());
     }
 
     #[test]
-    fn missing_requires_user_approval_defaults_to_true() {
-        let value = serde_json::json!({
-            "message": "Run the installer again.",
-            "remediation": { "command": "unity install 6000.6.6f1" }
-        });
+    fn advisories_without_a_code_or_message_are_dropped() {
+        let envelope = envelope(serde_json::json!({
+            "success": true,
+            "notifications": [{ "data": { "x": 1 } }],
+            "warnings": ["  ", { "message": "" }]
+        }));
 
-        let advisory = Advisory::from_value(AdvisoryKind::Warning, &value).expect("valid");
-        let remediation = advisory.remediation.expect("remediation is present");
-
-        assert_eq!(remediation.command, "unity install 6000.6.6f1");
-        assert!(remediation.requires_user_approval);
+        assert!(advisories_from_envelope(&envelope).is_empty());
     }
 
     #[test]
-    fn a_bare_string_remediation_requires_approval() {
-        let value = serde_json::json!({
-            "message": "Sign in again.",
-            "remediation": "unity auth login"
-        });
+    fn warnings_accept_strings_objects_and_unexpected_shapes() {
+        let envelope = envelope(serde_json::json!({
+            "success": true,
+            "warnings": [
+                "plain text",
+                { "message": "object text", "detail": "ignored" },
+                42
+            ]
+        }));
 
-        let advisory = Advisory::from_value(AdvisoryKind::Warning, &value).expect("valid");
-
-        assert_eq!(
-            advisory.remediation,
-            Some(Remediation {
-                command: "unity auth login".to_string(),
-                requires_user_approval: true,
-            })
-        );
+        let advisories = advisories_from_envelope(&envelope);
+        let messages: Vec<&str> = advisories
+            .iter()
+            .map(|advisory| advisory.message.as_str())
+            .collect();
+        assert_eq!(messages, vec!["plain text", "object text", "42"]);
     }
 
     #[test]
-    fn text_and_detail_are_message_fallbacks() {
-        let text = Advisory::from_value(
-            AdvisoryKind::Warning,
-            &serde_json::json!({ "text": "Use --long for details." }),
-        )
-        .expect("text fallback");
-        assert_eq!(text.message, "Use --long for details.");
-
-        let detail = Advisory::from_value(
-            AdvisoryKind::Notification,
-            &serde_json::json!({ "detail": "Licence renewed." }),
-        )
-        .expect("detail fallback");
-        assert_eq!(detail.message, "Licence renewed.");
-    }
-
-    #[test]
-    fn blank_and_whitespace_entries_are_dropped() {
-        for value in [
-            serde_json::json!(""),
-            serde_json::json!("   \n\t"),
-            serde_json::json!({ "message": "   " }),
-            serde_json::json!({ "message": "", "text": "\t" }),
-            serde_json::json!({ "code": "CLI_HINT" }),
-            serde_json::json!(42),
-            serde_json::json!(null),
-        ] {
-            assert!(
-                Advisory::from_value(AdvisoryKind::Warning, &value).is_none(),
-                "{value} should be dropped"
-            );
-        }
-    }
-
-    #[test]
-    fn dedupe_key_is_stable_across_identical_refreshes() {
-        let value = serde_json::json!({
-            "code": "CLI_UPDATE_AVAILABLE",
-            "message": "A new version is available.",
-            "data": { "current": "1.0.0", "latest": "1.1.0" }
-        });
-
-        let first = Advisory::from_value(AdvisoryKind::Notification, &value).expect("valid");
-        let second = Advisory::from_value(AdvisoryKind::Notification, &value).expect("valid");
-
-        assert_eq!(first.dedupe_key(), second.dedupe_key());
-    }
-
-    #[test]
-    fn dedupe_key_ignores_data_key_order() {
-        let first = Advisory::from_value(
-            AdvisoryKind::Notification,
-            &serde_json::json!({
+    fn identity_uses_code_and_stable_data_fields() {
+        let base = envelope(serde_json::json!({
+            "success": true,
+            "notifications": [{
                 "code": "CLI_UPDATE_AVAILABLE",
-                "message": "A new version is available.",
-                "data": { "latest": "1.1.0", "current": "1.0.0" }
-            }),
-        )
-        .expect("valid");
-        let second = Advisory::from_value(
-            AdvisoryKind::Notification,
-            &serde_json::json!({
+                "message": "Update available (localized text may change).",
+                "data": { "current": "1.0.0-beta.16", "latest": "1.0.0-beta.17", "platform": "linux" }
+            }]
+        }));
+        let other_platform = envelope(serde_json::json!({
+            "success": true,
+            "notifications": [{
                 "code": "CLI_UPDATE_AVAILABLE",
-                "message": "A new version is available.",
-                "data": { "current": "1.0.0", "latest": "1.1.0" }
-            }),
-        )
-        .expect("valid");
+                "message": "A new CLI is available.",
+                "data": { "current": "1.0.0-beta.16", "latest": "1.0.0-beta.17", "platform": "macos" }
+            }]
+        }));
+        let newer = envelope(serde_json::json!({
+            "success": true,
+            "notifications": [{
+                "code": "CLI_UPDATE_AVAILABLE",
+                "message": "Update available.",
+                "data": { "current": "1.0.0-beta.16", "latest": "1.0.0-beta.18" }
+            }]
+        }));
 
-        assert_eq!(first.dedupe_key(), second.dedupe_key());
+        let first = advisories_from_envelope(&base).remove(0);
+        let second = advisories_from_envelope(&other_platform).remove(0);
+        let third = advisories_from_envelope(&newer).remove(0);
+
+        // Localized message and non-stable fields do not change identity.
+        assert_eq!(first.identity(), second.identity());
+        assert_ne!(first.identity(), third.identity());
     }
 
     #[test]
-    fn dedupe_key_changes_when_data_changes() {
-        let first = Advisory::from_value(
-            AdvisoryKind::Notification,
-            &serde_json::json!({
-                "code": "CLI_UPDATE_AVAILABLE",
-                "message": "A new version is available.",
-                "data": { "current": "1.0.0", "latest": "1.1.0" }
-            }),
-        )
-        .expect("valid");
-        let second = Advisory::from_value(
-            AdvisoryKind::Notification,
-            &serde_json::json!({
-                "code": "CLI_UPDATE_AVAILABLE",
-                "message": "A new version is available.",
-                "data": { "current": "1.1.0", "latest": "1.2.0" }
-            }),
-        )
-        .expect("valid");
-
-        assert_ne!(first.dedupe_key(), second.dedupe_key());
-    }
-
-    #[test]
-    fn dedupe_key_falls_back_to_the_message_without_a_code() {
-        let advisory = Advisory::from_value(
-            AdvisoryKind::Warning,
-            &serde_json::json!({ "message": "Compatibility mode is on." }),
-        )
-        .expect("valid");
-
-        assert_eq!(advisory.dedupe_key(), "Compatibility mode is on.");
-    }
-
-    #[test]
-    fn dedupe_key_includes_the_message_when_a_code_has_no_data() {
-        let first = Advisory::from_value(
-            AdvisoryKind::Warning,
-            &serde_json::json!({
-                "code": "CLI_CACHE_STALE",
-                "message": "The Editor cache is out of date."
-            }),
-        )
-        .expect("valid");
-        let second = Advisory::from_value(
-            AdvisoryKind::Warning,
-            &serde_json::json!({
-                "code": "CLI_CACHE_STALE",
-                "message": "The templates cache is out of date."
-            }),
-        )
-        .expect("valid");
+    fn plugin_identity_includes_the_plugin_id() {
+        let one = envelope(serde_json::json!({
+            "success": true,
+            "notifications": [{
+                "code": "PLUGIN_UPDATE_AVAILABLE",
+                "message": "Plugin update available.",
+                "data": { "plugin": "com.unity.ai", "current": "1.0.0", "latest": "1.1.0" }
+            }]
+        }));
+        let two = envelope(serde_json::json!({
+            "success": true,
+            "notifications": [{
+                "code": "PLUGIN_UPDATE_AVAILABLE",
+                "message": "Plugin update available.",
+                "data": { "plugin": "com.unity.mcp", "current": "1.0.0", "latest": "1.1.0" }
+            }]
+        }));
 
         assert_ne!(
-            first.dedupe_key(),
-            second.dedupe_key(),
-            "two warnings that share a code must not collapse"
+            advisories_from_envelope(&one)[0].identity(),
+            advisories_from_envelope(&two)[0].identity()
         );
     }
 
     #[test]
-    fn dedupe_key_is_stable_for_the_same_code_and_message_without_data() {
-        let value = serde_json::json!({
-            "code": "CLI_CACHE_STALE",
-            "message": "The Editor cache is out of date."
-        });
+    fn plain_warnings_dedupe_on_text() {
+        let envelope = envelope(serde_json::json!({
+            "success": true,
+            "warnings": ["Beta plugin.", "Beta plugin."]
+        }));
+        let advisories = advisories_from_envelope(&envelope);
+        assert_eq!(advisories[0].identity(), advisories[1].identity());
+    }
 
-        let first = Advisory::from_value(AdvisoryKind::Warning, &value).expect("valid");
-        let second = Advisory::from_value(AdvisoryKind::Warning, &value).expect("valid");
+    #[test]
+    fn raw_frames_deliver_advisories_without_a_full_envelope() {
+        let advisories = advisories_from_value(&serde_json::json!({
+            "type": "result",
+            "warnings": ["This plugin is a beta release."]
+        }));
 
-        assert_eq!(first.dedupe_key(), second.dedupe_key());
+        assert_eq!(advisories.len(), 1);
+        assert_eq!(advisories[0].message, "This plugin is a beta release.");
+    }
+
+    #[test]
+    fn sink_drains_and_keeps_only_the_most_recent_advisories() {
+        let sink = AdvisorySink::default();
+        let advisory = CliAdvisory {
+            origin: AdvisoryOrigin::Warning,
+            code: None,
+            message: "Beta plugin.".to_string(),
+            data: None,
+            remediation: None,
+        };
+        sink.push([advisory.clone()]);
+        sink.push(std::iter::repeat_n(advisory, MAX_PENDING_ADVISORIES + 8));
+
+        let drained = sink.drain();
+        assert_eq!(drained.len(), MAX_PENDING_ADVISORIES);
+        assert!(sink.drain().is_empty());
     }
 }

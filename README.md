@@ -35,8 +35,12 @@ Install it through Shelly instead of copying it into place:
 ```bash
 mv UnityRustHub-0.3.0-linux-x86_64.AppImage UnityRustHub.AppImage
 shelly install appimage ./UnityRustHub.AppImage
+shelly list appimage  # note the exact Name Shelly stored
 shelly sync appimage UnityRustHub arreme/Unity-Rust-Hub GitHub
 ```
+
+If you installed the versioned filename instead, use that exact name from
+`shelly list appimage` in place of `UnityRustHub` in the `sync` command.
 
 Then check for and apply updates with:
 
@@ -61,21 +65,58 @@ update target.
 ## Features
 
 - **CLI lifecycle** — detect the executable, show version/channel/platform, check for
-  updates, install the CLI with Unity's official per-platform script, self-update, and
-  sign in to Unity with `unity auth login`.
-- **Editors** — installed versions with modules, Linux/macOS/Windows architecture,
-  default-Editor state, and the install location.
+  updates, install the CLI with Unity's official per-platform script, self-update with a
+  target and channel, and sign in to Unity with `unity auth login`. The update card loads
+  the target release notes before enabling Apply. A confirmed rollback restores the most
+  recent kept version (or one you name); it never combines `--rollback` with `--check`,
+  `--changelog`, `--target`, `--channel`, or `--dry-run`, and the CLI's `BAD_ARGS` response
+  is rendered with its code if a refused combination ever reaches it.
+- **Editors** — installed builds with modules, Linux/macOS/Windows architecture,
+  default-Editor state, and the install location. A row is one `(version, architecture)`
+  build, so an `arm64` and an `x86_64` Editor of the same version appear separately; each
+  row sets or clears the default for that build.
 - **Running Editors** — read-only status from `unity editors running`, enriched with
   `unity pipeline editors` phase, Pipeline version, update availability, Safe Mode, and a
   blocking dialog.
-- **Releases** — newest releases with LTS/beta/alpha and installed badges.
-- **Editor install** — pick a version or alias (`lts`, `latest`, `6000.3`, exact), load
-  the module catalog, preview the download with `--dry-run`, accept module terms
-  explicitly, then install with live NDJSON progress and a cancellable raw log.
-- **Modules** — add modules to an installed Editor with `install-modules`.
-- **Projects** — every project in the Hub registry, its Editor version, render pipeline,
-  build target, cloud/VCS badges, an Open action, a guarded upgrade dialog, an Add project
-  folder picker, a Remove confirmation, and a favorite star backed by `projects pin`.
+- **Releases** — newest releases with LTS/beta/alpha, architecture, and installed badges
+  matched per build.
+- **Editor install** — pick a version or alias (`lts`, `latest`, `6000.3`, exact) and an
+  architecture (Host default, `x86_64`, or `arm64`), load the module catalog for that
+  build, preview the download with `--dry-run` (the resolved architecture is shown),
+  accept module terms explicitly, then install with live NDJSON progress and a cancellable
+  raw log. Host default leaves `--architecture` out, so single-build installs keep the
+  exact command they had. On Linux the same card can install the headless Editor
+  (`--headless`), which runs without a display. Installing a second build of a version is
+  allowed, with a warning that both stay on disk and projects pinned to one keep using it.
+- **Install resilience** — a collapsed **Advanced** area adds `--resume`,
+  `--download-only`, `--no-wait`, `--timeout <seconds>`, `--set-default`, and
+  `UNITY_INSTALL_RETRIES`; the exact command is shown under the card. The default command
+  stays byte-identical while Advanced is untouched. No-wait and timeout clear each other
+  and explain the lock conflict, and the CLI-refused resume/download-only/set-default
+  combinations are cleared in the UI too. A failed or interrupted download offers
+  **Resume** when the CLI reports a cache/interrupted state (or you choose `--resume`),
+  reusing exactly the same build, modules, and cache. Download-only reports the folder the
+  files landed in and registers no Editor. The CLI forbids `--resume` with
+  `--download-only`, so a download-only interruption is not offered as a Resume; choose a
+  normal install with `--resume` to continue into an installed Editor.
+- **Modules** — add modules to an installed Editor with `install-modules`, pinned to the
+  architecture of the row you opened (`--architecture`) so an `arm64` and an `x86_64`
+  build of the same version never get mixed up. Advanced module options set
+  `--retries <n>` (0 disables) and `--download-directory` for a portable install.
+- **Editor maintenance** — `unity editors prune` runs report-only first and lists
+  every candidate with version, architecture, size (when the CLI reports it), reason,
+  and path, plus the CLI's reclaimable total. `--remove` is a streamed job behind a
+  confirmation that enumerates exactly which builds and files will be deleted;
+  cancelling removes nothing. `--remove-missing` is a separate, clearly labelled
+  registry-only action that explains no files are deleted, and `--force` appears only
+  after a failed running-Editor check. `unity editors verify` renders per-component
+  pass/warn/fail rows with the failing path, the CLI's repair command, and the raw log
+  when the check fails. The default Editor is set per `(version, architecture)` and
+  can be cleared from the list.
+- **Projects** — every project in the Hub registry, its Editor version and architecture,
+  render pipeline, build target, cloud/VCS badges, an Open action, and a guarded upgrade
+  dialog. "Editor not installed" matches both version and architecture, and a target
+  version with two builds is explained rather than silently resolved.
 - **New Project** — a local-first wizard over `projects create`: name and parent folder,
   installed Editor and architecture, a template chosen by render pipeline (built-in
   templates hidden by default), a review with the exact command, then a streamed create.
@@ -90,8 +131,37 @@ update target.
   Play mode, frame count, Safe Mode, and blocking dialog, with copy and open-folder
   actions. Optional CPU/memory/uptime sampling is off by default and only runs while the
   page is visible.
-- **Changelog** — `unity changelog` rendered as sections with readable bullet points and
-  a focused heuristic for **possible breaking changes**, plus a raw Markdown view.
+- **Skills** — the Unity agent skill across the AI clients the CLI supports. The
+  page reads `unity skill install --list` for each client's label, install path, and
+  installed/absent status, plus `unity skills` for every copy the CLI tracks. Install
+  one client or `--all`, with `--local`, `--skill <name>`, `--yes`, and `--dry-run`;
+  `--local` is offered only when the Hub was launched from a Unity project, and is
+  disabled with an explanation otherwise. A refresh reports one row per tracked
+  install with the CLI's own `refreshed`, `up-to-date`, `pruned`, `skipped`, or
+  `conflict` outcome (and `would-update`/`would-skip`/`would-prune` under `--dry-run`),
+  never collapsing a skip or conflict into success. The first refresh click is a dry
+  run; the next click applies. A conflict row explains that the CLI did not write that
+  copy and only then offers `--force`. Installed status is re-read after every job, so
+  a fresh install appears without restarting the app.
+- **Changelog** — `unity changelog` rendered as sections with readable bullet points, a
+  focused heuristic for **possible breaking changes**, and a raw Markdown view. Every
+  entry's backticked command or class is a docs candidate: **Docs** resolves
+  `unity docs <topic> --url` (script reference by default; manual, CLI, Hub, Cloud, or a
+  package via the advanced scope picker) and **Open docs** hands the resolved URL to your
+  browser only when you click. Ambiguous names open the CLI's search page, and a miss
+  keeps the entry readable with "No docs page found". An **Affects this app** toggle lists
+  only entries that mention a command, flag, error code or exit code this app actually
+  uses; its count comes from the same filtered entries.
+- **Diagnostics** — a read-only answer to "can this machine build?" from `unity doctor`,
+  `unity env`, and the redacted `unity diagnose proxy|accelerator|update` reports.
+  `unity doctor` runs only when you click **Run doctor**, because its credential
+  probe can trigger a polkit password prompt; the other reads load automatically. Doctor
+  checks carry pass/warn/fail/info styling and human-readable labels derived from the check
+  id (the localization key is the fallback), and a support-safe raw report stays visible:
+  known credential fields are masked and proxy URLs lose their user-info. Environment
+  paths and the resolved proxy (URL, source, auth source, no-proxy list) render together.
+  Every section loads independently and retries alone; one Copy writes doctor + environment
+  + proxy as plain text, and a clipboard failure is reported as a notice.
 - **Provider-ready changelog** — `ChangelogProvider` is a trait; v1 uses
   `CliChangelogProvider`. A remote JSON/docs feed can be added without changing the UI.
 - **Notifications** — every CLI envelope's `warnings[]` and `notifications[]`, job
@@ -102,6 +172,15 @@ update target.
 - **Settings** — explicit CLI path override with auto-detection fallback, a persisted
   text-size setting (100%, 110%, 125%, 150%), and a persisted font family chosen from the
   fonts installed on the PC (default Tahoma).
+
+- **Actionable errors** — every failed read and job shows the CLI's stable code, its
+  message verbatim, the detail, and one code-specific next step: sign in, retry, pick
+  another release, open a project, install git, enter a VCS token, fix permissions, or
+  copy the CLI's own remediation. Retry repeats reads only; an install, upgrade,
+  sign-in, or CLI update that already started is never replayed. Network and
+  provider-unreachable errors name the proxy the CLI will use when one is configured,
+  and say the app has no proxy setting when none is. Unknown codes keep generic
+  rendering instead of guessing.
 
 ## Stack
 
@@ -121,7 +200,7 @@ update target.
 
 ```
 crates/unity-core/          Pure CLI adapter: command specs, envelope parsing, DTOs,
-                            errors, validation, changelog parsing/provider, bootstrap.
+                            errors, validation, changelog parsing/docs lookup, bootstrap.
 crates/unity-hub-model/     Stable presentation contract: view models, UiAction,
                             LoadState, semantic tones. No dependencies.
 crates/unity-hub-controller/ State, messages, update loop, jobs, settings, and
@@ -134,7 +213,7 @@ crates/unity-hub-ui/        Visual layer; depends only on unity-hub-model + iced
   src/theme.rs              iced theme/styles built from tokens.
   src/components.rs         Shared cards, badges, tables, headers.
   src/pages/                overview, editors, projects, templates, processes,
-                            changelog, settings.
+                            skills, diagnostics, changelog, settings.
   src/shell.rs              Sidebar, notification rail and toast, job cards.
   src/modals.rs             Full-screen dialog screens.
   src/fixtures.rs           Deterministic content for every screen/state.
@@ -346,7 +425,9 @@ unity <command> --format json --no-pager --no-banner --non-interactive
 
 Long operations use `--format ndjson` and are streamed by `JobManager` into the active
 job card. `projects upgrade` is run **without** `--wait` so the job ends when the
-upgrade does, not when the Editor is closed.
+upgrade does, not when the Editor is closed. Diagnostics reads are `unity doctor`,
+`unity env`, and `unity diagnose <topic>` (the diagnose topics ask for the plain,
+redacted report, not an envelope).
 
 On Linux, the CLI reads the stored sign-in through its resident auth broker. When that
 broker is not running, every command reads the Secret Service keyring itself, and a
@@ -368,8 +449,33 @@ The adapter is aligned to CLI 1.0.1:
 
 - Exit codes `17` (`UNAVAILABLE`) and `18` (`AWAITING_INPUT`) are still part of the 1.0.1
   table (verified with `unity commands --format json`), mapped, and treated as retryable.
+- `unity install --headless` installs the headless Linux Editor. The install card offers
+  it only where the CLI ships that build, and the dry run previews it too.
+- `unity modules` and `unity install-modules` take the row's `--architecture`; the CLI
+  makes `install-modules` refuse a build it cannot find instead of silently using the
+  installed one. The module dialog names the build it manages.
+- `unity install <version> --architecture x86_64|arm64` installs one build; the app omits
+  the flag when Host default is selected, so the resolved build comes from the CLI (and
+  `--dry-run` echoes it in the preview). `unity editors default <version> --architecture`
+  and `--unset` store or clear the default, and `unity editors verify <version>
+  --architecture` addresses one build. Rows and project badges use `(version,
+  architecture)`.
+- `unity projects upgrade --to <version>` cannot choose a build, so the upgrade dialog
+  lists versions only and names any target version with two installed builds instead of
+  picking one.
+- Some command failures moved onto different exit codes (for example a failed
+  `unity mcp configure` write is `1`, and argument errors are `2`). The app passes CLI
+  codes and messages through unchanged, and the changelog heuristic flags these contract
+  changes without flagging fixes that explicitly keep the exit code.
 - `unity install-modules` exiting `0` when every named module is already installed counts
   as success, even when no result frame is written.
+- Error codes drive the remediation table in `unity-core` (`AUTH_ERROR`,
+  `NETWORK_UNREACHABLE`, `VCS_PROVIDER_UNREACHABLE`, `INSTALL_LOCKED`,
+  `RELEASE_NOT_FOUND`, `EDITOR_UNREACHABLE`, `TIMEOUT`, `UNAVAILABLE`,
+  `STATUS_SAFE_MODE`, `AWAITING_INPUT`, `VCS_TOKEN_REQUIRED`, `GIT_START_FAILED`,
+  `LOCAL_STORE_UNWRITABLE`, `LINK_VCS_DELETE_REMOTE_REQUIRES_YES`,
+  `INSTALL_HEADLESS_UNAVAILABLE`, `BAD_ARGS`). CLI `remediation` wins over the code,
+  and the code wins over the exit code.
 - `unity projects upgrade` refuses a project that is open in an Editor; the upgrade job
   surfaces the CLI error, and the app also checks the running-Editor list before starting.
 - The Overview running-Editor card merges `unity editors running` with
@@ -440,6 +546,9 @@ Resolution order for the binary:
   so the installer's interactive setup does not hang under the GUI.
 - Module license acceptance is never implied. `--accept-eula` is passed only after the
   matching checkbox is checked.
+- A failed command never triggers an automatic retry. Retry is offered only on a failed
+  read, re-runs the exact request that failed, and is absent for any job that already
+  started a mutation.
 - Project upgrades require a second confirmation and warn that the project on disk can
   change. Commit or back up first.
 - New projects always pass `--no-cloud`; Cloud and VCS linking are not offered in this
@@ -450,7 +559,14 @@ Resolution order for the binary:
 - No credentials are read, stored, or forwarded. The app never passes
   `--insecure-storage` to `unity auth login`, so a CLI 1.0.x sign-in either uses the
   system credential store or reports that no store is available. Changelog Markdown is
-  displayed as plain text, never interpreted.
+  displayed as plain text, never interpreted. Docs lookups always use `unity docs --url`;
+  the app never lets the CLI open a browser, and the resolved HTTP(S) link reaches the OS
+  opener only from an explicit **Open docs** click. Diagnostics copies are support-safe:
+  the doctor raw report masks known secret fields and URL user-info, and `unity diagnose`
+  text is the CLI's own redacted report.
+- Diagnostics clipboard writes use the OS clipboard and report its real result. A failed
+  write is a notice, never a false success. Other copy actions still use the iced
+  clipboard and are not part of this guarantee.
 
 ## Known limitations (v1)
 
@@ -458,6 +574,8 @@ Resolution order for the binary:
 - No running-Editor control beyond a read-only list; the Pipeline package is not required.
 - Project upgrades are restricted to installed Editors.
 - Changelog breaking flags are heuristics over English release notes, not a guarantee.
+- Docs links depend on the CLI's documentation index; a lookup that cannot resolve a
+  page leaves the entry readable with a quiet message.
 - Jobs are not persisted across app restarts; closing the window cancels them.
 - Notification history is session-only; there are no OS-level notifications.
 - Only one job may run at a time.

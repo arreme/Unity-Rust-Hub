@@ -7,10 +7,10 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
-use unity_core::advisory::{Advisory, AdvisoryKind};
+use unity_core::advisory::{advisories_from_value, AdvisorySink, CliAdvisory};
 use unity_core::envelope::CliEnvelope;
 use unity_core::errors::{code_for_exit_code, message_for_exit_code};
-use unity_core::{CommandSpec, UnityError};
+use unity_core::{scrub_appimage_env, CommandSpec, UnityError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JobState {
@@ -46,7 +46,6 @@ pub struct JobEvent {
     pub progress: Option<f32>,
     pub message: Option<String>,
     pub result: Option<Value>,
-    pub advisories: Vec<Advisory>,
     pub error: Option<UnityError>,
 }
 
@@ -61,6 +60,7 @@ pub struct JobStarted {
 pub struct JobManager {
     inner: Arc<Mutex<Inner>>,
     counter: Arc<AtomicU64>,
+    advisories: AdvisorySink,
 }
 
 impl Hash for JobManager {
@@ -84,6 +84,12 @@ struct Handle {
 
 impl JobManager {
     pub fn new() -> Self {
+        Self::with_sink(AdvisorySink::default())
+    }
+
+    /// Builds a manager whose streamed advisory frames land in `sink`, normally
+    /// the same sink the CLI adapter's reads use.
+    pub fn with_sink(advisories: AdvisorySink) -> Self {
         Self {
             inner: Arc::new(Mutex::new(Inner {
                 events: VecDeque::new(),
@@ -91,7 +97,13 @@ impl JobManager {
                 notifier: None,
             })),
             counter: Arc::new(AtomicU64::new(0)),
+            advisories,
         }
+    }
+
+    /// Drains advisories reported by result frames since the last call.
+    pub fn take_advisories(&self) -> Vec<CliAdvisory> {
+        self.advisories.drain()
     }
 
     pub fn start(&self, kind: &str, spec: CommandSpec) -> Result<JobStarted, UnityError> {
@@ -102,6 +114,7 @@ impl JobManager {
         );
 
         let mut command = unity_core::process::hidden(&spec.program);
+        scrub_appimage_env(&mut command);
         command
             .args(&spec.args)
             .stdin(Stdio::null())
@@ -165,7 +178,6 @@ impl JobManager {
                             progress: None,
                             message: None,
                             result: None,
-                            advisories: Vec::new(),
                             error: None,
                         });
                         line.clear();
@@ -173,15 +185,20 @@ impl JobManager {
                 })
             });
 
-            let mut stream = JobStream::default();
+            let mut last_result: Option<Value> = None;
 
             if let Some(stdout) = stdout {
                 let mut reader = BufReader::new(stdout);
                 let mut line = String::new();
                 while reader.read_line(&mut line).unwrap_or(0) > 0 {
                     let text = line.trim_end().to_string();
-                    let mut parsed = parse_stdout(&text);
-                    let advisories = stream.mid_job_advisories(&mut parsed);
+                    let parsed = parse_stdout(&text);
+                    if let Some(result) = &parsed.result {
+                        last_result = Some(result.clone());
+                    }
+                    // Warnings and notifications on any parsed frame belong to
+                    // the advisory sink, not only to the raw log.
+                    manager.advisories.push(parsed.advisories);
                     manager.push(JobEvent {
                         job_id: task_id.clone(),
                         state: JobState::Running,
@@ -190,7 +207,6 @@ impl JobManager {
                         progress: parsed.progress,
                         message: parsed.message,
                         result: parsed.result,
-                        advisories,
                         error: None,
                     });
                     line.clear();
@@ -200,9 +216,6 @@ impl JobManager {
             if let Some(thread) = stderr_thread {
                 let _ = thread.join();
             }
-
-            let last_result = stream.last_result;
-            let last_advisories = stream.last_advisories;
 
             let status = wait_for_exit(&child);
             let exit_code = status.and_then(|status| status.code());
@@ -235,7 +248,6 @@ impl JobManager {
                 progress: if succeeded { Some(100.0) } else { None },
                 message: None,
                 result: last_result,
-                advisories: last_advisories,
                 error,
             });
 
@@ -321,93 +333,63 @@ fn wait_for_exit(child: &Arc<Mutex<Child>>) -> Option<std::process::ExitStatus> 
     }
 }
 
-/// Accumulates what the terminal event needs from the stdout frames.
-#[derive(Default)]
-struct JobStream {
-    last_result: Option<Value>,
-    last_advisories: Vec<Advisory>,
-}
-
-impl JobStream {
-    /// Takes the advisories the mid-job event for this line should carry.
-    ///
-    /// A notice frame keeps its advisories so the user hears about it while the
-    /// job runs. A result frame instead hands its advisories to the terminal
-    /// event, so they are delivered once instead of being repeated on the
-    /// running event for the same frame.
-    fn mid_job_advisories(&mut self, parsed: &mut ParsedLine) -> Vec<Advisory> {
-        let Some(result) = parsed.result.as_ref() else {
-            return std::mem::take(&mut parsed.advisories);
-        };
-        self.last_result = Some(result.clone());
-        self.last_advisories = std::mem::take(&mut parsed.advisories);
-        Vec::new()
-    }
-}
-
 struct ParsedLine {
     progress: Option<f32>,
     message: Option<String>,
     result: Option<Value>,
-    advisories: Vec<Advisory>,
-}
-
-impl ParsedLine {
-    fn empty() -> Self {
-        Self {
-            progress: None,
-            message: None,
-            result: None,
-            advisories: Vec::new(),
-        }
-    }
+    advisories: Vec<CliAdvisory>,
 }
 
 fn parse_stdout(line: &str) -> ParsedLine {
+    let empty = || ParsedLine {
+        progress: None,
+        message: None,
+        result: None,
+        advisories: Vec::new(),
+    };
+
     let Ok(value) = serde_json::from_str::<Value>(line) else {
-        return ParsedLine::empty();
+        return empty();
     };
 
     let Value::Object(object) = &value else {
-        return ParsedLine::empty();
+        return empty();
     };
 
     let is_result = object.get("type").and_then(Value::as_str) == Some("result")
         || (object.get("success").is_some()
             && (object.contains_key("errors") || object.contains_key("data")));
 
-    let advisories = if is_result {
-        result_advisories(line)
-    } else {
-        notice_advisory(&value).into_iter().collect()
-    };
-
     ParsedLine {
         progress: progress_from(object).map(|value| value as f32),
         message: message_from(object),
-        result: is_result.then_some(value),
-        advisories,
+        result: is_result.then(|| value.clone()),
+        advisories: if is_result {
+            result_frame_advisories(&value)
+        } else {
+            mid_frame_advisories(&value)
+        },
     }
 }
 
-/// The advisories a result frame carries in its `warnings` and `notifications`.
-fn result_advisories(line: &str) -> Vec<Advisory> {
-    if let Ok(envelope) = serde_json::from_str::<CliEnvelope<Value>>(line) {
-        envelope.advisories()
-    } else {
-        Vec::new()
-    }
+/// Parses the advisories of a streamed `result` frame with the same typed
+/// arrays the synchronous reads use. The frame does not need to be a complete
+/// envelope for its advisories to reach the shell.
+fn result_frame_advisories(value: &Value) -> Vec<CliAdvisory> {
+    advisories_from_value(value)
 }
 
-/// A mid-job `warning`, `notice` or `notification` frame as one advisory.
-fn notice_advisory(value: &Value) -> Option<Advisory> {
-    let object = value.as_object()?;
-    let kind = match object.get("type").and_then(Value::as_str)? {
-        "warning" => AdvisoryKind::Warning,
-        "notice" | "notification" => AdvisoryKind::Notification,
-        _ => return None,
+/// A mid-job `warning`, `notice` or `notification` frame as one advisory, so
+/// the user hears about it while the job runs instead of only in the log.
+/// Other frame types (progress, stage markers, arrays) never yield one.
+fn mid_frame_advisories(value: &Value) -> Vec<CliAdvisory> {
+    let key = match value.get("type").and_then(Value::as_str) {
+        Some("warning") => "warnings",
+        Some("notice") | Some("notification") => "notifications",
+        _ => return Vec::new(),
     };
-    Advisory::from_value(kind, value)
+    let wrapped = serde_json::json!({ key: [value.clone()] });
+    advisories_from_value(&wrapped)
 }
 
 fn progress_from(object: &serde_json::Map<String, Value>) -> Option<f64> {
@@ -507,7 +489,6 @@ mod tests {
             progress: None,
             message: None,
             result: None,
-            advisories: Vec::new(),
             error: None,
         }
     }
@@ -597,26 +578,22 @@ mod tests {
     }
 
     #[test]
-    fn a_warning_frame_carries_one_advisory_on_its_own_event() {
-        let mut parsed = parse_stdout(
+    fn a_warning_frame_carries_one_advisory() {
+        let parsed = parse_stdout(
             r#"{"type":"warning","code":"CLI_COMPATIBILITY","message":"Compatibility mode is on."}"#,
         );
-        let mut stream = JobStream::default();
-
-        let advisories = stream.mid_job_advisories(&mut parsed);
 
         assert!(parsed.result.is_none());
-        assert_eq!(advisories.len(), 1);
-        assert_eq!(advisories[0].kind, AdvisoryKind::Warning);
-        assert_eq!(advisories[0].code.as_deref(), Some("CLI_COMPATIBILITY"));
-        assert_eq!(advisories[0].message, "Compatibility mode is on.");
-        assert!(stream.last_advisories.is_empty());
+        assert_eq!(parsed.advisories.len(), 1);
+        assert_eq!(
+            parsed.advisories[0].code.as_deref(),
+            Some("CLI_COMPATIBILITY")
+        );
+        assert_eq!(parsed.advisories[0].message, "Compatibility mode is on.");
     }
 
     #[test]
-    fn a_progress_only_stream_carries_no_advisories() {
-        let mut stream = JobStream::default();
-
+    fn progress_and_stage_frames_carry_no_advisories() {
         for line in [
             r#"{"progress":0.1,"message":"Downloading."}"#,
             r#"{"percent":50,"stage":"Verifying"}"#,
@@ -624,68 +601,42 @@ mod tests {
             r#"[{"version":"6000.6.6f1"}]"#,
             "not json at all",
         ] {
-            let mut parsed = parse_stdout(line);
+            let parsed = parse_stdout(line);
             assert!(
-                stream.mid_job_advisories(&mut parsed).is_empty(),
+                parsed.advisories.is_empty(),
                 "{line} should carry no advisories"
             );
         }
-
-        assert!(stream.last_result.is_none());
-        assert!(stream.last_advisories.is_empty());
     }
 
     #[test]
-    fn a_result_frame_delivers_its_notifications_once_on_the_terminal_event() {
-        let mut stream = JobStream::default();
+    fn result_frame_warnings_and_notifications_become_advisories() {
+        let line = serde_json::json!({
+            "type": "result",
+            "success": true,
+            "data": { "plugin": "com.unity.ai" },
+            "warnings": ["This plugin is a beta release."],
+            "notifications": [{
+                "code": "PLUGIN_UPDATE_AVAILABLE",
+                "message": "A plugin update is available.",
+                "data": { "plugin": "com.unity.ai", "current": "1.0.0", "latest": "1.1.0" },
+                "remediation": { "command": "unity plugin upgrade com.unity.ai", "requiresUserApproval": true }
+            }]
+        })
+        .to_string();
 
-        for _ in 0..3 {
-            let mut progress = parse_stdout(r#"{"progress":0.25,"message":"Installing."}"#);
-            assert!(stream.mid_job_advisories(&mut progress).is_empty());
-        }
+        let parsed = parse_stdout(&line);
 
-        let mut result = parse_stdout(
-            r#"{
-                "type": "result",
-                "success": true,
-                "notifications": [{
-                    "code": "CLI_UPDATE_AVAILABLE",
-                    "message": "A new version of the Unity CLI is available."
-                }]
-            }"#,
-        );
-        assert!(
-            stream.mid_job_advisories(&mut result).is_empty(),
-            "the running event for a result frame carries no advisories"
-        );
-
-        let terminal = JobEvent {
-            advisories: stream.last_advisories,
-            ..event(JobState::Succeeded)
-        };
-
-        assert_eq!(terminal.advisories.len(), 1);
-        assert_eq!(terminal.advisories[0].kind, AdvisoryKind::Notification);
+        assert!(parsed.result.is_some());
+        assert_eq!(parsed.advisories.len(), 2);
         assert_eq!(
-            terminal.advisories[0].code.as_deref(),
-            Some("CLI_UPDATE_AVAILABLE")
+            parsed.advisories[0].code.as_deref(),
+            Some("PLUGIN_UPDATE_AVAILABLE")
         );
-    }
-
-    #[test]
-    fn only_the_last_result_frame_supplies_the_terminal_advisories() {
-        let mut stream = JobStream::default();
-
-        for line in [
-            r#"{"type":"result","success":true,"warnings":["First warning."]}"#,
-            r#"{"type":"result","success":true,"warnings":["Second warning."]}"#,
-        ] {
-            let mut parsed = parse_stdout(line);
-            assert!(stream.mid_job_advisories(&mut parsed).is_empty());
-        }
-
-        assert_eq!(stream.last_advisories.len(), 1);
-        assert_eq!(stream.last_advisories[0].message, "Second warning.");
+        assert_eq!(
+            parsed.advisories[1].message,
+            "This plugin is a beta release."
+        );
     }
 
     #[test]
@@ -694,12 +645,139 @@ mod tests {
             r#"{"type":"notice","message":"Licence renewed."}"#,
             r#"{"type":"notification","message":"Update available."}"#,
         ] {
-            let mut parsed = parse_stdout(line);
-            let advisories = JobStream::default().mid_job_advisories(&mut parsed);
+            let parsed = parse_stdout(line);
 
-            assert_eq!(advisories.len(), 1, "{line} should carry one advisory");
-            assert_eq!(advisories[0].kind, AdvisoryKind::Notification);
-            assert!(advisories[0].code.is_none());
+            assert_eq!(
+                parsed.advisories.len(),
+                1,
+                "{line} should carry one advisory"
+            );
+            assert_eq!(
+                parsed.advisories[0].origin,
+                unity_core::advisory::AdvisoryOrigin::Notification
+            );
+            assert!(parsed.advisories[0].code.is_none());
         }
+    }
+
+    #[test]
+    fn progress_frames_do_not_report_advisories() {
+        let parsed = parse_stdout(
+            &serde_json::json!({
+                "type": "progress",
+                "progress": 42.0,
+                "warnings": ["not a result frame"]
+            })
+            .to_string(),
+        );
+
+        assert!(parsed.advisories.is_empty());
+        assert_eq!(parsed.progress, Some(42.0));
+    }
+
+    #[test]
+    fn job_manager_hands_result_frame_advisories_to_its_sink() {
+        let sink = AdvisorySink::default();
+        let manager = JobManager::with_sink(sink.clone());
+        let frame = serde_json::json!({
+            "type": "result",
+            "success": true,
+            "warnings": ["Beta plugin."]
+        });
+        let parsed = parse_stdout(&frame.to_string());
+        manager.advisories.push(parsed.advisories);
+
+        let drained = sink.drain();
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0].message, "Beta plugin.");
+        assert!(manager.take_advisories().is_empty());
+    }
+
+    /// A streamed job that prints a terminal result frame must hand that
+    /// frame's warnings to the same sink reads use.
+    #[cfg(unix)]
+    #[test]
+    fn streamed_job_reports_terminal_frame_advisories() {
+        let sink = AdvisorySink::default();
+        let manager = JobManager::with_sink(sink.clone());
+        let spec = CommandSpec::new(
+            "sh",
+            vec![
+                "-c".to_string(),
+                r#"printf '%s' '{"type":"result","success":true,"warnings":["This plugin is a beta release."]}'"#
+                    .to_string(),
+            ],
+        );
+        let started = manager.start("plugin-install", spec).expect("job starts");
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let finished = manager.poll().iter().any(|event| {
+                event.job_id == started.id
+                    && matches!(event.state, JobState::Succeeded | JobState::Failed)
+            });
+            if finished {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "job did not finish");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        let advisories = manager.take_advisories();
+        assert_eq!(advisories.len(), 1);
+        assert_eq!(advisories[0].message, "This plugin is a beta release.");
+        assert!(sink.drain().is_empty());
+    }
+
+    /// Update jobs are CLI children like any other: inheriting the GUI's AppImage
+    /// variables makes `unity self-update` install a CLI AppImage over the GUI.
+    #[cfg(unix)]
+    #[test]
+    fn jobs_do_not_inherit_the_gui_appimage_environment() {
+        struct Restore;
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                std::env::remove_var("APPIMAGE");
+            }
+        }
+
+        std::env::set_var("APPIMAGE", "/tmp/UnityRustHub-test.AppImage");
+        let _restore = Restore;
+
+        let dir =
+            std::env::temp_dir().join(format!("unity-rust-hub-job-env-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let target = dir.join("appimage.txt");
+        let spec = CommandSpec::new(
+            "sh",
+            vec![
+                "-c".to_string(),
+                format!(
+                    "printf '%s' \"${{APPIMAGE-unset}}\" > '{}'",
+                    target.display()
+                ),
+            ],
+        );
+
+        let manager = JobManager::new();
+        let started = manager.start("probe", spec).expect("job should start");
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let finished = manager.poll().iter().any(|event| {
+                event.job_id == started.id
+                    && matches!(event.state, JobState::Succeeded | JobState::Failed)
+            });
+            if finished {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "job did not finish");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        let written = std::fs::read_to_string(&target).expect("child should write its env");
+        std::fs::remove_dir_all(&dir).ok();
+
+        assert_eq!(written, "unset");
     }
 }

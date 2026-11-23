@@ -7,6 +7,7 @@ description = "State, CLI orchestration, jobs, and view-model mapping for Unity 
 publish = false
 
 [dependencies]
+arboard.workspace = true
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 dirs = "6"
 fontdb = "0.23"

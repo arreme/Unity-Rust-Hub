@@ -496,6 +496,8 @@ fn page_icon(page: Page) -> char {
         Page::Projects => icons::FOLDERS,
         Page::Templates => icons::PACKAGE,
         Page::Processes => icons::CPU,
+        Page::Skills => icons::SPARKLES,
+        Page::Diagnostics => icons::WRENCH,
         Page::Changelog => icons::NEWSPAPER,
         Page::Settings => icons::SETTINGS,
     }
@@ -508,6 +510,8 @@ pub fn page_label(page: Page) -> &'static str {
         Page::Projects => "Projects",
         Page::Templates => "Templates",
         Page::Processes => "Processes",
+        Page::Skills => "Skills",
+        Page::Diagnostics => "Diagnostics",
         Page::Changelog => "Changelog",
         Page::Settings => "Settings",
     }

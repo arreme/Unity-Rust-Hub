@@ -9,7 +9,8 @@
 
 use std::collections::HashSet;
 
-use unity_core::advisory::{Advisory, AdvisoryKind, Remediation};
+use unity_core::advisory::{AdvisoryOrigin, CliAdvisory};
+use unity_core::envelope::CliRemediation;
 use unity_core::UnityError;
 use unity_hub_model::{NotificationActionState, NotificationVm, Tone};
 
@@ -69,20 +70,21 @@ impl NotificationStore {
         Self::default()
     }
 
-    /// Adds a CLI advisory. Returns false when the same advisory — same code
-    /// plus `data`, same code plus message, or the same codeless message — was
-    /// already shown this session.
-    pub fn push_advisory(&mut self, advisory: &Advisory) -> bool {
-        let key = advisory.dedupe_key();
+    /// Adds a CLI advisory. Returns false when the same advisory — the same
+    /// stable identity, derived from the code plus its documented stable
+    /// `data` fields (falling back to the message) — was already shown this
+    /// session.
+    pub fn push_advisory(&mut self, advisory: &CliAdvisory) -> bool {
+        let key = advisory.identity();
         if self.seen.contains(&key) {
             return false;
         }
 
-        let level = advisory_level(advisory.kind);
+        let level = advisory_level(advisory.origin);
         let label = advisory
             .code
             .clone()
-            .unwrap_or_else(|| advisory_label(advisory.kind).to_string());
+            .unwrap_or_else(|| advisory_label(advisory.origin).to_string());
         let (command, can_run) = match &advisory.remediation {
             Some(remediation) => (
                 Some(remediation.command.clone()),
@@ -160,6 +162,13 @@ impl NotificationStore {
         if self.toast.as_ref().is_some_and(|toast| toast.id == id) {
             self.toast = None;
         }
+    }
+
+    /// Forgets which advisories were already announced. The next refresh
+    /// re-admits them, so a CLI that changed versions shows its advisories
+    /// once more. Existing rail entries are left alone.
+    pub fn forget_advisories(&mut self) {
+        self.seen.clear();
     }
 
     pub fn set_state(&mut self, id: u64, state: ActionState) {
@@ -270,23 +279,21 @@ pub fn is_runnable(command: &str) -> bool {
     remediation_args(command).is_some()
 }
 
-fn remediation_can_run(remediation: &Remediation) -> bool {
+fn remediation_can_run(remediation: &CliRemediation) -> bool {
     !remediation.requires_user_approval && is_runnable(&remediation.command)
 }
 
-fn advisory_level(kind: AdvisoryKind) -> NotificationLevel {
-    match kind {
-        AdvisoryKind::Warning => NotificationLevel::Warning,
-        AdvisoryKind::Notification => NotificationLevel::Info,
-        AdvisoryKind::Error => NotificationLevel::Danger,
+fn advisory_level(origin: AdvisoryOrigin) -> NotificationLevel {
+    match origin {
+        AdvisoryOrigin::Warning => NotificationLevel::Warning,
+        AdvisoryOrigin::Notification => NotificationLevel::Info,
     }
 }
 
-fn advisory_label(kind: AdvisoryKind) -> &'static str {
-    match kind {
-        AdvisoryKind::Warning => "Warning",
-        AdvisoryKind::Notification => "Notification",
-        AdvisoryKind::Error => "Error",
+fn advisory_label(origin: AdvisoryOrigin) -> &'static str {
+    match origin {
+        AdvisoryOrigin::Warning => "Warning",
+        AdvisoryOrigin::Notification => "Notification",
     }
 }
 
@@ -315,14 +322,22 @@ fn error_text(error: &UnityError) -> String {
 mod tests {
     use super::*;
     use serde_json::{json, Value};
+    use unity_core::advisory::advisories_from_value;
 
-    fn advisory(kind: AdvisoryKind, value: Value) -> Advisory {
-        Advisory::from_value(kind, &value).expect("test advisory is valid")
+    fn advisory(origin: AdvisoryOrigin, value: Value) -> CliAdvisory {
+        let key = match origin {
+            AdvisoryOrigin::Notification => "notifications",
+            AdvisoryOrigin::Warning => "warnings",
+        };
+        advisories_from_value(&json!({ key: [value] }))
+            .into_iter()
+            .next()
+            .expect("test advisory is valid")
     }
 
-    fn notification_with(code: &str, data: Value) -> Advisory {
+    fn notification_with(code: &str, data: Value) -> CliAdvisory {
         advisory(
-            AdvisoryKind::Notification,
+            AdvisoryOrigin::Notification,
             json!({ "code": code, "message": "A notice.", "data": data }),
         )
     }
@@ -331,9 +346,18 @@ mod tests {
     fn the_same_code_and_data_is_admitted_once() {
         let mut store = NotificationStore::new();
 
-        assert!(store.push_advisory(&notification_with("CLI_UPDATE", json!({ "latest": "1" }))));
-        assert!(!store.push_advisory(&notification_with("CLI_UPDATE", json!({ "latest": "1" }))));
-        assert!(store.push_advisory(&notification_with("CLI_UPDATE", json!({ "latest": "2" }))));
+        assert!(store.push_advisory(&notification_with(
+            "CLI_UPDATE_AVAILABLE",
+            json!({ "current": "1.0.0", "latest": "1" })
+        )));
+        assert!(!store.push_advisory(&notification_with(
+            "CLI_UPDATE_AVAILABLE",
+            json!({ "current": "1.0.0", "latest": "1" })
+        )));
+        assert!(store.push_advisory(&notification_with(
+            "CLI_UPDATE_AVAILABLE",
+            json!({ "current": "1.0.0", "latest": "2" })
+        )));
 
         assert_eq!(store.snapshot().len(), 2);
         assert_eq!(store.unread(), 2);
@@ -372,7 +396,7 @@ mod tests {
     fn repeated_advisories_collapse_to_one_entry() {
         let mut store = NotificationStore::new();
         let advisory = advisory(
-            AdvisoryKind::Warning,
+            AdvisoryOrigin::Warning,
             json!({ "code": "CLI_COMPATIBILITY", "message": "Compatibility mode is on." }),
         );
 
@@ -470,7 +494,7 @@ mod tests {
         let mut store = NotificationStore::new();
 
         store.push_advisory(&advisory(
-            AdvisoryKind::Warning,
+            AdvisoryOrigin::Warning,
             json!({
                 "code": "CLI_UPDATE",
                 "message": "Update the CLI.",
@@ -484,7 +508,7 @@ mod tests {
 
         let mut store = NotificationStore::new();
         store.push_advisory(&advisory(
-            AdvisoryKind::Warning,
+            AdvisoryOrigin::Warning,
             json!({
                 "code": "CLI_UPDATE",
                 "message": "Update the CLI.",
@@ -495,7 +519,7 @@ mod tests {
 
         let mut store = NotificationStore::new();
         store.push_advisory(&advisory(
-            AdvisoryKind::Warning,
+            AdvisoryOrigin::Warning,
             json!({
                 "code": "SHELL",
                 "message": "Unsafe command.",
@@ -597,25 +621,19 @@ mod tests {
         let mut store = NotificationStore::new();
 
         store.push_advisory(&advisory(
-            AdvisoryKind::Warning,
+            AdvisoryOrigin::Warning,
             json!({ "message": "Compatibility mode is on." }),
         ));
         store.push_advisory(&advisory(
-            AdvisoryKind::Notification,
+            AdvisoryOrigin::Notification,
             json!({ "message": "Licence renewed." }),
-        ));
-        store.push_advisory(&advisory(
-            AdvisoryKind::Error,
-            json!({ "code": "BROKEN", "message": "Something failed." }),
         ));
 
         let snapshot = store.snapshot();
-        assert_eq!(snapshot[0].tone, Tone::Danger);
-        assert_eq!(snapshot[0].label, "BROKEN");
-        assert_eq!(snapshot[1].tone, Tone::Info);
-        assert_eq!(snapshot[1].label, "Notification");
-        assert_eq!(snapshot[2].tone, Tone::Warning);
-        assert_eq!(snapshot[2].label, "Warning");
+        assert_eq!(snapshot[0].tone, Tone::Info);
+        assert_eq!(snapshot[0].label, "Notification");
+        assert_eq!(snapshot[1].tone, Tone::Warning);
+        assert_eq!(snapshot[1].label, "Warning");
         assert_eq!(snapshot[0].state, NotificationActionState::Idle);
     }
 

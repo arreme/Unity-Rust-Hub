@@ -1,30 +1,49 @@
 use std::io::Read;
 use std::path::PathBuf;
-use std::process::Stdio;
-use std::sync::{Arc, Mutex, RwLock};
+use std::process::{Command, Stdio};
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
-use crate::advisory::Advisory;
+use crate::advisory::{advisories_from_envelope, AdvisorySink, CliAdvisory};
+use crate::docs::{docs_page_from_data, DocsLookup, DocsPage, DocsScope};
 use crate::envelope::{parse_data, parse_envelope, parse_items, ValueEnvelope};
-use crate::errors::{message_for_exit_code, UnityError};
+use crate::errors::{code_for_exit_code, message_for_exit_code, UnityError};
 use crate::models::{
-    AuthStatus, CliStatus, CliUpdateInfo, CliVersion, CreateProjectOptions, Editor, EditorInfo,
-    InstallPath, LicenseStatus, Module, PipelineEditors, Project, RawChangelog, Release,
-    RunningEditor, RunningEditors, StatusInstance, TemplateBrief, TemplateCreateOptions,
-    TemplateFilter, TemplateInfo, TemplatePackOptions,
+    AuthStatus, CliStatus, CliUpdateInfo, CliVersion, CreateProjectOptions, DoctorReport, Editor,
+    EditorInfo, EnvironmentInfo, InstallPath, LicenseStatus, Module, PipelineEditors, Project,
+    PruneReport, RawChangelog, Release, RunningEditor, RunningEditors, SkillClientInfo,
+    StatusInstance, TemplateBrief, TemplateCreateOptions, TemplateFilter, TemplateInfo,
+    TemplatePackOptions, TrackedSkillInstall, VerifyReport,
 };
+use crate::surface;
 use crate::versions::{
-    validate_archive_path, validate_cli_version, validate_editor_version, validate_module_id,
+    validate_architecture, validate_archive_path, validate_cli_version, validate_docs_package,
+    validate_docs_topic, validate_download_directory, validate_editor_version, validate_module_id,
     validate_output_dir, validate_package_id, validate_project_name, validate_project_path,
-    validate_release_stream, validate_template_id, validate_template_version,
+    validate_release_stream, validate_skill_client, validate_skill_name, validate_template_id,
+    validate_template_version, validate_update_channel,
 };
 
 /// The standard opt-out signal. The CLI's analytics/update callback adds a
 /// noticeable startup stall to most invocations, so every call made by the GUI
 /// opts out. Users can still use the CLI directly with their own preference.
 pub const DO_NOT_TRACK_ENV: &str = "DO_NOT_TRACK";
+
+/// Variables the AppImage runtime exports into the process it starts. They
+/// describe the AppImage that owns the *current* process, which for the GUI is
+/// the GUI's own AppImage. The GUI runs `unity` as a plain installed binary, so
+/// these must never reach a CLI child: `unity self-update` reads `APPIMAGE` and
+/// installs the new CLI AppImage over that path, replacing the GUI binary.
+pub const APPIMAGE_ENV_VARS: [&str; 4] = ["APPIMAGE", "APPDIR", "OWD", "ARGV0"];
+
+/// Strips [`APPIMAGE_ENV_VARS`] from a child's inherited environment.
+pub fn scrub_appimage_env(command: &mut Command) {
+    for key in APPIMAGE_ENV_VARS {
+        command.env_remove(key);
+    }
+}
 
 /// Reads are expected to finish quickly. A hung CLI process must not hold the
 /// single reader worker forever.
@@ -74,17 +93,75 @@ impl CommandSpec {
     }
 }
 
+/// Advanced `unity install` options from the collapsed Advanced area.
+///
+/// Every field is off/empty by default, which keeps the host-default command
+/// byte-for-byte the same as earlier releases.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct InstallOptions {
+    /// `--resume`: continue an interrupted download from the cache.
+    pub resume: bool,
+    /// `--download-only`: fetch and verify, install nothing.
+    pub download_only: bool,
+    /// `--no-wait`: fail immediately when another install holds the lock.
+    pub no_wait: bool,
+    /// `--timeout <seconds>`: bound how long to wait for the lock.
+    pub timeout_secs: Option<u32>,
+    /// `--set-default`: store the installed Editor as default.
+    pub set_default: bool,
+    /// `UNITY_INSTALL_RETRIES`: install has no `--retries` flag.
+    pub retries: Option<u32>,
+}
+
+/// The two Advanced `install-modules` options.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ModuleInstallOptions {
+    /// `--retries <n>`: 0 disables module download retries.
+    pub retries: Option<u32>,
+    /// `-d` / `--download-directory`: add modules to a portable install.
+    pub download_directory: Option<String>,
+}
+
+/// The options of one `unity skill install` run.
+///
+/// `client` and `all` are mutually exclusive; exactly one is required for a
+/// mutation. Every flag is off by default, so an untouched install is the
+/// client positional followed only by the standard machine flags. `yes` is the
+/// CLI's "replace an outdated copy" consent and is never implied by the app.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SkillInstallOptions {
+    pub client: Option<String>,
+    pub all: bool,
+    pub local: bool,
+    pub skill: Option<String>,
+    pub yes: bool,
+    pub dry_run: bool,
+    pub force: bool,
+}
+
+/// The options of one `unity skill refresh` run.
+///
+/// `yes` is always passed by the GUI because the click is the confirmation and
+/// a child with no terminal must never prompt. `dry_run` previews the outcome
+/// rows and changes nothing.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SkillRefreshOptions {
+    pub yes: bool,
+    pub dry_run: bool,
+    pub force: bool,
+}
+
 impl UnityCli {
     /// Builds a read-only invocation with the machine flags every call needs.
     pub fn spec(&self, parts: &[String], format: &str) -> Result<CommandSpec, UnityError> {
         let mut args = parts.to_vec();
         args.extend(
             [
-                "--format",
+                surface::flag::FORMAT,
                 format,
-                "--no-pager",
-                "--no-banner",
-                "--non-interactive",
+                surface::flag::NO_PAGER,
+                surface::flag::NO_BANNER,
+                surface::flag::NON_INTERACTIVE,
             ]
             .into_iter()
             .map(str::to_string),
@@ -163,10 +240,10 @@ impl UnityCli {
             err
         })?;
 
-        // Advisories ride along with successful and failed envelopes alike.
-        // Failures are still returned as errors below; they are not converted
-        // into advisories here.
-        self.record_advisories(envelope.advisories());
+        // Collect before the success check: a failed envelope can still carry
+        // the advisory that explains or fixes the failure. Failures are still
+        // returned as errors below; they are not converted into advisories.
+        self.advisories.push(advisories_from_envelope(&envelope));
 
         if require_success && !envelope.success {
             return Err(envelope_error(&envelope, &stderr, exit_code));
@@ -180,7 +257,7 @@ impl UnityCli {
     }
 
     pub fn version(&self) -> Result<CliVersion, UnityError> {
-        let executed = self.run_args(&svec(&["version"]), "json")?;
+        let executed = self.run_args(&svec(&[surface::command::VERSION]), "json")?;
         parse_data(executed.envelope)
     }
 
@@ -217,13 +294,17 @@ impl UnityCli {
     }
 
     pub fn install_path(&self) -> Result<String, UnityError> {
-        let executed = self.run_args(&svec(&["install-path"]), "json")?;
+        let executed = self.run_args(&svec(&[surface::command::INSTALL_PATH]), "json")?;
         let value: InstallPath = parse_data(executed.envelope)?;
         Ok(value.path)
     }
 
     pub fn editors_installed(&self) -> Result<Vec<Editor>, UnityError> {
-        let parts = svec(&["editors", "--installed", "--long"]);
+        let parts = svec(&[
+            surface::command::EDITORS,
+            surface::flag::INSTALLED,
+            surface::flag::LONG,
+        ]);
         let executed = self.run_args(&parts, "json")?;
         parse_items(executed.envelope.data, &[])
     }
@@ -245,7 +326,7 @@ impl UnityCli {
     }
 
     fn editors_running_base(&self) -> Result<RunningEditors, UnityError> {
-        let parts = svec(&["editors", "running"]);
+        let parts = svec(&[surface::command::EDITORS, surface::subcommand::RUNNING]);
         let executed = self.run_args(&parts, "json")?;
         let Some(data) = executed.envelope.data else {
             return Ok(RunningEditors::default());
@@ -264,7 +345,10 @@ impl UnityCli {
     }
 
     pub fn pipeline_editors(&self) -> Result<PipelineEditors, UnityError> {
-        let executed = self.run_args(&svec(&["pipeline", "editors"]), "json")?;
+        let executed = self.run_args(
+            &svec(&[surface::command::PIPELINE, surface::subcommand::EDITORS]),
+            "json",
+        )?;
         pipeline_editors_from_data(executed.envelope.data)
     }
 
@@ -279,17 +363,68 @@ impl UnityCli {
         parse_items(executed.envelope.data, &[])
     }
 
-    pub fn modules(&self, version: &str) -> Result<Vec<Module>, UnityError> {
-        let parts = modules_parts(version)?;
+    /// Lists the module catalog for an Editor version.
+    ///
+    /// `architecture` disambiguates the two builds the CLI can install for the
+    /// same version (for example `arm64` and `x86_64` on Apple Silicon). It is
+    /// optional because a version installed once has only one build.
+    pub fn modules(
+        &self,
+        version: &str,
+        architecture: Option<&str>,
+    ) -> Result<Vec<Module>, UnityError> {
+        let parts = modules_parts(version, architecture)?;
         let executed = self.run_args(&parts, "json")?;
         parse_items(executed.envelope.data, &[])
     }
 
     pub fn editor_info(&self, version: &str) -> Result<EditorInfo, UnityError> {
         validate_editor_version(version)?;
-        let parts = svec(&["editors", "info", version]);
+        let parts = svec(&[
+            surface::command::EDITORS,
+            surface::subcommand::INFO,
+            version,
+        ]);
         let executed = self.run_args(&parts, "json")?;
         parse_data(executed.envelope)
+    }
+
+    /// Reads `unity skills --format json`: every skill install the CLI tracks.
+    pub fn skills(&self) -> Result<Vec<TrackedSkillInstall>, UnityError> {
+        let executed = self.run_args(&svec(&[surface::command::SKILLS]), "json")?;
+        parse_items(executed.envelope.data, &["items"])
+    }
+
+    /// Builds the `unity skill install --list` read. It takes no user input.
+    pub fn skill_clients_spec(&self) -> Result<CommandSpec, UnityError> {
+        self.spec(&skill_clients_parts(), "json")
+    }
+
+    /// Reads the supported clients, their install paths, and their status.
+    ///
+    /// `--list` is a read even though it lives on the `install` subcommand; it
+    /// changes nothing.
+    pub fn skill_clients(&self) -> Result<Vec<SkillClientInfo>, UnityError> {
+        let executed = self.run_args(&skill_clients_parts(), "json")?;
+        parse_items(executed.envelope.data, &["items"])
+    }
+
+    /// Builds `unity skill install [client|--all] [options]` as a streamed job.
+    pub fn skill_install_spec(
+        &self,
+        options: &SkillInstallOptions,
+    ) -> Result<CommandSpec, UnityError> {
+        let parts = skill_install_parts(options)?;
+        self.spec(&parts, "ndjson")
+    }
+
+    /// Builds `unity skill refresh [--yes] [--dry-run] [--force]` as a job.
+    pub fn skill_refresh_spec(
+        &self,
+        options: &SkillRefreshOptions,
+    ) -> Result<CommandSpec, UnityError> {
+        let parts = skill_refresh_parts(options);
+        self.spec(&parts, "ndjson")
     }
 
     pub fn projects(&self) -> Result<Vec<Project>, UnityError> {
@@ -397,17 +532,50 @@ impl UnityCli {
     }
 
     pub fn changelog(&self, target: Option<&str>) -> Result<RawChangelog, UnityError> {
-        let mut parts = svec(&["changelog"]);
+        let mut parts = svec(&[surface::command::CHANGELOG]);
         if let Some(target) = target.filter(|value| !value.trim().is_empty()) {
             validate_cli_version(target)?;
-            parts.extend(svec(&["--target", target]));
+            parts.extend(svec(&[surface::flag::TARGET, target]));
         }
         let executed = self.run_args(&parts, "json")?;
         parse_data(executed.envelope)
     }
 
+    /// Builds `unity docs <topic> --url [scope] --format json`.
+    ///
+    /// `--url` is always present: the app never lets the CLI open a browser.
+    /// The scope flag is `--manual`, `--cli`, `--hub`, `--cloud`, or
+    /// `--package <name>`. No scope flag means the script reference.
+    pub fn docs_spec(&self, lookup: &DocsLookup) -> Result<CommandSpec, UnityError> {
+        let topic = validate_docs_topic(&lookup.topic)?;
+        let mut parts = svec(&[surface::command::DOCS, &topic, surface::flag::URL]);
+        match &lookup.scope {
+            DocsScope::Package(package) => {
+                let Some(package) = validate_docs_package(package)? else {
+                    return Err(UnityError::invalid_input(
+                        "Enter a Unity package name for the package docs scope.",
+                    ));
+                };
+                parts.extend([surface::flag::PACKAGE.to_string(), package]);
+            }
+            scope => parts.extend(scope.args()),
+        }
+        self.spec(&parts, "json")
+    }
+
+    /// Resolves one documentation page. The CLI answers with the URL it would
+    /// have opened; this method only parses and validates it.
+    pub fn docs(&self, lookup: &DocsLookup) -> Result<DocsPage, UnityError> {
+        let spec = self.docs_spec(lookup)?;
+        let executed = self.execute(&spec)?;
+        docs_page_from_data(executed.envelope.data, &lookup.topic)
+    }
+
     pub fn auth_status(&self) -> Result<AuthStatus, UnityError> {
-        let spec = self.spec(&svec(&["auth", "status"]), "json")?;
+        let spec = self.spec(
+            &svec(&[surface::command::AUTH, surface::subcommand::STATUS]),
+            "json",
+        )?;
         match self.execute_envelope(&spec) {
             Ok(executed) if executed.envelope.data.is_some() => parse_data(executed.envelope),
             Ok(executed) if !executed.envelope.success => Err(envelope_error(
@@ -440,15 +608,111 @@ impl UnityCli {
     }
 
     pub fn license_status(&self) -> Result<LicenseStatus, UnityError> {
-        let executed = self.run_args(&svec(&["license", "status"]), "json")?;
+        let executed = self.run_args(
+            &svec(&[surface::command::LICENSE, surface::subcommand::STATUS]),
+            "json",
+        )?;
         parse_data(executed.envelope)
     }
 
+    /// Builds the `unity doctor` read invocation. It takes no user input.
+    pub fn doctor_spec(&self) -> Result<CommandSpec, UnityError> {
+        self.spec(&svec(&[surface::command::DOCTOR]), "json")
+    }
+
+    /// Reads the CLI's own system diagnostics.
+    pub fn doctor(&self) -> Result<DoctorRead, UnityError> {
+        let executed = self.execute(&self.doctor_spec()?)?;
+        let data = executed.envelope.data.ok_or_else(|| {
+            UnityError::unexpected_output("`unity doctor` returned no `data` field.")
+        })?;
+        let raw = serde_json::to_string_pretty(&data).unwrap_or_else(|_| data.to_string());
+        let report: DoctorReport = serde_json::from_value(data).map_err(|err| {
+            UnityError::unexpected_output(format!("Could not parse the doctor report: {err}"))
+        })?;
+        Ok(DoctorRead { report, raw })
+    }
+
+    /// Builds the `unity env` read invocation. It takes no user input.
+    pub fn environment_spec(&self) -> Result<CommandSpec, UnityError> {
+        self.spec(&svec(&[surface::command::ENV]), "json")
+    }
+
+    /// Reads the CLI's resolved environment paths and proxy.
+    pub fn environment(&self) -> Result<EnvironmentInfo, UnityError> {
+        let executed = self.execute(&self.environment_spec()?)?;
+        parse_data(executed.envelope)
+    }
+
+    /// Builds one `unity diagnose <topic>` invocation.
+    ///
+    /// `diagnose` writes its redacted report as plain text to stdout in every
+    /// format except JSON, so this asks for the human report and does not use
+    /// the JSON envelope flags.
+    pub fn diagnose_spec(&self, topic: DiagnoseTopic) -> Result<CommandSpec, UnityError> {
+        self.spec(&svec(&[surface::command::DIAGNOSE, topic.arg()]), "human")
+    }
+
+    /// Reads one redacted diagnose report as preformatted text.
+    ///
+    /// The output is text, not an envelope, but the command is parsed
+    /// defensively: if a CLI version answers with JSON instead, the report text
+    /// is extracted from it rather than shown as escaped JSON.
+    pub fn diagnose(&self, topic: DiagnoseTopic) -> Result<String, UnityError> {
+        let spec = self.diagnose_spec(topic)?;
+        let output = run_command(&spec, DEFAULT_READ_TIMEOUT)?;
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        let exit_code = output.status.code();
+
+        let envelope = parse_envelope(&stdout).ok();
+        if let Some(envelope) = &envelope {
+            // A diagnose report is read-only, but it can still carry the CLI's
+            // advisories. Collect them before deciding success or failure.
+            self.advisories.push(advisories_from_envelope(envelope));
+        }
+
+        if let Some(envelope) = &envelope {
+            if !envelope.success {
+                return Err(envelope_error(envelope, &stderr, exit_code));
+            }
+        }
+
+        if !output.status.success() {
+            if let Some(envelope) = &envelope {
+                return Err(envelope_error(envelope, &stderr, exit_code));
+            }
+            let code = exit_code
+                .map(code_for_exit_code)
+                .unwrap_or("COMMAND_FAILED");
+            let message = exit_code
+                .map(message_for_exit_code)
+                .unwrap_or("The Unity CLI command failed.");
+            let mut error = UnityError::new(code, message).with_exit_code(exit_code);
+            let stderr = stderr.trim();
+            if !stderr.is_empty() {
+                error.detail = Some(stderr.to_string());
+            }
+            return Err(error);
+        }
+
+        Ok(report_text(envelope.as_ref(), &stdout))
+    }
+
     /// Runs `unity install <version> --dry-run` and returns the raw preview.
-    pub fn dry_run_install(&self, version: &str, modules: &[String]) -> Result<Value, UnityError> {
-        validate_editor_version(version)?;
-        let mut parts = svec(&["install", version, "--yes", "--dry-run"]);
-        append_modules(&mut parts, modules)?;
+    ///
+    /// `architecture` is the build the card asked for. Leaving it `None` lets
+    /// the CLI resolve the host default, which keeps the previous command
+    /// (and the dry-run preview) unchanged for single-build users.
+    pub fn dry_run_install(
+        &self,
+        version: &str,
+        architecture: Option<&str>,
+        modules: &[String],
+        headless: bool,
+    ) -> Result<Value, UnityError> {
+        let mut parts = install_parts(version, architecture, modules, headless, false)?;
+        parts.push(surface::flag::DRY_RUN.to_string());
         let executed = self.run_args(&parts, "json")?;
         Ok(executed.envelope.data.unwrap_or(Value::Null))
     }
@@ -456,26 +720,150 @@ impl UnityCli {
     pub fn install_editor_spec(
         &self,
         version: &str,
+        architecture: Option<&str>,
         modules: &[String],
+        headless: bool,
         accept_eula: bool,
+        options: &InstallOptions,
     ) -> Result<CommandSpec, UnityError> {
-        validate_editor_version(version)?;
-        let mut parts = svec(&["install", version, "--yes"]);
-        append_modules(&mut parts, modules)?;
-        if accept_eula {
-            parts.push("--accept-eula".to_string());
+        let parts = install_parts_with(
+            version,
+            architecture,
+            modules,
+            headless,
+            accept_eula,
+            options,
+        )?;
+        let mut spec = self.spec(&parts, "ndjson")?;
+        if let Some(retries) = options.retries {
+            // `unity install` has no `--retries` flag; the CLI reads this env
+            // var for both install and install-modules.
+            spec = spec.with_env("UNITY_INSTALL_RETRIES", retries.to_string());
         }
-        self.spec(&parts, "ndjson")
+        Ok(spec)
     }
 
     pub fn install_modules_spec(
         &self,
         version: &str,
+        architecture: Option<&str>,
         modules: &[String],
         accept_eula: bool,
+        options: &ModuleInstallOptions,
     ) -> Result<CommandSpec, UnityError> {
-        let parts = install_modules_parts(version, modules, accept_eula)?;
+        let parts =
+            install_modules_parts_with(version, architecture, modules, accept_eula, options)?;
         self.spec(&parts, "ndjson")
+    }
+
+    /// Builds `unity editors default <version> [--architecture]`.
+    ///
+    /// A version can have an `arm64` and an `x86_64` build installed side by
+    /// side. Passing the architecture of the row the user clicked keeps the
+    /// stored default on that build instead of letting the CLI pick one.
+    pub fn editor_default_spec(
+        &self,
+        version: &str,
+        architecture: Option<&str>,
+    ) -> Result<CommandSpec, UnityError> {
+        let parts = editor_default_parts(version, architecture)?;
+        self.spec(&parts, "ndjson")
+    }
+
+    /// Builds `unity editors default --unset`.
+    pub fn editor_default_unset_spec(&self) -> Result<CommandSpec, UnityError> {
+        self.spec(&editor_default_unset_parts(), "ndjson")
+    }
+
+    /// Builds `unity editors verify <version> [--architecture]`.
+    ///
+    /// Verify is a read: it reports each component's state and never changes
+    /// the install. The architecture disambiguates two builds of one version.
+    pub fn editors_verify_spec(
+        &self,
+        version: &str,
+        architecture: Option<&str>,
+    ) -> Result<CommandSpec, UnityError> {
+        let parts = editors_verify_parts(version, architecture)?;
+        self.spec(&parts, "json")
+    }
+
+    /// Runs `unity editors verify` and keeps both the typed components and the
+    /// raw envelope.
+    ///
+    /// A failed verify is still a result: the CLI returns the component list
+    /// (and often a repair command) alongside `success: false`. The read only
+    /// becomes an error when no component list came back at all.
+    pub fn editors_verify(
+        &self,
+        version: &str,
+        architecture: Option<&str>,
+    ) -> Result<EditorVerifyRead, UnityError> {
+        let spec = self.editors_verify_spec(version, architecture)?;
+        let executed = self.execute_envelope(&spec)?;
+        let raw = serde_json::to_string_pretty(&executed.envelope)
+            .unwrap_or_else(|_| serde_json::to_string(&executed.envelope).unwrap_or_default());
+
+        let Some(data) = executed.envelope.data.clone() else {
+            if executed.envelope.success {
+                return Err(UnityError::unexpected_output(
+                    "`unity editors verify` returned no `data` field.",
+                ));
+            }
+            return Err(envelope_error(
+                &executed.envelope,
+                &executed.stderr,
+                executed.exit_code,
+            ));
+        };
+
+        let report: VerifyReport = serde_json::from_value(data).map_err(|err| {
+            UnityError::unexpected_output(format!(
+                "Could not parse the `unity editors verify` report: {err}"
+            ))
+        })?;
+
+        if !executed.envelope.success && report.components.is_empty() {
+            return Err(envelope_error(
+                &executed.envelope,
+                &executed.stderr,
+                executed.exit_code,
+            ));
+        }
+
+        Ok(EditorVerifyRead { report, raw })
+    }
+
+    /// Builds the report-only `unity editors prune --remove-missing` read.
+    ///
+    /// Nothing is removed: `--remove-missing` only extends the report with
+    /// registry entries whose install folder is already gone, so the prune
+    /// dialog can offer that separate, file-free action from one scan.
+    pub fn editors_prune_report_spec(&self) -> Result<CommandSpec, UnityError> {
+        self.spec(&editors_prune_parts(false, false, false, true), "json")
+    }
+
+    /// Reads the prune report without changing anything.
+    pub fn editors_prune(&self) -> Result<PruneReport, UnityError> {
+        let executed = self.execute(&self.editors_prune_report_spec()?)?;
+        parse_data(executed.envelope)
+    }
+
+    /// Builds `unity editors prune --remove --yes [--force]` as a streamed job.
+    ///
+    /// `--yes` is always present because the GUI owns the confirmation; the
+    /// CLI must never prompt on a child with no terminal. `--force` is only for
+    /// a running-Editor check that could not complete.
+    pub fn editors_prune_remove_spec(&self, force: bool) -> Result<CommandSpec, UnityError> {
+        self.spec(&editors_prune_parts(true, true, force, false), "ndjson")
+    }
+
+    /// Builds `unity editors prune --remove-missing --yes` as a streamed job.
+    ///
+    /// This changes the registry only; no files are deleted. It is independent
+    /// of `--remove` and never implies it.
+    pub fn editors_prune_remove_missing_spec(&self) -> Result<CommandSpec, UnityError> {
+        self.spec(&editors_prune_parts(false, true, false, true), "ndjson")
     }
 
     pub fn upgrade_project_spec(
@@ -489,24 +877,115 @@ impl UnityCli {
         // No --wait: that would keep this job alive until the Editor exits.
         // The upgrade command itself reports when the version change is done,
         // which is the unit of work this screen owns.
-        let parts = svec(&["projects", "upgrade", &project, "--to", version, "--yes"]);
+        let parts = svec(&[
+            surface::command::PROJECTS,
+            surface::subcommand::UPGRADE,
+            &project,
+            surface::flag::TO,
+            version,
+            surface::flag::YES,
+        ]);
         self.spec(&parts, "ndjson")
     }
 
     pub fn self_update_check(&self) -> Result<CliUpdateInfo, UnityError> {
-        let executed = self.run_args(&svec(&["self-update", "--check"]), "json")?;
+        self.self_update_check_on(None)
+    }
+
+    /// Reads `unity self-update --check [--channel stable|beta]`.
+    pub fn self_update_check_on(&self, channel: Option<&str>) -> Result<CliUpdateInfo, UnityError> {
+        let parts = self_update_check_parts(channel)?;
+        let executed = self.run_args(&parts, "json")?;
         let mut info: CliUpdateInfo = parse_data(executed.envelope)?;
         info.update_available = info.current_version != info.latest_version;
         Ok(info)
     }
 
-    /// `unity self-update` (alias `upgrade`) does not emit NDJSON for the
-    /// update itself in 1.0.x: it prints a two-column result line even under
-    /// `--format ndjson`. 1.0.1 added a result frame for `--check`, `--dry-run`
-    /// and an already-up-to-date run, but not for an install. Use human output
-    /// for the job log, then refresh `unity version` once the job finishes.
+    /// Builds the `--check` read. No other self-update flag is ever added.
+    pub fn self_update_check_spec(&self, channel: Option<&str>) -> Result<CommandSpec, UnityError> {
+        let parts = self_update_check_parts(channel)?;
+        self.spec(&parts, "json")
+    }
+
+    /// Reads the release notes for the version an update would install.
+    ///
+    /// `--changelog` is its own mode; `--target` and `--channel` narrow which
+    /// release it describes. It is never combined with `--rollback`.
+    pub fn self_update_changelog(
+        &self,
+        target: Option<&str>,
+        channel: Option<&str>,
+    ) -> Result<RawChangelog, UnityError> {
+        let parts = self_update_changelog_parts(target, channel)?;
+        let executed = self.run_args(&parts, "json")?;
+        parse_data(executed.envelope)
+    }
+
+    pub fn self_update_changelog_spec(
+        &self,
+        target: Option<&str>,
+        channel: Option<&str>,
+    ) -> Result<CommandSpec, UnityError> {
+        let parts = self_update_changelog_parts(target, channel)?;
+        self.spec(&parts, "json")
+    }
+
+    /// Reads `unity self-update --dry-run [--target] [--channel]`.
+    ///
+    /// The preview is a read: it downloads nothing and changes no binary.
+    pub fn self_update_dry_run(
+        &self,
+        target: Option<&str>,
+        channel: Option<&str>,
+    ) -> Result<Value, UnityError> {
+        let parts = self_update_preview_parts(target, channel)?;
+        let executed = self.run_args(&parts, "json")?;
+        Ok(executed.envelope.data.unwrap_or(Value::Null))
+    }
+
+    pub fn self_update_dry_run_spec(
+        &self,
+        target: Option<&str>,
+        channel: Option<&str>,
+    ) -> Result<CommandSpec, UnityError> {
+        let parts = self_update_preview_parts(target, channel)?;
+        self.spec(&parts, "json")
+    }
+
+    /// The original no-argument apply command, unchanged.
     pub fn self_update_spec(&self) -> Result<CommandSpec, UnityError> {
-        self.spec(&svec(&["self-update", "--yes"]), "human")
+        self.self_update_apply_spec(None, None)
+    }
+
+    /// Builds `unity self-update --yes [--target] [--channel]` as a job.
+    ///
+    /// `self-update` does not emit NDJSON for the update itself in 1.0.x: it
+    /// prints a two-column result line even under `--format ndjson`. 1.0.1
+    /// added a result frame for `--check`, `--dry-run` and an already-up-to-
+    /// date run, but not for an install. Use human output for the job log,
+    /// then refresh `unity version` once the job finishes.
+    pub fn self_update_apply_spec(
+        &self,
+        target: Option<&str>,
+        channel: Option<&str>,
+    ) -> Result<CommandSpec, UnityError> {
+        let parts = self_update_apply_parts(target, channel)?;
+        self.spec(&parts, "human")
+    }
+
+    /// Builds `unity self-update --rollback [version] --yes` as a job.
+    ///
+    /// A rollback is deliberately its own argv: no `--dry-run`, `--check`,
+    /// `--changelog`, `--target` or `--channel` can ever be added, because
+    /// the CLI refuses that combination with `BAD_ARGS` and changes nothing.
+    /// Like the install itself the CLI may answer with a plain result line
+    /// instead of NDJSON frames; such a line only joins the job log.
+    pub fn self_update_rollback_spec(
+        &self,
+        version: Option<&str>,
+    ) -> Result<CommandSpec, UnityError> {
+        let parts = self_update_rollback_parts(version)?;
+        self.spec(&parts, "ndjson")
     }
 }
 
@@ -702,6 +1181,46 @@ fn status_instances_from_envelope(
     parse_items(envelope.data.clone(), &["instances"])
 }
 
+/// Extracts the report body from a `unity diagnose` answer.
+///
+/// The documented output is plain text. Some CLI builds can still answer with
+/// an envelope (or a JSON object) under a format flag, so a JSON body is
+/// unwrapped to its report text and only pretty-printed as a last resort.
+fn report_text(envelope: Option<&ValueEnvelope>, stdout: &str) -> String {
+    if let Some(envelope) = envelope {
+        if let Some(data) = &envelope.data {
+            return report_from_data(data);
+        }
+    }
+
+    let trimmed = stdout.trim();
+    if trimmed.is_empty() {
+        return "The CLI wrote an empty report.".to_string();
+    }
+    if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
+        return report_from_data(&value);
+    }
+    trimmed.to_string()
+}
+
+fn report_from_data(data: &Value) -> String {
+    if let Some(text) = data.as_str() {
+        let text = text.trim();
+        if !text.is_empty() {
+            return text.to_string();
+        }
+    }
+    for key in ["report", "text", "message"] {
+        if let Some(text) = data.get(key).and_then(Value::as_str) {
+            let text = text.trim();
+            if !text.is_empty() {
+                return text.to_string();
+            }
+        }
+    }
+    serde_json::to_string_pretty(data).unwrap_or_else(|_| data.to_string())
+}
+
 fn envelope_error(envelope: &ValueEnvelope, stderr: &str, exit_code: Option<i32>) -> UnityError {
     envelope
         .errors
@@ -739,6 +1258,7 @@ fn spawn_error(spec: &CommandSpec, err: std::io::Error) -> UnityError {
 /// stdout/stderr are drained on dedicated threads while the supervisor polls.
 fn run_command(spec: &CommandSpec, timeout: Duration) -> Result<std::process::Output, UnityError> {
     let mut command = crate::process::hidden(&spec.program);
+    scrub_appimage_env(&mut command);
     command
         .args(&spec.args)
         .stdin(Stdio::null())
@@ -817,6 +1337,51 @@ where
     })
 }
 
+/// A `unity diagnose` topic. The set is fixed here because none of these
+/// commands takes a user-supplied value; nothing from a form reaches argv.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiagnoseTopic {
+    Proxy,
+    Accelerator,
+    Update,
+}
+
+impl DiagnoseTopic {
+    pub const ALL: [DiagnoseTopic; 3] = [
+        DiagnoseTopic::Proxy,
+        DiagnoseTopic::Accelerator,
+        DiagnoseTopic::Update,
+    ];
+
+    pub fn arg(self) -> &'static str {
+        match self {
+            Self::Proxy => "proxy",
+            Self::Accelerator => "accelerator",
+            Self::Update => "update",
+        }
+    }
+}
+
+/// A doctor report plus the raw JSON the CLI returned.
+///
+/// The page renders the typed checks and keeps the raw document visible, so a
+/// report section this build does not model yet is never hidden from the user.
+#[derive(Debug, Clone)]
+pub struct DoctorRead {
+    pub report: DoctorReport,
+    pub raw: String,
+}
+
+/// A verify report plus the raw envelope the CLI returned.
+///
+/// A failed verify still lists the failing components and its repair command;
+/// the raw document is what the dialog exposes when `ok` is false.
+#[derive(Debug, Clone)]
+pub struct EditorVerifyRead {
+    pub report: VerifyReport,
+    pub raw: String,
+}
+
 /// The result of one synchronous CLI invocation.
 #[derive(Debug, Clone)]
 pub struct Executed {
@@ -831,7 +1396,7 @@ pub struct UnityCli {
     override_path: Arc<RwLock<Option<PathBuf>>>,
     /// Advisories collected from every envelope the CLI returned. Clones share
     /// the sink so a worker thread's reads reach the app's single `UnityCli`.
-    advisories: Arc<Mutex<Vec<Advisory>>>,
+    advisories: AdvisorySink,
 }
 
 #[derive(Debug, Clone)]
@@ -850,27 +1415,18 @@ impl UnityCli {
     pub fn new() -> Self {
         Self {
             override_path: Arc::new(RwLock::new(None)),
-            advisories: Arc::new(Mutex::new(Vec::new())),
+            advisories: AdvisorySink::default(),
         }
     }
 
-    /// Takes the advisories recorded since the last drain.
-    pub fn drain_advisories(&self) -> Vec<Advisory> {
-        let mut advisories = self
-            .advisories
-            .lock()
-            .unwrap_or_else(|err| err.into_inner());
-        std::mem::take(&mut *advisories)
+    /// The sink every read and streamed job reports advisories to.
+    pub fn advisory_sink(&self) -> AdvisorySink {
+        self.advisories.clone()
     }
 
-    fn record_advisories(&self, advisories: Vec<Advisory>) {
-        if advisories.is_empty() {
-            return;
-        }
-        self.advisories
-            .lock()
-            .unwrap_or_else(|err| err.into_inner())
-            .extend(advisories);
+    /// Drains the advisories collected since the last call.
+    pub fn take_advisories(&self) -> Vec<CliAdvisory> {
+        self.advisories.drain()
     }
 
     pub fn set_override_path(&self, path: Option<PathBuf>) {
@@ -1011,27 +1567,244 @@ fn releases_parts(
             "Release limit must be between 1 and 200.",
         ));
     }
-    let mut parts = svec(&["releases"]);
+    let mut parts = svec(&[surface::command::RELEASES]);
     if let Some(stream) = stream.filter(|value| !value.trim().is_empty()) {
         validate_release_stream(stream)?;
-        parts.extend(svec(&["--stream", stream]));
+        parts.extend(svec(&[surface::flag::STREAM, stream]));
     }
     parts.extend(svec(&[
-        "--limit",
+        surface::flag::LIMIT,
         &limit.to_string(),
-        "--offset",
+        surface::flag::OFFSET,
         &offset.to_string(),
     ]));
     Ok(parts)
 }
 
-fn modules_parts(version: &str) -> Result<Vec<String>, UnityError> {
+fn modules_parts(version: &str, architecture: Option<&str>) -> Result<Vec<String>, UnityError> {
     validate_editor_version(version)?;
-    Ok(svec(&["modules", version]))
+    let mut parts = svec(&[surface::command::MODULES, version]);
+    append_architecture(&mut parts, architecture)?;
+    Ok(parts)
+}
+
+fn skill_clients_parts() -> Vec<String> {
+    svec(&[
+        surface::command::SKILL,
+        surface::subcommand::INSTALL,
+        surface::flag::LIST,
+    ])
+}
+
+/// Builds the complete `unity skill install` argv.
+///
+/// The client positional (or `--all`) comes first, then the options in the order
+/// the CLI reference documents them. No user token is ever interpolated into a
+/// shell string.
+fn skill_install_parts(options: &SkillInstallOptions) -> Result<Vec<String>, UnityError> {
+    if options.client.is_some() && options.all {
+        return Err(UnityError::invalid_input(
+            "Choose one AI client or install to all clients, not both.",
+        ));
+    }
+    if options.client.is_none() && !options.all {
+        return Err(UnityError::invalid_input(
+            "Choose an AI client, or use --all to install to every supported client.",
+        ));
+    }
+
+    let mut parts = svec(&[surface::command::SKILL, surface::subcommand::INSTALL]);
+    if let Some(client) = &options.client {
+        parts.push(validate_skill_client(client)?);
+    }
+    if options.all {
+        parts.push(surface::flag::ALL.to_string());
+    }
+    if options.local {
+        parts.push(surface::flag::LOCAL.to_string());
+    }
+    if let Some(skill) = validate_skill_name(options.skill.as_deref().unwrap_or_default())? {
+        parts.extend([surface::flag::SKILL_NAME.to_string(), skill]);
+    }
+    if options.yes {
+        parts.push(surface::flag::YES.to_string());
+    }
+    if options.dry_run {
+        parts.push(surface::flag::DRY_RUN.to_string());
+    }
+    if options.force {
+        parts.push(surface::flag::FORCE.to_string());
+    }
+    Ok(parts)
+}
+
+fn skill_refresh_parts(options: &SkillRefreshOptions) -> Vec<String> {
+    let mut parts = svec(&[surface::command::SKILL, surface::subcommand::REFRESH]);
+    if options.yes {
+        parts.push(surface::flag::YES.to_string());
+    }
+    if options.dry_run {
+        parts.push(surface::flag::DRY_RUN.to_string());
+    }
+    if options.force {
+        parts.push(surface::flag::FORCE.to_string());
+    }
+    parts
+}
+
+pub fn install_parts(
+    version: &str,
+    architecture: Option<&str>,
+    modules: &[String],
+    headless: bool,
+    accept_eula: bool,
+) -> Result<Vec<String>, UnityError> {
+    install_parts_with(
+        version,
+        architecture,
+        modules,
+        headless,
+        accept_eula,
+        &InstallOptions::default(),
+    )
+}
+
+/// Builds the complete `unity install` argv.
+///
+/// The Advanced flags are appended only when their field is set, so the
+/// no-Advanced command keeps exactly the old byte sequence.
+pub fn install_parts_with(
+    version: &str,
+    architecture: Option<&str>,
+    modules: &[String],
+    headless: bool,
+    accept_eula: bool,
+    options: &InstallOptions,
+) -> Result<Vec<String>, UnityError> {
+    validate_editor_version(version)?;
+    if headless && !headless_editor_supported() {
+        return Err(UnityError::invalid_input(
+            "The headless Editor is only available on Linux.",
+        ));
+    }
+    // beta.17 documents these exclusions: set-default cannot combine with
+    // resume (editors-install.md:335), and download-only cannot combine with
+    // resume or set-default (editors-install.md:363). Keep the refusals: the
+    // CLI would reject the same argv with BAD_ARGS.
+    if options.download_only && (options.resume || options.set_default) {
+        return Err(UnityError::invalid_input(
+            "Download-only cannot be combined with resume or set-default; the Unity CLI refuses that combination.",
+        ));
+    }
+    if options.resume && options.set_default {
+        return Err(UnityError::invalid_input(
+            "Resume cannot be combined with set-default; the Unity CLI refuses that combination.",
+        ));
+    }
+    if options.timeout_secs == Some(0) {
+        return Err(UnityError::invalid_input(
+            "The install timeout must be greater than zero seconds.",
+        ));
+    }
+
+    let mut parts = svec(&[surface::command::INSTALL, version, surface::flag::YES]);
+    // The CLI resolves the host build when `--architecture` is absent. Only
+    // name a build when the user actually chose one, so the single-build
+    // command stays exactly what earlier releases produced.
+    append_architecture(&mut parts, architecture)?;
+    append_modules(&mut parts, modules)?;
+    if headless {
+        // The headless build leaves out modules it cannot use, such as iOS.
+        parts.push(surface::flag::HEADLESS.to_string());
+    }
+    if accept_eula {
+        parts.push(surface::flag::ACCEPT_EULA.to_string());
+    }
+    if options.resume {
+        parts.push(surface::flag::RESUME.to_string());
+    }
+    if options.download_only {
+        parts.push(surface::flag::DOWNLOAD_ONLY.to_string());
+    }
+    if options.no_wait {
+        // The CLI reference says `--no-wait` wins when both are given
+        // (editors-install.md:324). The GUI already clears the timeout, and
+        // the adapter does the same so the argv never carries both.
+        parts.push(surface::flag::NO_WAIT.to_string());
+    } else if let Some(timeout) = options.timeout_secs {
+        parts.extend([surface::flag::TIMEOUT.to_string(), timeout.to_string()]);
+    }
+    if options.set_default {
+        parts.push(surface::flag::SET_DEFAULT.to_string());
+    }
+    Ok(parts)
+}
+
+fn editor_default_parts(
+    version: &str,
+    architecture: Option<&str>,
+) -> Result<Vec<String>, UnityError> {
+    validate_editor_version(version)?;
+    let mut parts = svec(&[
+        surface::command::EDITORS,
+        surface::subcommand::DEFAULT,
+        version,
+    ]);
+    append_architecture(&mut parts, architecture)?;
+    Ok(parts)
+}
+
+fn editor_default_unset_parts() -> Vec<String> {
+    svec(&[
+        surface::command::EDITORS,
+        surface::subcommand::DEFAULT,
+        surface::flag::UNSET,
+    ])
+}
+
+fn editors_verify_parts(
+    version: &str,
+    architecture: Option<&str>,
+) -> Result<Vec<String>, UnityError> {
+    validate_editor_version(version)?;
+    let mut parts = svec(&[
+        surface::command::EDITORS,
+        surface::subcommand::VERIFY,
+        version,
+    ]);
+    append_architecture(&mut parts, architecture)?;
+    Ok(parts)
+}
+
+/// Builds the `unity editors prune` argv. Every field is a boolean controlled
+/// by the app, so no user token can reach this command line.
+fn editors_prune_parts(remove: bool, yes: bool, force: bool, remove_missing: bool) -> Vec<String> {
+    let mut parts = svec(&[surface::command::EDITORS, surface::subcommand::PRUNE]);
+    if remove {
+        parts.push(surface::flag::REMOVE.to_string());
+    }
+    if remove_missing {
+        parts.push(surface::flag::REMOVE_MISSING.to_string());
+    }
+    if yes {
+        parts.push(surface::flag::YES.to_string());
+    }
+    if force {
+        parts.push(surface::flag::FORCE.to_string());
+    }
+    parts
+}
+
+/// Whether this platform can install the headless Unity Editor.
+///
+/// The CLI ships the headless build for Linux only, so the window that does
+/// not need a display is offered only there.
+pub fn headless_editor_supported() -> bool {
+    cfg!(target_os = "linux")
 }
 
 fn projects_parts() -> Vec<String> {
-    svec(&["projects", "--all"])
+    svec(&[surface::command::PROJECTS, surface::flag::ALL])
 }
 
 fn templates_parts(
@@ -1171,13 +1944,31 @@ fn absolute_for_compare(path: &std::path::Path) -> std::path::PathBuf {
 fn open_project_parts(path: &str) -> Result<Vec<String>, UnityError> {
     let project = validate_project_path(path)?;
     let project = project.to_string_lossy().to_string();
-    Ok(svec(&["open", &project]))
+    Ok(svec(&[surface::command::OPEN, &project]))
 }
 
+#[cfg(test)]
 fn install_modules_parts(
     version: &str,
+    architecture: Option<&str>,
     modules: &[String],
     accept_eula: bool,
+) -> Result<Vec<String>, UnityError> {
+    install_modules_parts_with(
+        version,
+        architecture,
+        modules,
+        accept_eula,
+        &ModuleInstallOptions::default(),
+    )
+}
+
+fn install_modules_parts_with(
+    version: &str,
+    architecture: Option<&str>,
+    modules: &[String],
+    accept_eula: bool,
+    options: &ModuleInstallOptions,
 ) -> Result<Vec<String>, UnityError> {
     validate_editor_version(version)?;
     if modules.is_empty() {
@@ -1185,12 +1976,96 @@ fn install_modules_parts(
             "Select at least one module to install.",
         ));
     }
-    let mut parts = svec(&["install-modules", "--editor-version", version, "--yes"]);
+    let mut parts = svec(&[
+        surface::command::INSTALL_MODULES,
+        surface::flag::EDITOR_VERSION,
+        version,
+        surface::flag::YES,
+    ]);
+    // CLI beta.17 makes `install-modules` respect `--architecture` when one
+    // build of the version is installed, and fail when the named build is not.
+    // Passing the architecture of the row the user opened keeps the module
+    // install on that build instead of whatever the CLI picks.
+    append_architecture(&mut parts, architecture)?;
     append_modules(&mut parts, modules)?;
     if accept_eula {
-        parts.push("--accept-eula".to_string());
+        parts.push(surface::flag::ACCEPT_EULA.to_string());
+    }
+    if let Some(retries) = options.retries {
+        parts.extend([surface::flag::RETRIES.to_string(), retries.to_string()]);
+    }
+    if let Some(directory) = &options.download_directory {
+        let directory = validate_download_directory(directory)?.unwrap_or_default();
+        if !directory.is_empty() {
+            parts.extend([surface::flag::DOWNLOAD_DIRECTORY.to_string(), directory]);
+        }
     }
     Ok(parts)
+}
+
+fn self_update_check_parts(channel: Option<&str>) -> Result<Vec<String>, UnityError> {
+    let mut parts = svec(&[surface::command::SELF_UPDATE, surface::flag::CHECK]);
+    append_update_channel(&mut parts, channel)?;
+    Ok(parts)
+}
+
+fn self_update_changelog_parts(
+    target: Option<&str>,
+    channel: Option<&str>,
+) -> Result<Vec<String>, UnityError> {
+    let mut parts = svec(&[surface::command::SELF_UPDATE, surface::flag::CHANGELOG]);
+    append_update_target(&mut parts, target)?;
+    append_update_channel(&mut parts, channel)?;
+    Ok(parts)
+}
+
+fn self_update_preview_parts(
+    target: Option<&str>,
+    channel: Option<&str>,
+) -> Result<Vec<String>, UnityError> {
+    let mut parts = svec(&[surface::command::SELF_UPDATE, surface::flag::DRY_RUN]);
+    append_update_target(&mut parts, target)?;
+    append_update_channel(&mut parts, channel)?;
+    Ok(parts)
+}
+
+fn self_update_apply_parts(
+    target: Option<&str>,
+    channel: Option<&str>,
+) -> Result<Vec<String>, UnityError> {
+    let mut parts = svec(&[surface::command::SELF_UPDATE, surface::flag::YES]);
+    append_update_target(&mut parts, target)?;
+    append_update_channel(&mut parts, channel)?;
+    Ok(parts)
+}
+
+fn self_update_rollback_parts(version: Option<&str>) -> Result<Vec<String>, UnityError> {
+    let mut parts = svec(&[surface::command::SELF_UPDATE, surface::flag::ROLLBACK]);
+    if let Some(version) = version.map(str::trim).filter(|value| !value.is_empty()) {
+        validate_cli_version(version)?;
+        parts.push(version.to_string());
+    }
+    // The GUI owns the confirmation; the child must never prompt. The only
+    // self-update flags in this argv are `--rollback` and the optional version.
+    parts.push(surface::flag::YES.to_string());
+    Ok(parts)
+}
+
+fn append_update_target(parts: &mut Vec<String>, target: Option<&str>) -> Result<(), UnityError> {
+    let Some(target) = target.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(());
+    };
+    validate_cli_version(target)?;
+    parts.extend([surface::flag::TARGET.to_string(), target.to_string()]);
+    Ok(())
+}
+
+fn append_update_channel(parts: &mut Vec<String>, channel: Option<&str>) -> Result<(), UnityError> {
+    let Some(channel) = validate_update_channel(channel.unwrap_or_default())? else {
+        return Ok(());
+    };
+    parts.extend([surface::flag::CHANNEL.to_string(), channel]);
+    Ok(())
 }
 
 fn auth_status_from_error(error: &UnityError) -> Option<AuthStatus> {
@@ -1202,7 +2077,21 @@ fn auth_status_from_error(error: &UnityError) -> Option<AuthStatus> {
 }
 
 fn auth_login_parts() -> Vec<String> {
-    svec(&["auth", "login"])
+    svec(&[surface::command::AUTH, surface::subcommand::LOGIN])
+}
+
+fn append_architecture(
+    parts: &mut Vec<String>,
+    architecture: Option<&str>,
+) -> Result<(), UnityError> {
+    let Some(architecture) = architecture else {
+        return Ok(());
+    };
+    let Some(architecture) = validate_architecture(architecture)? else {
+        return Ok(());
+    };
+    parts.extend([surface::flag::ARCHITECTURE.to_string(), architecture]);
+    Ok(())
 }
 
 fn auth_broker_ensure_parts() -> Vec<String> {
@@ -1212,7 +2101,7 @@ fn auth_broker_ensure_parts() -> Vec<String> {
 fn append_modules(parts: &mut Vec<String>, modules: &[String]) -> Result<(), UnityError> {
     for module in modules {
         validate_module_id(module)?;
-        parts.push("-m".to_string());
+        parts.push(surface::flag::MODULE.to_string());
         parts.push(module.clone());
     }
     Ok(())
@@ -1490,9 +2379,184 @@ mod tests {
     #[test]
     fn modules_uses_the_flat_listing_without_the_removed_list_subcommand() {
         assert_eq!(
-            modules_parts("6000.6.6f1").unwrap(),
+            modules_parts("6000.6.6f1", None).unwrap(),
             svec(&["modules", "6000.6.6f1"])
         );
+    }
+
+    #[test]
+    fn modules_forward_the_architecture_when_a_row_names_one() {
+        assert_eq!(
+            modules_parts("6000.6.6f1", Some("arm64")).unwrap(),
+            svec(&["modules", "6000.6.6f1", "--architecture", "arm64"])
+        );
+        // An older registry row can leave the architecture empty; the CLI then
+        // picks the only build it knows about.
+        assert_eq!(
+            modules_parts("6000.6.6f1", Some(" ")).unwrap(),
+            svec(&["modules", "6000.6.6f1"])
+        );
+    }
+
+    #[test]
+    fn install_modules_forward_the_architecture() {
+        let parts = install_modules_parts(
+            "6000.6.6f1",
+            Some("arm64"),
+            &["windows-il2cpp".to_string()],
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            &parts[..4],
+            &["install-modules", "--editor-version", "6000.6.6f1", "--yes"]
+        );
+        let architecture = parts
+            .iter()
+            .position(|part| part == "--architecture")
+            .expect("--architecture");
+        assert_eq!(parts[architecture + 1], "arm64");
+    }
+
+    #[test]
+    fn headless_installs_add_the_flag_only_when_requested() {
+        let modules = vec!["linux-il2cpp".to_string()];
+        let regular = install_parts("6000.6.6f1", None, &modules, false, true).unwrap();
+        assert!(!regular.contains(&"--headless".to_string()));
+
+        let headless = install_parts("6000.6.6f1", None, &modules, true, true);
+        if headless_editor_supported() {
+            assert!(headless.unwrap().contains(&"--headless".to_string()));
+        } else {
+            // The headless build is Linux-only; other platforms refuse it
+            // instead of sending a flag their CLI does not know.
+            assert!(headless.is_err());
+        }
+    }
+
+    #[test]
+    fn install_omits_the_architecture_when_the_host_default_is_chosen() {
+        let parts = install_parts("6000.6.6f1", None, &[], false, false).unwrap();
+        assert_eq!(
+            parts,
+            svec(&["install", "6000.6.6f1", "--yes"]),
+            "a host-default install must stay byte-for-byte the old command"
+        );
+    }
+
+    #[test]
+    fn install_names_the_chosen_architecture_before_the_modules() {
+        let parts = install_parts(
+            "6000.6.6f1",
+            Some("arm64"),
+            &["linux-il2cpp".to_string()],
+            false,
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            parts,
+            svec(&[
+                "install",
+                "6000.6.6f1",
+                "--yes",
+                "--architecture",
+                "arm64",
+                "-m",
+                "linux-il2cpp",
+                "--accept-eula",
+            ])
+        );
+    }
+
+    #[test]
+    fn install_rejects_an_architecture_that_looks_like_a_flag() {
+        let error = install_parts("6000.6.6f1", Some("--force"), &[], false, false)
+            .expect_err("invalid architectures must never reach the command line");
+        assert_eq!(error.code, "INVALID_INPUT");
+    }
+
+    #[test]
+    fn install_architecture_can_be_left_blank_by_an_old_registry_row() {
+        let parts = install_parts("6000.6.6f1", Some("  "), &[], false, false).unwrap();
+        assert!(!parts.iter().any(|part| part == "--architecture"));
+    }
+
+    #[test]
+    fn editor_default_targets_one_build_and_unset_is_explicit() {
+        let set = editor_default_parts("6000.6.6f1", Some("x86_64")).unwrap();
+        assert_eq!(
+            set,
+            svec(&[
+                "editors",
+                "default",
+                "6000.6.6f1",
+                "--architecture",
+                "x86_64"
+            ])
+        );
+        // A host-default choice must not grow an arbitrary build.
+        assert_eq!(
+            editor_default_parts("6000.6.6f1", None).unwrap(),
+            svec(&["editors", "default", "6000.6.6f1"])
+        );
+        assert_eq!(
+            editor_default_unset_parts(),
+            svec(&["editors", "default", "--unset"])
+        );
+    }
+
+    #[test]
+    fn editors_verify_forwards_the_architecture() {
+        assert_eq!(
+            editors_verify_parts("6000.6.6f1", Some("arm64")).unwrap(),
+            svec(&["editors", "verify", "6000.6.6f1", "--architecture", "arm64"])
+        );
+        assert_eq!(
+            editors_verify_parts("6000.6.6f1", None).unwrap(),
+            svec(&["editors", "verify", "6000.6.6f1"])
+        );
+        assert!(editors_verify_parts("6000.6.6f1; rm -rf /", None).is_err());
+    }
+
+    #[test]
+    fn editors_prune_is_report_only_by_default_and_names_each_mutation() {
+        assert_eq!(
+            editors_prune_parts(false, false, false, false),
+            svec(&["editors", "prune"]),
+            "the plain report must not carry a removal flag"
+        );
+        assert_eq!(
+            editors_prune_parts(false, false, false, true),
+            svec(&["editors", "prune", "--remove-missing"]),
+            "the scan adds the missing class but still removes nothing"
+        );
+        assert_eq!(
+            editors_prune_parts(true, true, false, false),
+            svec(&["editors", "prune", "--remove", "--yes"])
+        );
+        assert_eq!(
+            editors_prune_parts(true, true, true, false),
+            svec(&["editors", "prune", "--remove", "--yes", "--force"])
+        );
+        assert_eq!(
+            editors_prune_parts(false, true, false, true),
+            svec(&["editors", "prune", "--remove-missing", "--yes"]),
+            "--remove-missing never implies --remove"
+        );
+    }
+
+    #[test]
+    fn dry_run_install_accepts_the_headless_flag() {
+        let parts = install_parts("6000.6.6f1", None, &[], true, false);
+        if headless_editor_supported() {
+            let parts = parts.unwrap();
+            assert_eq!(parts[0], "install");
+            assert!(parts.contains(&"--yes".to_string()));
+            assert!(parts.contains(&"--headless".to_string()));
+        } else {
+            assert!(parts.is_err());
+        }
     }
 
     #[test]
@@ -1506,7 +2570,8 @@ mod tests {
     #[test]
     fn install_modules_uses_the_current_editor_version_flag() {
         let parts =
-            install_modules_parts("6000.6.6f1", &["windows-il2cpp".to_string()], true).unwrap();
+            install_modules_parts("6000.6.6f1", None, &["windows-il2cpp".to_string()], true)
+                .unwrap();
         assert_eq!(parts[0], "install-modules");
         assert_eq!(parts[1], "--editor-version");
         assert_eq!(parts[2], "6000.6.6f1");
@@ -1566,6 +2631,288 @@ mod tests {
     }
 
     #[test]
+    fn install_advanced_options_add_only_the_requested_flags() {
+        let modules = vec!["linux-il2cpp".to_string()];
+        let options = InstallOptions {
+            resume: true,
+            download_only: false,
+            no_wait: true,
+            timeout_secs: None,
+            set_default: false,
+            retries: None,
+        };
+        assert_eq!(
+            install_parts_with("6000.6.6f1", Some("arm64"), &modules, false, true, &options)
+                .unwrap(),
+            svec(&[
+                "install",
+                "6000.6.6f1",
+                "--yes",
+                "--architecture",
+                "arm64",
+                "-m",
+                "linux-il2cpp",
+                "--accept-eula",
+                "--resume",
+                "--no-wait",
+            ])
+        );
+
+        // editors-install.md:324 says `--no-wait` wins when both are given.
+        // The adapter must never emit the pair, even if a caller sets both.
+        let no_wait_wins = InstallOptions {
+            no_wait: true,
+            timeout_secs: Some(600),
+            ..InstallOptions::default()
+        };
+        let parts = install_parts_with("lts", None, &[], false, false, &no_wait_wins).unwrap();
+        assert_eq!(parts, svec(&["install", "lts", "--yes", "--no-wait"]));
+        assert!(!parts.iter().any(|part| part == "--timeout"));
+
+        let download_only = InstallOptions {
+            download_only: true,
+            ..InstallOptions::default()
+        };
+        let parts = install_parts_with("lts", None, &[], false, false, &download_only).unwrap();
+        assert_eq!(parts, svec(&["install", "lts", "--yes", "--download-only"]));
+
+        let timeout = InstallOptions {
+            timeout_secs: Some(600),
+            ..InstallOptions::default()
+        };
+        assert_eq!(
+            install_parts_with("lts", None, &[], false, false, &timeout).unwrap(),
+            svec(&["install", "lts", "--yes", "--timeout", "600"])
+        );
+
+        let set_default = InstallOptions {
+            set_default: true,
+            ..InstallOptions::default()
+        };
+        assert_eq!(
+            install_parts_with("lts", None, &[], false, false, &set_default).unwrap(),
+            svec(&["install", "lts", "--yes", "--set-default"])
+        );
+    }
+
+    #[test]
+    fn install_refuses_combinations_the_cli_calls_bad_args() {
+        // Documented exclusions kept deliberately:
+        // editors-install.md:335 (set-default + resume) and :363
+        // (download-only + resume/set-default). The adapter refuses them with
+        // INVALID_INPUT instead of letting the CLI answer BAD_ARGS.
+        let download_only_resume = InstallOptions {
+            download_only: true,
+            resume: true,
+            ..InstallOptions::default()
+        };
+        assert_eq!(
+            install_parts_with("lts", None, &[], false, false, &download_only_resume)
+                .unwrap_err()
+                .code,
+            "INVALID_INPUT"
+        );
+
+        let download_only_default = InstallOptions {
+            download_only: true,
+            set_default: true,
+            ..InstallOptions::default()
+        };
+        assert!(
+            install_parts_with("lts", None, &[], false, false, &download_only_default).is_err()
+        );
+
+        let resume_default = InstallOptions {
+            resume: true,
+            set_default: true,
+            ..InstallOptions::default()
+        };
+        assert!(install_parts_with("lts", None, &[], false, false, &resume_default).is_err());
+    }
+
+    #[test]
+    fn install_retries_go_through_the_environment_not_argv() {
+        let path = std::env::temp_dir().join(format!(
+            "unity-rust-hub-cli-test-{}-retries",
+            std::process::id()
+        ));
+        std::fs::write(&path, b"test").unwrap();
+
+        let cli = UnityCli::new();
+        cli.set_override_path(Some(path.clone()));
+        let spec = cli
+            .install_editor_spec(
+                "lts",
+                None,
+                &[],
+                false,
+                false,
+                &InstallOptions {
+                    retries: Some(0),
+                    ..InstallOptions::default()
+                },
+            )
+            .expect("install spec");
+        std::fs::remove_file(path).ok();
+
+        assert!(!spec.args.iter().any(|arg| arg == "--retries"));
+        assert!(spec
+            .env
+            .iter()
+            .any(|(key, value)| key == "UNITY_INSTALL_RETRIES" && value == "0"));
+    }
+
+    #[test]
+    fn install_modules_advanced_options_name_retries_and_the_download_directory() {
+        let options = ModuleInstallOptions {
+            retries: Some(3),
+            download_directory: Some("./.unity".to_string()),
+        };
+        assert_eq!(
+            install_modules_parts_with(
+                "6000.6.6f1",
+                Some("x86_64"),
+                &["android".to_string()],
+                true,
+                &options
+            )
+            .unwrap(),
+            svec(&[
+                "install-modules",
+                "--editor-version",
+                "6000.6.6f1",
+                "--yes",
+                "--architecture",
+                "x86_64",
+                "-m",
+                "android",
+                "--accept-eula",
+                "--retries",
+                "3",
+                "--download-directory",
+                "./.unity",
+            ])
+        );
+
+        let no_retries = ModuleInstallOptions {
+            retries: Some(0),
+            ..ModuleInstallOptions::default()
+        };
+        let parts = install_modules_parts_with(
+            "6000.6.6f1",
+            None,
+            &["android".to_string()],
+            false,
+            &no_retries,
+        )
+        .unwrap();
+        assert!(parts.windows(2).any(|pair| pair == ["--retries", "0"]));
+    }
+
+    #[test]
+    fn self_update_reads_and_applies_name_only_the_requested_flags() {
+        let path = std::env::temp_dir().join(format!(
+            "unity-rust-hub-cli-test-{}-self-update",
+            std::process::id()
+        ));
+        std::fs::write(&path, b"test").unwrap();
+
+        let cli = UnityCli::new();
+        cli.set_override_path(Some(path.clone()));
+
+        let check = cli
+            .self_update_check_spec(Some("beta"))
+            .expect("check spec");
+        assert_eq!(
+            &check.args[..4],
+            &["self-update", "--check", "--channel", "beta"]
+        );
+
+        let changelog = cli
+            .self_update_changelog_spec(Some("1.0.0-beta.18"), Some("beta"))
+            .expect("changelog spec");
+        assert_eq!(
+            &changelog.args[..6],
+            &[
+                "self-update",
+                "--changelog",
+                "--target",
+                "1.0.0-beta.18",
+                "--channel",
+                "beta"
+            ]
+        );
+
+        let preview = cli
+            .self_update_dry_run_spec(None, Some("stable"))
+            .expect("dry-run spec");
+        assert_eq!(
+            &preview.args[..4],
+            &["self-update", "--dry-run", "--channel", "stable"]
+        );
+        assert!(!preview.args.iter().any(|arg| arg == "--yes"));
+
+        let apply = cli
+            .self_update_apply_spec(Some("1.0.0-beta.18"), Some("beta"))
+            .expect("apply spec");
+        assert_eq!(
+            &apply.args[..6],
+            &[
+                "self-update",
+                "--yes",
+                "--target",
+                "1.0.0-beta.18",
+                "--channel",
+                "beta"
+            ]
+        );
+        assert_eq!(
+            cli.self_update_spec().expect("default apply").args[..2],
+            ["self-update".to_string(), "--yes".to_string()]
+        );
+
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn rollback_is_its_own_argv_and_never_joins_a_refused_flag() {
+        let path = std::env::temp_dir().join(format!(
+            "unity-rust-hub-cli-test-{}-rollback",
+            std::process::id()
+        ));
+        std::fs::write(&path, b"test").unwrap();
+
+        let cli = UnityCli::new();
+        cli.set_override_path(Some(path.clone()));
+
+        let latest = cli
+            .self_update_rollback_spec(None)
+            .expect("latest rollback spec");
+        assert_eq!(&latest.args[..3], &["self-update", "--rollback", "--yes"]);
+
+        let named = cli
+            .self_update_rollback_spec(Some("1.0.0-beta.16"))
+            .expect("named rollback spec");
+        assert_eq!(
+            &named.args[..4],
+            &["self-update", "--rollback", "1.0.0-beta.16", "--yes"]
+        );
+        for refused in [
+            "--dry-run",
+            "--check",
+            "--changelog",
+            "--target",
+            "--channel",
+        ] {
+            assert!(
+                !named.args.iter().any(|arg| arg == refused),
+                "{refused} must never join --rollback"
+            );
+        }
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
     fn every_cli_spec_opts_out_of_telemetry() {
         let path =
             std::env::temp_dir().join(format!("unity-rust-hub-cli-test-{}", std::process::id()));
@@ -1599,6 +2946,213 @@ mod tests {
             .args
             .windows(2)
             .any(|pair| pair == ["--format", "human"]));
+    }
+
+    #[test]
+    fn docs_argv_always_asks_for_a_url_and_maps_scope_flags() {
+        let path =
+            std::env::temp_dir().join(format!("unity-rust-hub-docs-test-{}", std::process::id()));
+        std::fs::write(&path, b"test").unwrap();
+        let cli = UnityCli::new();
+        cli.set_override_path(Some(path.clone()));
+
+        let spec = cli
+            .docs_spec(&DocsLookup::new("MonoBehaviour.Start"))
+            .unwrap();
+        assert_eq!(
+            spec.args,
+            svec(&[
+                "docs",
+                "MonoBehaviour.Start",
+                "--url",
+                "--format",
+                "json",
+                "--no-pager",
+                "--no-banner",
+                "--non-interactive",
+            ])
+        );
+
+        let spec = cli
+            .docs_spec(&DocsLookup::new("install-modules").with_scope(DocsScope::Cli))
+            .unwrap();
+        assert_eq!(
+            spec.args,
+            svec(&[
+                "docs",
+                "install-modules",
+                "--url",
+                "--cli",
+                "--format",
+                "json",
+                "--no-pager",
+                "--no-banner",
+                "--non-interactive",
+            ])
+        );
+
+        let spec = cli
+            .docs_spec(
+                &DocsLookup::new("com.unity.textmeshpro")
+                    .with_scope(DocsScope::Package("com.unity.textmeshpro".to_string())),
+            )
+            .unwrap();
+        assert!(spec.args.windows(2).any(|pair| {
+            pair == [
+                surface::flag::PACKAGE.to_string(),
+                "com.unity.textmeshpro".to_string(),
+            ]
+        }));
+
+        assert!(cli.docs_spec(&DocsLookup::new("--format")).is_err());
+        assert!(cli
+            .docs_spec(&DocsLookup::new("Start").with_scope(DocsScope::Package(String::new())))
+            .is_err());
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn skill_argv_is_exact_and_validates_every_user_token() {
+        let path =
+            std::env::temp_dir().join(format!("unity-rust-hub-skill-test-{}", std::process::id()));
+        std::fs::write(&path, b"test").unwrap();
+        let cli = UnityCli::new();
+        cli.set_override_path(Some(path.clone()));
+
+        // A read has no user input at all.
+        let clients = cli.skill_clients_spec().unwrap();
+        assert_eq!(
+            clients.args,
+            svec(&[
+                "skill",
+                "install",
+                "--list",
+                "--format",
+                "json",
+                "--no-pager",
+                "--no-banner",
+                "--non-interactive",
+            ])
+        );
+
+        // The untouched single-client install keeps the client first and adds
+        // no optional flag.
+        let single = cli
+            .skill_install_spec(&SkillInstallOptions {
+                client: Some("claude-code".to_string()),
+                ..SkillInstallOptions::default()
+            })
+            .unwrap();
+        assert_eq!(
+            single.args,
+            svec(&[
+                "skill",
+                "install",
+                "claude-code",
+                "--format",
+                "ndjson",
+                "--no-pager",
+                "--no-banner",
+                "--non-interactive",
+            ])
+        );
+
+        // Every documented option in its documented order.
+        let full = cli
+            .skill_install_spec(&SkillInstallOptions {
+                client: Some("cursor".to_string()),
+                all: false,
+                local: true,
+                skill: Some("unity-cli".to_string()),
+                yes: true,
+                dry_run: true,
+                force: true,
+            })
+            .unwrap();
+        assert_eq!(
+            full.args,
+            svec(&[
+                "skill",
+                "install",
+                "cursor",
+                "--local",
+                "--skill",
+                "unity-cli",
+                "--yes",
+                "--dry-run",
+                "--force",
+                "--format",
+                "ndjson",
+                "--no-pager",
+                "--no-banner",
+                "--non-interactive",
+            ])
+        );
+
+        let all = cli
+            .skill_install_spec(&SkillInstallOptions {
+                all: true,
+                dry_run: true,
+                ..SkillInstallOptions::default()
+            })
+            .unwrap();
+        assert_eq!(&all.args[..4], &["skill", "install", "--all", "--dry-run"]);
+
+        let refresh = cli
+            .skill_refresh_spec(&SkillRefreshOptions {
+                yes: true,
+                dry_run: true,
+                force: false,
+            })
+            .unwrap();
+        assert_eq!(
+            refresh.args,
+            svec(&[
+                "skill",
+                "refresh",
+                "--yes",
+                "--dry-run",
+                "--format",
+                "ndjson",
+                "--no-pager",
+                "--no-banner",
+                "--non-interactive",
+            ])
+        );
+
+        // A client token or an all flag is required, and both together are
+        // refused before they reach the CLI.
+        assert!(cli
+            .skill_install_spec(&SkillInstallOptions::default())
+            .is_err());
+        assert!(cli
+            .skill_install_spec(&SkillInstallOptions {
+                client: Some("cursor".to_string()),
+                all: true,
+                ..SkillInstallOptions::default()
+            })
+            .is_err());
+        for client in ["--force", "Claude Code", "cursor; rm -rf /", ""] {
+            assert!(
+                cli.skill_install_spec(&SkillInstallOptions {
+                    client: Some(client.to_string()),
+                    ..SkillInstallOptions::default()
+                })
+                .is_err(),
+                "{client} must never reach argv"
+            );
+        }
+        for skill in ["--force", "two words", "slash/name"] {
+            assert!(cli
+                .skill_install_spec(&SkillInstallOptions {
+                    client: Some("cursor".to_string()),
+                    skill: Some(skill.to_string()),
+                    ..SkillInstallOptions::default()
+                })
+                .is_err());
+        }
+
+        std::fs::remove_file(path).ok();
     }
 
     #[cfg(unix)]
@@ -1861,31 +3415,200 @@ mod tests {
     }
 
     #[test]
-    fn drain_advisories_empties_the_sink() {
+    fn take_advisories_empties_the_sink() {
         let cli = UnityCli::new();
-        cli.record_advisories(advisory_envelope().advisories());
+        cli.advisory_sink()
+            .push(advisories_from_envelope(&advisory_envelope()));
 
-        let drained = cli.drain_advisories();
+        let drained = cli.take_advisories();
 
         assert_eq!(drained.len(), 2);
-        assert!(cli.drain_advisories().is_empty());
+        assert!(cli.take_advisories().is_empty());
     }
 
     #[test]
-    fn advisories_accumulate_across_two_records() {
+    fn advisories_accumulate_across_two_pushes() {
         let cli = UnityCli::new();
-        cli.record_advisories(advisory_envelope().advisories());
-        cli.record_advisories(advisory_envelope().advisories());
+        cli.advisory_sink()
+            .push(advisories_from_envelope(&advisory_envelope()));
+        cli.advisory_sink()
+            .push(advisories_from_envelope(&advisory_envelope()));
 
-        assert_eq!(cli.drain_advisories().len(), 4);
+        assert_eq!(cli.take_advisories().len(), 4);
     }
 
     #[test]
     fn cloned_clients_share_the_advisory_sink() {
         let cli = UnityCli::new();
         let worker = cli.clone();
-        worker.record_advisories(advisory_envelope().advisories());
+        worker
+            .advisory_sink()
+            .push(advisories_from_envelope(&advisory_envelope()));
 
-        assert_eq!(cli.drain_advisories().len(), 2);
+        assert_eq!(cli.take_advisories().len(), 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn execute_collects_advisories_even_from_a_failed_envelope() {
+        let spec = CommandSpec::new(
+            "sh",
+            svec(&[
+                "-c",
+                r#"printf '%s' '{"success":false,"errors":[{"code":"AUTH_ERROR","message":"signed out"}],"warnings":["Beta plugin."],"notifications":[{"code":"CLI_UPDATE_AVAILABLE","message":"Update available.","data":{"current":"1.0.0-beta.16","latest":"1.0.0-beta.17"}}]}'"#,
+            ]),
+        );
+        let cli = UnityCli::new();
+
+        let error = cli.execute(&spec).expect_err("the envelope failed");
+        assert_eq!(error.code, "AUTH_ERROR");
+
+        let advisories = cli.take_advisories();
+        assert_eq!(advisories.len(), 2);
+        assert_eq!(advisories[0].code.as_deref(), Some("CLI_UPDATE_AVAILABLE"));
+        assert_eq!(advisories[1].message, "Beta plugin.");
+        // Draining twice never duplicates the advisory.
+        assert!(cli.take_advisories().is_empty());
+    }
+
+    /// The AppImage runtime exports APPIMAGE/APPDIR/OWD/ARGV0 for the AppImage
+    /// that owns the GUI process. A CLI child that inherits them believes it runs
+    /// from that AppImage, so `unity self-update` installs a CLI AppImage over
+    /// the GUI binary and the GUI stops starting.
+    #[cfg(unix)]
+    #[test]
+    fn cli_children_do_not_inherit_the_gui_appimage_environment() {
+        const VARS: [&str; 4] = ["APPIMAGE", "APPDIR", "OWD", "ARGV0"];
+
+        struct Restore;
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                for key in VARS {
+                    std::env::remove_var(key);
+                }
+            }
+        }
+
+        for key in VARS {
+            std::env::set_var(key, format!("/tmp/unity-rust-hub-test-{key}"));
+        }
+        let _restore = Restore;
+
+        let spec = CommandSpec::new(
+            "sh",
+            svec(&[
+                "-c",
+                r#"printf '%s|%s|%s|%s' "${APPIMAGE-unset}" "${APPDIR-unset}" "${OWD-unset}" "${ARGV0-unset}""#,
+            ]),
+        );
+        let output = run_command(&spec, Duration::from_secs(10)).expect("sh should run");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+
+        assert_eq!(stdout, "unset|unset|unset|unset");
+    }
+
+    #[test]
+    fn diagnostics_read_specs_take_no_user_value_and_use_the_standard_machine_flags() {
+        let path = std::env::temp_dir().join(format!(
+            "unity-rust-hub-cli-test-{}-doctor-env",
+            std::process::id()
+        ));
+        std::fs::write(&path, b"test").unwrap();
+
+        let cli = UnityCli::new();
+        cli.set_override_path(Some(path.clone()));
+        let doctor = cli.doctor_spec().expect("the doctor spec resolves");
+        let environment = cli.environment_spec().expect("the env spec resolves");
+        std::fs::remove_file(path).ok();
+
+        assert_eq!(
+            doctor.args,
+            svec(&[
+                "doctor",
+                "--format",
+                "json",
+                "--no-pager",
+                "--no-banner",
+                "--non-interactive",
+            ])
+        );
+        assert_eq!(
+            environment.args,
+            svec(&[
+                "env",
+                "--format",
+                "json",
+                "--no-pager",
+                "--no-banner",
+                "--non-interactive",
+            ])
+        );
+        assert!(doctor
+            .env
+            .iter()
+            .any(|(key, value)| key == DO_NOT_TRACK_ENV && value == "1"));
+        assert!(environment
+            .env
+            .iter()
+            .any(|(key, value)| key == DO_NOT_TRACK_ENV && value == "1"));
+    }
+
+    #[test]
+    fn diagnose_specs_ask_for_the_plain_report_and_never_a_shell_string() {
+        let path = std::env::temp_dir().join(format!(
+            "unity-rust-hub-cli-test-{}-diagnose",
+            std::process::id()
+        ));
+        std::fs::write(&path, b"test").unwrap();
+
+        let cli = UnityCli::new();
+        cli.set_override_path(Some(path.clone()));
+        let spec = cli
+            .diagnose_spec(DiagnoseTopic::Proxy)
+            .expect("the diagnose spec resolves");
+        std::fs::remove_file(path).ok();
+
+        assert_eq!(
+            spec.args,
+            svec(&[
+                "diagnose",
+                "proxy",
+                "--format",
+                "human",
+                "--no-pager",
+                "--no-banner",
+                "--non-interactive",
+            ])
+        );
+        assert!(spec
+            .env
+            .iter()
+            .any(|(key, value)| key == DO_NOT_TRACK_ENV && value == "1"));
+        assert_eq!(DiagnoseTopic::Accelerator.arg(), "accelerator");
+        assert_eq!(DiagnoseTopic::Update.arg(), "update");
+    }
+
+    #[test]
+    fn diagnose_text_unwraps_an_envelope_or_keeps_the_plain_report() {
+        let envelope = parse_envelope(
+            r#"{"success":true,"data":{"report":"Proxy: none\nNo proxy configured."}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            report_text(Some(&envelope), ""),
+            "Proxy: none\nNo proxy configured."
+        );
+
+        let envelope = parse_envelope(r#"{"success":true,"data":"Proxy: none"}"#).unwrap();
+        assert_eq!(report_text(Some(&envelope), ""), "Proxy: none");
+
+        let envelope = parse_envelope(r#"{"success":true,"data":{"endpoint":"none"}}"#).unwrap();
+        assert!(report_text(Some(&envelope), "").contains("\"endpoint\": \"none\""));
+
+        assert_eq!(
+            report_text(None, "Proxy: http://proxy.example\n  source: env"),
+            "Proxy: http://proxy.example\n  source: env"
+        );
+        assert_eq!(report_text(None, "   "), "The CLI wrote an empty report.");
     }
 }

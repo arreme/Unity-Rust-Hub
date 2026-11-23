@@ -65,6 +65,30 @@ pub fn validate_module_id(input: &str) -> Result<(), UnityError> {
     Ok(())
 }
 
+fn architecture_name() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"^[A-Za-z0-9][A-Za-z0-9_]{1,31}$").expect("valid regex"))
+}
+
+/// Normalizes the Editor architecture the CLI accepts as `--architecture`
+/// (`x86_64` or `arm64`).
+///
+/// Older CLI builds and registry rows can leave it empty, so an empty value
+/// means "let the CLI decide" rather than an error. Anything else must look
+/// like a plain architecture token so it can never be read as a flag.
+pub fn validate_architecture(input: &str) -> Result<Option<String>, UnityError> {
+    let value = input.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    if architecture_name().is_match(value) {
+        return Ok(Some(value.to_string()));
+    }
+    Err(UnityError::invalid_input(format!(
+        "`{value}` is not a valid Editor architecture. Use `x86_64` or `arm64`."
+    )))
+}
+
 /// Validates the release stream filter accepted by `unity releases --stream`.
 pub fn validate_release_stream(input: &str) -> Result<(), UnityError> {
     match input {
@@ -73,6 +97,204 @@ pub fn validate_release_stream(input: &str) -> Result<(), UnityError> {
             "`{other}` is not a release stream. Use alpha, beta, lts, or tech."
         ))),
     }
+}
+
+/// The CLI update channels the app offers.
+///
+/// `self-update --check`, `--changelog` and an apply all accept only these.
+pub fn validate_update_channel(input: &str) -> Result<Option<String>, UnityError> {
+    let value = input.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    match value {
+        "stable" | "beta" => Ok(Some(value.to_string())),
+        other => Err(UnityError::invalid_input(format!(
+            "`{other}` is not a CLI update channel. Use stable or beta."
+        ))),
+    }
+}
+
+/// Validates `--timeout <seconds>`: a whole number greater than zero.
+///
+/// The CLI rejects `5m` and `1.5`, so the app refuses them before they reach
+/// the command line. An empty field means "no timeout".
+pub fn validate_timeout_seconds(input: &str) -> Result<Option<u32>, UnityError> {
+    let value = input.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    if !value.chars().all(|character| character.is_ascii_digit()) {
+        return Err(UnityError::invalid_input(
+            "The install timeout must be a whole number of seconds, such as 600.",
+        ));
+    }
+    let seconds = value.parse::<u32>().map_err(|_| {
+        UnityError::invalid_input("The install timeout is too large for a whole number of seconds.")
+    })?;
+    if seconds == 0 {
+        return Err(UnityError::invalid_input(
+            "The install timeout must be greater than zero seconds.",
+        ));
+    }
+    Ok(Some(seconds))
+}
+
+/// Validates `--retries <n>` and the `UNITY_INSTALL_RETRIES` value.
+///
+/// `0` disables retries. Any whole number is accepted; the CLI owns its own
+/// upper bound and reports `BAD_ARGS` if it has one lower than the value.
+pub fn validate_retry_count(input: &str) -> Result<Option<u32>, UnityError> {
+    let value = input.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    if !value.chars().all(|character| character.is_ascii_digit()) {
+        return Err(UnityError::invalid_input(
+            "Download retries must be a whole number; 0 disables retries.",
+        ));
+    }
+    let retries = value.parse::<u32>().map_err(|_| {
+        UnityError::invalid_input("Download retries must be a whole number; 0 disables retries.")
+    })?;
+    Ok(Some(retries))
+}
+
+fn docs_topic() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"^[A-Za-z0-9][A-Za-z0-9 ._-]*$").expect("valid regex"))
+}
+
+/// Validates a `unity docs <topic>` token.
+///
+/// A topic is either a command path (`install-modules`, `pipeline editors`) or
+/// a class-like identifier (`MonoBehaviour.Start`). Whitespace is collapsed;
+/// flags, placeholders, and shell metacharacters never reach argv.
+pub fn validate_docs_topic(input: &str) -> Result<String, UnityError> {
+    let value = input.split_whitespace().collect::<Vec<_>>().join(" ");
+    if value.is_empty() {
+        return Err(UnityError::invalid_input(
+            "The changelog entry names no documentation topic.",
+        ));
+    }
+    if value.chars().count() > 200 {
+        return Err(UnityError::invalid_input(
+            "The documentation topic is too long to look up.",
+        ));
+    }
+    if !docs_topic().is_match(&value) {
+        return Err(UnityError::invalid_input(format!(
+            "`{value}` is not a documentation topic. Use a command such as `install-modules` or a class such as `MonoBehaviour.Start`."
+        )));
+    }
+    Ok(value)
+}
+
+fn docs_package() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"^[A-Za-z0-9][A-Za-z0-9._-]*$").expect("valid regex"))
+}
+
+pub fn validate_docs_package(input: &str) -> Result<Option<String>, UnityError> {
+    let value = input.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    if value.chars().count() > 214 || !docs_package().is_match(value) {
+        return Err(UnityError::invalid_input(format!(
+            "`{value}` is not a Unity package name."
+        )));
+    }
+    Ok(Some(value.to_string()))
+}
+
+/// Validates `-d` / `--download-directory`.
+///
+/// The CLI creates the folder, so it does not need to exist. It must not look
+/// like a flag and must be a single path argument; an empty field means "use
+/// the normal install location".
+pub fn validate_download_directory(input: &str) -> Result<Option<String>, UnityError> {
+    let value = input.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    if value.starts_with('-') {
+        return Err(UnityError::invalid_input(
+            "The download directory cannot start with `-`.",
+        ));
+    }
+    if value.chars().any(|character| {
+        character == '\0' || character == '\n' || character == '\r' || character.is_control()
+    }) {
+        return Err(UnityError::invalid_input(
+            "The download directory contains an invalid character.",
+        ));
+    }
+    Ok(Some(value.to_string()))
+}
+
+/// The agent-skill clients the CLI documents for `unity skill install`.
+///
+/// This list is display metadata and test vocabulary only: a client token is
+/// validated by shape, so a newer CLI that adds a client still works without an
+/// adapter release.
+pub const SKILL_CLIENTS: [&str; 11] = [
+    "claude-code",
+    "claude-desktop",
+    "grok",
+    "cursor",
+    "windsurf",
+    "vscode",
+    "cline",
+    "codex",
+    "opencode",
+    "antigravity",
+    "qwen",
+];
+
+fn skill_client() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"^[a-z0-9][a-z0-9-]{0,31}$").expect("valid regex"))
+}
+
+/// Validates the optional client positional of `unity skill install`.
+///
+/// The token is a lowercase client id such as `claude-code`. It must never look
+/// like a flag, so an empty value and anything outside the documented shape are
+/// refused before they reach argv.
+pub fn validate_skill_client(input: &str) -> Result<String, UnityError> {
+    let value = input.trim();
+    if value.is_empty() {
+        return Err(UnityError::invalid_input(
+            "Choose an AI client, or install to every supported client.",
+        ));
+    }
+    if !skill_client().is_match(value) {
+        return Err(UnityError::invalid_input(format!(
+            "`{value}` is not a Unity skill client id. Use one of the ids from `unity skill install --list`."
+        )));
+    }
+    Ok(value.to_string())
+}
+
+fn skill_name() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$").expect("valid regex"))
+}
+
+/// Validates `--skill <name>`. An empty field means "every skill the CLI
+/// installs", so it is left out of the command.
+pub fn validate_skill_name(input: &str) -> Result<Option<String>, UnityError> {
+    let value = input.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    if !skill_name().is_match(value) {
+        return Err(UnityError::invalid_input(format!(
+            "`{value}` is not a Unity skill name. Leave it empty to install every skill."
+        )));
+    }
+    Ok(Some(value.to_string()))
 }
 
 /// Validates a project path that must exist and be a directory.
@@ -264,6 +486,62 @@ mod tests {
     }
 
     #[test]
+    fn validates_architectures() {
+        assert_eq!(
+            validate_architecture(" x86_64 ").unwrap().as_deref(),
+            Some("x86_64")
+        );
+        assert_eq!(
+            validate_architecture("arm64").unwrap().as_deref(),
+            Some("arm64")
+        );
+        assert_eq!(validate_architecture("").unwrap(), None);
+        for value in ["--headless", "x86_64; rm -rf /", "$(id)"] {
+            assert!(validate_architecture(value).is_err(), "{value} should fail");
+        }
+    }
+
+    #[test]
+    fn validates_update_channels_timeouts_retries_and_download_directories() {
+        assert_eq!(
+            validate_update_channel("beta").unwrap().as_deref(),
+            Some("beta")
+        );
+        assert_eq!(validate_update_channel("  ").unwrap(), None);
+        assert!(validate_update_channel("nightly").is_err());
+
+        assert_eq!(validate_timeout_seconds("600").unwrap(), Some(600));
+        assert_eq!(validate_timeout_seconds("").unwrap(), None);
+        for value in ["0", "5m", "1.5", "-1", "abc"] {
+            assert!(
+                validate_timeout_seconds(value).is_err(),
+                "{value} must be refused"
+            );
+        }
+
+        assert_eq!(validate_retry_count("0").unwrap(), Some(0));
+        assert_eq!(validate_retry_count("10").unwrap(), Some(10));
+        assert_eq!(validate_retry_count("25").unwrap(), Some(25));
+        assert_eq!(validate_retry_count(" ").unwrap(), None);
+        for value in ["-1", "2.5", "many"] {
+            assert!(
+                validate_retry_count(value).is_err(),
+                "{value} must be refused"
+            );
+        }
+
+        assert_eq!(
+            validate_download_directory(" ./.unity ")
+                .unwrap()
+                .as_deref(),
+            Some("./.unity")
+        );
+        assert_eq!(validate_download_directory("").unwrap(), None);
+        assert!(validate_download_directory("--force").is_err());
+        assert!(validate_download_directory("bad\npath").is_err());
+    }
+
+    #[test]
     fn validates_module_ids() {
         for value in ["android", "linux-il2cpp", "android-open-jdk-17.0.18+8"] {
             assert!(validate_module_id(value).is_ok(), "{value} should be valid");
@@ -296,6 +574,32 @@ mod tests {
             assert!(
                 validate_project_name(value).is_err(),
                 "{value} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn validates_skill_clients_and_names() {
+        for client in SKILL_CLIENTS {
+            assert_eq!(validate_skill_client(client).unwrap(), client);
+        }
+        assert!(validate_skill_client(" future-client ").is_ok());
+        for value in ["", "--all", "Claude Code", "claude_code", "$(id)"] {
+            assert!(
+                validate_skill_client(value).is_err(),
+                "{value} must be refused"
+            );
+        }
+
+        assert_eq!(
+            validate_skill_name(" unity-cli ").unwrap().as_deref(),
+            Some("unity-cli")
+        );
+        assert_eq!(validate_skill_name("").unwrap(), None);
+        for value in ["--force", "with space", "slash/name", "$(id)"] {
+            assert!(
+                validate_skill_name(value).is_err(),
+                "{value} must be refused"
             );
         }
     }
@@ -356,6 +660,38 @@ mod tests {
             assert!(
                 validate_archive_path(value).is_err(),
                 "{value} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn validates_docs_topics_and_packages() {
+        assert_eq!(
+            validate_docs_topic("  MonoBehaviour.Start ").unwrap(),
+            "MonoBehaviour.Start"
+        );
+        assert_eq!(
+            validate_docs_topic("pipeline   editors").unwrap(),
+            "pipeline editors"
+        );
+        for value in ["", "--cli", "$(id)", "Start; rm -rf /", "<topic>"] {
+            assert!(
+                validate_docs_topic(value).is_err(),
+                "{value} must be refused"
+            );
+        }
+
+        assert_eq!(
+            validate_docs_package("com.unity.textmeshpro")
+                .unwrap()
+                .as_deref(),
+            Some("com.unity.textmeshpro")
+        );
+        assert_eq!(validate_docs_package(" ").unwrap(), None);
+        for value in ["--package", "com.unity;rm", "../escape"] {
+            assert!(
+                validate_docs_package(value).is_err(),
+                "{value} must be refused"
             );
         }
     }
