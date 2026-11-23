@@ -2,7 +2,7 @@ use iced::widget::text::{IntoFragment, Wrapping};
 use iced::widget::{
     column, container, row, rule, space, Button, Checkbox, Column, Scrollable, TextInput,
 };
-use iced::{Center, Element, Fill, Length};
+use iced::{Center, Element, Fill, Length, Padding};
 
 use unity_hub_model::{Tone, UiAction, UiError};
 
@@ -133,15 +133,23 @@ pub const SCROLLBAR_LANE: f32 = 2.0 * SCROLLBAR_MARGIN + SCROLLBAR_WIDTH;
 /// Right padding that keeps edge-to-edge content out of the scrollbar lane.
 pub const SCROLL_GUTTER: f32 = SCROLLBAR_LANE + spacing::XS;
 
+/// A vertically scrolling viewport. iced paints the scrollbar over the
+/// scroll's right edge instead of reserving layout space, so the content is
+/// inset by [`SCROLL_GUTTER`] and the thumb never sits on top of it.
 pub fn scroll<'a>(content: impl Into<Element<'a, UiAction>>) -> Scrollable<'a, UiAction> {
-    iced::widget::scrollable(content)
-        .direction(iced::widget::scrollable::Direction::Vertical(
-            iced::widget::scrollable::Scrollbar::new()
-                .width(SCROLLBAR_WIDTH)
-                .scroller_width(SCROLLBAR_WIDTH)
-                .margin(SCROLLBAR_MARGIN),
-        ))
-        .style(theme::scrollable)
+    iced::widget::scrollable(container(content).padding(Padding {
+        top: 0.0,
+        right: SCROLL_GUTTER,
+        bottom: 0.0,
+        left: 0.0,
+    }))
+    .direction(iced::widget::scrollable::Direction::Vertical(
+        iced::widget::scrollable::Scrollbar::new()
+            .width(SCROLLBAR_WIDTH)
+            .scroller_width(SCROLLBAR_WIDTH)
+            .margin(SCROLLBAR_MARGIN),
+    ))
+    .style(theme::scrollable)
 }
 
 /// A horizontally scrolling viewport for tables that cannot fit their columns.

@@ -228,17 +228,7 @@ fn rail(vm: &ViewModel) -> Element<'_, UiAction> {
             list = list.push(notification_card(notification));
         }
 
-        // iced paints the scrollbar over the scroll's right edge, so the cards
-        // keep a reserved lane instead of running underneath it.
-        scroll(container(list).padding(Padding {
-            top: 0.0,
-            right: components::SCROLL_GUTTER,
-            bottom: 0.0,
-            left: 0.0,
-        }))
-        .height(Fill)
-        .width(Fill)
-        .into()
+        scroll(list).height(Fill).width(Fill).into()
     };
 
     container(
