@@ -11381,6 +11381,9 @@ mod tests {
     #[test]
     fn skill_force_is_only_offered_after_a_conflict_and_names_the_request() {
         let mut app = connected_app("1.0.0-beta.17");
+        // The command preview needs a resolvable CLI; without a pinned path it
+        // degrades to the static fallback on machines without a `unity` binary.
+        app.cli.set_override_path(Some(temporary_cli()));
         app.page = Page::Skills;
         app.skill_last_run = Some(SkillRun {
             scope: SkillScope::Install {
