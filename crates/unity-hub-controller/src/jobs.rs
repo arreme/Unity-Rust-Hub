@@ -37,6 +37,18 @@ pub enum StreamKind {
     Stderr,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct DownloadStatus {
+    /// Stable identity: `sha256`, then `url`/`name`/`fileName`/`id`, then the
+    /// frame index.
+    pub key: String,
+    /// This file's own percentage when the CLI reports one.
+    pub pct: Option<f32>,
+    pub downloading: bool,
+    pub queued: bool,
+    pub failed: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct JobEvent {
     pub job_id: String,
@@ -45,6 +57,8 @@ pub struct JobEvent {
     pub line: Option<String>,
     pub progress: Option<f32>,
     pub message: Option<String>,
+    /// Per-file rows from a 1.1.0 parallel install frame.
+    pub downloads: Vec<DownloadStatus>,
     pub result: Option<Value>,
     pub error: Option<UnityError>,
 }
@@ -177,6 +191,7 @@ impl JobManager {
                             line: Some(text),
                             progress: None,
                             message: None,
+                            downloads: Vec::new(),
                             result: None,
                             error: None,
                         });
@@ -206,6 +221,7 @@ impl JobManager {
                         line: Some(text),
                         progress: parsed.progress,
                         message: parsed.message,
+                        downloads: parsed.downloads,
                         result: parsed.result,
                         error: None,
                     });
@@ -247,6 +263,7 @@ impl JobManager {
                 line: None,
                 progress: if succeeded { Some(100.0) } else { None },
                 message: None,
+                downloads: Vec::new(),
                 result: last_result,
                 error,
             });
@@ -336,6 +353,7 @@ fn wait_for_exit(child: &Arc<Mutex<Child>>) -> Option<std::process::ExitStatus> 
 struct ParsedLine {
     progress: Option<f32>,
     message: Option<String>,
+    downloads: Vec<DownloadStatus>,
     result: Option<Value>,
     advisories: Vec<CliAdvisory>,
 }
@@ -344,6 +362,7 @@ fn parse_stdout(line: &str) -> ParsedLine {
     let empty = || ParsedLine {
         progress: None,
         message: None,
+        downloads: Vec::new(),
         result: None,
         advisories: Vec::new(),
     };
@@ -363,6 +382,7 @@ fn parse_stdout(line: &str) -> ParsedLine {
     ParsedLine {
         progress: progress_from(object).map(|value| value as f32),
         message: message_from(object),
+        downloads: downloads_from(object),
         result: is_result.then(|| value.clone()),
         advisories: if is_result {
             result_frame_advisories(&value)
@@ -396,8 +416,18 @@ fn progress_from(object: &serde_json::Map<String, Value>) -> Option<f64> {
     if let Some(value) = number(object, "progress") {
         return Some(clamp(if value <= 1.0 { value * 100.0 } else { value }));
     }
+    // 1.1.0 install frames use `pct`; some builds nest the status under
+    // `install`.
+    if let Some(value) = number(object, "pct").or_else(|| number(object, "progress")) {
+        return Some(clamp(if value <= 1.0 { value * 100.0 } else { value }));
+    }
     if let Some(value) = number(object, "percent").or_else(|| number(object, "percentage")) {
         return Some(clamp(value));
+    }
+    if let Some(install) = object.get("install").and_then(Value::as_object) {
+        if let Some(value) = progress_from(install) {
+            return Some(value);
+        }
     }
 
     for (done_key, total_key) in [
@@ -415,6 +445,65 @@ fn progress_from(object: &serde_json::Map<String, Value>) -> Option<f64> {
     }
 
     None
+}
+
+/// One row per file in a 1.1.0 parallel install frame.
+///
+/// The CLI reports `downloads: [{ sha256, downloading, queued, error }]` (and a
+/// per-file `pct` when it has one). The controller aggregates these instead of
+/// treating each frame's scalar as the whole install's progress.
+fn downloads_from(object: &serde_json::Map<String, Value>) -> Vec<DownloadStatus> {
+    let downloads = object
+        .get("downloads")
+        .or_else(|| {
+            object
+                .get("install")
+                .and_then(|install| install.get("downloads"))
+        })
+        .and_then(Value::as_array);
+
+    let Some(downloads) = downloads else {
+        return Vec::new();
+    };
+
+    downloads
+        .iter()
+        .enumerate()
+        .filter_map(|(index, entry)| {
+            let entry = entry.as_object()?;
+            let key = ["sha256", "url", "name", "fileName", "id"]
+                .iter()
+                .find_map(|key| entry.get(*key).and_then(Value::as_str))
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("#{index}"));
+            let pct = ["pct", "progress"]
+                .iter()
+                .find_map(|key| number(entry, key))
+                .map(|value| clamp(if value <= 1.0 { value * 100.0 } else { value }) as f32)
+                .or_else(|| {
+                    ["percent", "percentage"]
+                        .iter()
+                        .find_map(|key| number(entry, key))
+                        .map(|value| clamp(value) as f32)
+                });
+            let failed = entry
+                .get("error")
+                .is_some_and(|error| !error.is_null() && error.as_str() != Some(""));
+            Some(DownloadStatus {
+                key,
+                pct,
+                downloading: entry
+                    .get("downloading")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+                queued: entry
+                    .get("queued")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+                failed,
+            })
+        })
+        .collect()
 }
 
 fn number(object: &serde_json::Map<String, Value>, key: &str) -> Option<f64> {
@@ -488,6 +577,7 @@ mod tests {
             line: None,
             progress: None,
             message: None,
+            downloads: Vec::new(),
             result: None,
             error: None,
         }
@@ -673,6 +763,43 @@ mod tests {
 
         assert!(parsed.advisories.is_empty());
         assert_eq!(parsed.progress, Some(42.0));
+    }
+
+    #[test]
+    fn parallel_download_frames_carry_per_file_status() {
+        let first = parse_stdout(
+            r#"{"type":"progress","phase":"downloading","pct":10,"downloads":[{"sha256":"a","downloading":true},{"sha256":"b","queued":true}]}"#,
+        );
+        assert_eq!(first.progress, Some(10.0));
+        assert_eq!(first.downloads.len(), 2);
+        assert_eq!(first.downloads[0].key, "a");
+        assert!(first.downloads[0].downloading);
+        assert_eq!(first.downloads[1].key, "b");
+        assert!(first.downloads[1].queued);
+
+        // Interleaved frames: b starts while a finishes.
+        let second = parse_stdout(
+            r#"{"type":"progress","phase":"downloading","pct":30,"downloads":[{"sha256":"a","downloading":false},{"sha256":"b","downloading":true}]}"#,
+        );
+        assert_eq!(second.progress, Some(30.0));
+        assert_eq!(second.downloads.len(), 2);
+        assert!(!second.downloads[0].downloading);
+        assert!(second.downloads[1].downloading);
+    }
+
+    #[test]
+    fn per_file_percentages_override_the_frame_percentage() {
+        let parsed = parse_stdout(
+            r#"{"type":"progress","pct":50,"downloads":[{"sha256":"a","pct":80},{"sha256":"b","percent":20}]}"#,
+        );
+        assert_eq!(parsed.downloads[0].pct, Some(80.0));
+        assert_eq!(parsed.downloads[1].pct, Some(20.0));
+    }
+
+    #[test]
+    fn install_progress_accepts_the_pct_key() {
+        let parsed = parse_stdout(r#"{"type":"progress","phase":"downloading","pct":12.5}"#);
+        assert_eq!(parsed.progress, Some(12.5));
     }
 
     #[test]

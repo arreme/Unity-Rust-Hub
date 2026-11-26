@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -47,7 +47,7 @@ use unity_hub_model::{
     UpgradeProjectVm, VerifyCheckVm, VerifyEditorVm, VerifyResultVm, ViewModel,
 };
 
-use crate::jobs::{JobManager, JobStarted, JobState, StreamKind};
+use crate::jobs::{DownloadStatus, JobManager, JobStarted, JobState, StreamKind};
 use crate::metrics::{ProcessMetrics, Sampler};
 use crate::notifications::{remediation_args, ActionState, NotificationLevel, NotificationStore};
 use crate::settings::{self, AppSettings, TextSize};
@@ -549,6 +549,9 @@ pub struct ActiveJob {
     pub command: String,
     pub state: JobState,
     pub progress: f32,
+    /// Last percentage seen for each file in a parallel install, keyed by the
+    /// CLI's `sha256` (or its fallback identity). Empty for other jobs.
+    pub downloads: BTreeMap<String, f32>,
     pub message: Option<String>,
     pub logs: VecDeque<LogLine>,
     /// The rendered form of `logs`, rebuilt only when the buffer changes so the
@@ -569,6 +572,7 @@ impl ActiveJob {
             command: started.command,
             state: JobState::Running,
             progress: 0.0,
+            downloads: BTreeMap::new(),
             message: None,
             logs: VecDeque::new(),
             log_text: Arc::from(""),
@@ -3925,8 +3929,13 @@ impl App {
                     job.push_log(event.stream.unwrap_or(StreamKind::Stdout), text);
                 }
             }
-            if let Some(progress) = event.progress {
-                job.progress = progress;
+            if let Some(progress) =
+                aggregate_progress(&mut job.downloads, &event.downloads, event.progress)
+            {
+                // 1.1.0 downloads several files at once, so a single frame's
+                // scalar is not the whole install. Keep the high-water mark so
+                // the bar never moves backwards between files.
+                job.progress = job.progress.max(progress);
             }
             if let Some(message) = event.message {
                 job.message = Some(message);
@@ -6826,6 +6835,48 @@ fn job_allows_retry(_kind: &str) -> bool {
     false
 }
 
+/// Folds one install frame's per-file rows into the job's last-seen map and
+/// returns the aggregate percentage.
+///
+/// 1.1.0 downloads up to three files at once and emits one scalar per frame.
+/// Treating that scalar as the whole install made the bar jump backwards
+/// between files. Each file keeps its own last value (completed = 100, queued =
+/// 0, active = its own percentage or the frame's), and the result is their
+/// mean. The caller clamps it to the job's high-water mark.
+fn aggregate_progress(
+    state: &mut BTreeMap<String, f32>,
+    downloads: &[DownloadStatus],
+    frame_progress: Option<f32>,
+) -> Option<f32> {
+    if downloads.is_empty() {
+        return frame_progress;
+    }
+
+    for download in downloads {
+        let current = state.get(&download.key).copied().unwrap_or(0.0);
+        let next = if let Some(pct) = download.pct {
+            pct
+        } else if download.failed {
+            // A failed transfer must not count as finished; keep what it
+            // reached and let the job's error frame explain it.
+            current
+        } else if download.downloading {
+            frame_progress.unwrap_or(current)
+        } else if download.queued {
+            0.0
+        } else {
+            100.0
+        };
+        state.insert(download.key.clone(), current.max(next));
+    }
+
+    if state.is_empty() {
+        return frame_progress;
+    }
+    let total: f32 = state.values().sum();
+    Some(total / state.len() as f32)
+}
+
 fn trimmed_option(value: &str) -> Option<String> {
     let value = value.trim();
     (!value.is_empty()).then(|| value.to_string())
@@ -8560,6 +8611,7 @@ mod tests {
             command: "unity editors prune --remove --yes".to_string(),
             state: JobState::Running,
             progress: 20.0,
+            downloads: BTreeMap::new(),
             message: Some("Removing 6000.3.27f2…".to_string()),
             logs: VecDeque::new(),
             log_text: Arc::from(""),
@@ -8849,6 +8901,7 @@ mod tests {
             command: "unity install lts".to_string(),
             state: JobState::Running,
             progress: 0.0,
+            downloads: BTreeMap::new(),
             message: None,
             logs: VecDeque::new(),
             log_text: Arc::from(""),
@@ -9095,6 +9148,7 @@ mod tests {
             command: format!("unity {kind}"),
             state: JobState::Failed,
             progress: 0.0,
+            downloads: BTreeMap::new(),
             message: Some("Working…".to_string()),
             logs: VecDeque::new(),
             log_text: Arc::from(""),
@@ -9581,6 +9635,65 @@ mod tests {
             "project-upgrade",
         ] {
             assert!(!job_allows_retry(kind), "{kind} must not be retryable");
+        }
+    }
+
+    #[test]
+    fn parallel_install_progress_is_aggregated_and_monotonic() {
+        let mut state = BTreeMap::new();
+
+        // a and b start together: a is active at 10%, b is queued.
+        let first = aggregate_progress(
+            &mut state,
+            &[
+                download("a", None, true, false),
+                download("b", None, false, true),
+            ],
+            Some(10.0),
+        )
+        .expect("aggregate");
+        assert!((first - 5.0).abs() < 0.01, "{first}");
+
+        // Interleaved frame: a finishes, b is active at 20%. The mean must not
+        // fall back to b's own 20%.
+        let second = aggregate_progress(
+            &mut state,
+            &[
+                download("a", None, false, false),
+                download("b", None, true, false),
+            ],
+            Some(20.0),
+        )
+        .expect("aggregate");
+        assert!(second >= first, "{second} < {first}");
+        assert!((second - 60.0).abs() < 0.01, "{second}");
+
+        // Both finished.
+        let third = aggregate_progress(
+            &mut state,
+            &[
+                download("a", None, false, false),
+                download("b", None, false, false),
+            ],
+            None,
+        )
+        .expect("aggregate");
+        assert_eq!(third, 100.0);
+
+        // Jobs without per-file rows keep the scalar path.
+        assert_eq!(
+            aggregate_progress(&mut BTreeMap::new(), &[], Some(42.0)),
+            Some(42.0)
+        );
+    }
+
+    fn download(key: &str, pct: Option<f32>, downloading: bool, queued: bool) -> DownloadStatus {
+        DownloadStatus {
+            key: key.to_string(),
+            pct,
+            downloading,
+            queued,
+            failed: false,
         }
     }
 

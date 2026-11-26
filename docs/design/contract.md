@@ -78,7 +78,10 @@ fixture when a new state needs review.
   slot, so there is exactly one transient surface.
 - Job card: running with progress, succeeded, failed with the shared error
   rendering (stable code, CLI message, detail, and a non-retry action when the
-  mapping has one), cancelled, with collapsible-looking log area.
+  mapping has one), cancelled, with collapsible-looking log area. A 1.1.0
+  parallel install reports `downloads[]`; the job keeps one percentage per
+  `sha256` and shows their mean, clamped to a monotonic high-water mark, so a
+  frame for the second file never pushes the bar back to 0.
 - Error rendering (`components::error_text`): the stable CLI code as a danger
   badge, the CLI's message verbatim, the CLI detail plus mapping guidance, and
   one primary action. Unknown codes render code/message/detail with no action.

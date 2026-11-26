@@ -541,7 +541,9 @@ Resolution order for the binary:
   an event, coalescing bursts into one UI poll every 100 ms. An idle window does not
   wake the update loop, and the queued event/log buffers are bounded. The log tail is
   rendered once per line and shared as an `Arc<str>`, so a progress-only update neither
-  copies nor reshapes the scrollback.
+  copies nor reshapes the scrollback. A 1.1.0 install downloads up to three files at
+  once, so each file's last percentage is tracked by `sha256` and averaged into an
+  overall value that only moves forward.
 - CLI reads run through one serialized worker with a 30 s timeout, so only one
   `unity` process is alive at a time. Every invocation sets `DO_NOT_TRACK=1`; this
   avoids the CLI's analytics call, which otherwise adds roughly one second and extra
