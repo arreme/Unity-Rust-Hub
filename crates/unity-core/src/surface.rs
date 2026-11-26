@@ -145,6 +145,15 @@ pub mod error_code {
     pub const UNAVAILABLE: &str = "UNAVAILABLE";
     pub const STATUS_SAFE_MODE: &str = "STATUS_SAFE_MODE";
     pub const AWAITING_INPUT: &str = "AWAITING_INPUT";
+    /// 1.1.0: a modal dialog blocked an Editor command or a close.
+    pub const EDITOR_BLOCKED_BY_DIALOG: &str = "EDITOR_BLOCKED_BY_DIALOG";
+    pub const PROJECTS_CLOSE_BLOCKED_BY_DIALOG: &str = "PROJECTS_CLOSE_BLOCKED_BY_DIALOG";
+    /// 1.1.0: a proxy environment variable named a PAC script.
+    pub const INVALID_COMMAND_ARGS: &str = "INVALID_COMMAND_ARGS";
+    /// 1.1.0 moved these not-found failures from exit 6 to exit 11.
+    pub const EDITOR_NOT_INSTALLED: &str = "EDITOR_NOT_INSTALLED";
+    pub const NOT_A_PROJECT: &str = "NOT_A_PROJECT";
+    pub const PROJECTS_REMOVE_NOT_FOUND: &str = "PROJECTS_REMOVE_NOT_FOUND";
     pub const VCS_TOKEN_REQUIRED: &str = "VCS_TOKEN_REQUIRED";
     pub const GIT_START_FAILED: &str = "GIT_START_FAILED";
     pub const LOCAL_STORE_UNWRITABLE: &str = "LOCAL_STORE_UNWRITABLE";
@@ -345,6 +354,12 @@ pub const ERROR_CODES: &[&str] = &[
     error_code::UNAVAILABLE,
     error_code::STATUS_SAFE_MODE,
     error_code::AWAITING_INPUT,
+    error_code::EDITOR_BLOCKED_BY_DIALOG,
+    error_code::PROJECTS_CLOSE_BLOCKED_BY_DIALOG,
+    error_code::INVALID_COMMAND_ARGS,
+    error_code::EDITOR_NOT_INSTALLED,
+    error_code::NOT_A_PROJECT,
+    error_code::PROJECTS_REMOVE_NOT_FOUND,
     error_code::VCS_TOKEN_REQUIRED,
     error_code::GIT_START_FAILED,
     error_code::LOCAL_STORE_UNWRITABLE,
@@ -355,7 +370,10 @@ pub const ERROR_CODES: &[&str] = &[
 
 /// Exit codes the app has an explicit remedy for. Changing this list also
 /// changes the matching table in `errors::exit_remediation`.
-pub const MAPPED_EXIT_CODES: &[i32] = &[2, 3, 7, 9, 11, 12, 14, 17, 18];
+// Exit 11 is deliberately absent: 1.1.0 moved many different not-found
+// failures onto it, so the code must name the target. A bare exit 11 keeps the
+// generic rendering instead of guessing "release not found".
+pub const MAPPED_EXIT_CODES: &[i32] = &[2, 3, 7, 9, 12, 14, 17, 18];
 
 pub fn is_command(token: &str) -> bool {
     COMMANDS.iter().any(|command| command.name == token)

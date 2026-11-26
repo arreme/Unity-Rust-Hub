@@ -595,19 +595,28 @@ Resolution order in `unity-core::errors::remediation_for`:
 
 1. The CLI's own `remediation` field (`UnityError.extra["remediation"]`), as a
    copy-only command (`ShowCommand`).
-2. The stable `code` table: auth codes → Sign in; `NETWORK_UNREACHABLE` and
+2. Exit `18`: the CLI's dialog signal wins over a streamed `EDITOR_TIMEOUT` code
+   (1.1.0), so a blocked command or close always offers the dialog action.
+3. The stable `code` table: auth codes → Sign in; `NETWORK_UNREACHABLE` and
    `VCS_PROVIDER_UNREACHABLE` → Retry; `INSTALL_LOCKED`, `TIMEOUT`,
    `EDITOR_TIMEOUT` → Retry; `RELEASE_NOT_FOUND` → Pick another version;
    `EDITOR_UNREACHABLE` → Open a project; `UNAVAILABLE` / `STATUS_SAFE_MODE` →
-   Show status; `AWAITING_INPUT` → Answer the Editor dialog;
+   Show status; `AWAITING_INPUT` / `EDITOR_BLOCKED_BY_DIALOG` /
+   `PROJECTS_CLOSE_BLOCKED_BY_DIALOG` → Answer the Editor dialog;
+   `INVALID_COMMAND_ARGS` → Show the command and name the proxy/PAC variable;
+   `EDITOR_NOT_INSTALLED` → Install that version;
+   `NOT_A_PROJECT` → Choose a project;
+   `PROJECTS_REMOVE_NOT_FOUND` → Refresh the project list;
    `VCS_TOKEN_REQUIRED` → Enter a token (env var or `--git-token-from-stdin`,
    explicitly not a Unity sign-in); `GIT_START_FAILED` → Install git;
    `LOCAL_STORE_UNWRITABLE` → Fix permissions;
    `LINK_VCS_DELETE_REMOTE_REQUIRES_YES` → Confirm explicitly;
    `INSTALL_HEADLESS_UNAVAILABLE` → Pick another version or clear headless;
    `BAD_ARGS` → Show the command.
-3. Exit-code semantics for unknown codes (`2`, `3`, `7`, `9`, `11`, `12`, `14`,
-   `17`, `18`). Exit codes outside that table stay generic.
+4. Exit-code semantics for unknown codes (`2`, `3`, `7`, `9`, `12`, `14`, `17`,
+   `18`). Exit `11` is deliberately absent: 1.1.0 moved several different
+   not-found failures onto it, so the code must name the target. Exit codes
+   outside that table stay generic.
 
 Retry is a controller-side target, not a closure in the view model:
 

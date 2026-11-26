@@ -195,15 +195,24 @@ impl ErrorRemediation {
 
 /// Resolves the primary next step for an error.
 ///
-/// Precedence is fixed: the CLI's own `remediation` first, then the stable
-/// `code` table, then exit-code semantics. Unknown codes stay generic (`None`)
-/// rather than guessing.
+/// Precedence is fixed: the CLI's own `remediation` first, then exit `18` (a
+/// dialog always wins over a streamed `EDITOR_TIMEOUT`), then the stable `code`
+/// table, then exit-code semantics. Unknown codes stay generic (`None`) rather
+/// than guessing.
 ///
 /// `proxy` is the controller's already-redacted description of a configured
 /// proxy (for example `UNITY_PROXY=http://proxy:8080`). The adapter never reads
 /// the environment itself, so callers and tests stay deterministic.
 pub fn remediation_for(error: &UnityError, proxy: Option<&str>) -> Option<ErrorRemediation> {
     cli_remediation(error)
+        .or_else(|| {
+            // 1.1.0: a dialog-blocked command exits 18 even when the Editor's
+            // own envelope still names `EDITOR_TIMEOUT`.
+            error
+                .exit_code
+                .filter(|code| *code == 18)
+                .and_then(|code| exit_remediation(code, proxy))
+        })
         .or_else(|| code_remediation(&error.code, proxy))
         .or_else(|| {
             error
@@ -297,11 +306,45 @@ fn code_remediation(code: &str, proxy: Option<&str>) -> Option<ErrorRemediation>
                     .to_string(),
             ),
         ),
-        crate::surface::error_code::AWAITING_INPUT => ErrorRemediation::new(
+        crate::surface::error_code::AWAITING_INPUT
+        | crate::surface::error_code::EDITOR_BLOCKED_BY_DIALOG
+        | crate::surface::error_code::PROJECTS_CLOSE_BLOCKED_BY_DIALOG => ErrorRemediation::new(
             RemediationKind::AnswerDialog,
-            "Show the dialog",
+            "Answer the dialog",
             Some(
-                "The Editor is waiting for an answer to a dialog. Answer it in the Editor, then retry."
+                "A dialog is holding the Editor. Answer it in the Editor, then retry. For a close, `--force` is the explicit fallback; do not auto-retry a close or a command that may have run."
+                    .to_string(),
+            ),
+        ),
+        crate::surface::error_code::INVALID_COMMAND_ARGS => ErrorRemediation::new(
+            RemediationKind::ShowCommand,
+            "Show the command",
+            Some(
+                "The CLI rejected the arguments. If a proxy environment variable (`UNITY_PROXY`, `HTTPS_PROXY`, `HTTP_PROXY`, or `ALL_PROXY`) or the saved proxy setting names a PAC script, fix or unset it first. Review the command before retrying."
+                    .to_string(),
+            ),
+        ),
+        crate::surface::error_code::EDITOR_NOT_INSTALLED => ErrorRemediation::new(
+            RemediationKind::PickVersion,
+            "Install that version",
+            Some(
+                "That Editor version is not installed. Install it from the Editors screen, then retry."
+                    .to_string(),
+            ),
+        ),
+        crate::surface::error_code::NOT_A_PROJECT => ErrorRemediation::new(
+            RemediationKind::OpenEditor,
+            "Choose a project",
+            Some(
+                "That path is not a Unity project. Choose a folder that has `Assets` and `ProjectSettings`."
+                    .to_string(),
+            ),
+        ),
+        crate::surface::error_code::PROJECTS_REMOVE_NOT_FOUND => ErrorRemediation::new(
+            RemediationKind::OpenEditor,
+            "Refresh the project list",
+            Some(
+                "The CLI no longer has that project registered. Refresh the Projects page and choose a registered project."
                     .to_string(),
             ),
         ),
@@ -367,7 +410,6 @@ fn exit_remediation(code: i32, proxy: Option<&str>) -> Option<ErrorRemediation> 
         3 => code_remediation(crate::surface::error_code::AUTH_ERROR, proxy),
         7 => code_remediation(crate::surface::error_code::NETWORK_UNREACHABLE, proxy),
         9 => code_remediation(crate::surface::error_code::INSTALL_LOCKED, proxy),
-        11 => code_remediation(crate::surface::error_code::RELEASE_NOT_FOUND, proxy),
         12 => code_remediation(crate::surface::error_code::EDITOR_UNREACHABLE, proxy),
         14 => code_remediation(crate::surface::error_code::TIMEOUT, proxy),
         17 => code_remediation(crate::surface::error_code::UNAVAILABLE, proxy),
@@ -523,6 +565,15 @@ mod tests {
             ("UNAVAILABLE", RemediationKind::ShowBusy),
             ("STATUS_SAFE_MODE", RemediationKind::ShowBusy),
             ("AWAITING_INPUT", RemediationKind::AnswerDialog),
+            ("EDITOR_BLOCKED_BY_DIALOG", RemediationKind::AnswerDialog),
+            (
+                "PROJECTS_CLOSE_BLOCKED_BY_DIALOG",
+                RemediationKind::AnswerDialog,
+            ),
+            ("INVALID_COMMAND_ARGS", RemediationKind::ShowCommand),
+            ("EDITOR_NOT_INSTALLED", RemediationKind::PickVersion),
+            ("NOT_A_PROJECT", RemediationKind::OpenEditor),
+            ("PROJECTS_REMOVE_NOT_FOUND", RemediationKind::OpenEditor),
             ("VCS_TOKEN_REQUIRED", RemediationKind::EnterToken),
             ("GIT_START_FAILED", RemediationKind::InstallGit),
             ("LOCAL_STORE_UNWRITABLE", RemediationKind::FixPermissions),
@@ -592,7 +643,6 @@ mod tests {
             (3, RemediationKind::SignIn),
             (7, RemediationKind::Retry),
             (9, RemediationKind::Retry),
-            (11, RemediationKind::PickVersion),
             (12, RemediationKind::OpenEditor),
             (14, RemediationKind::Retry),
             (17, RemediationKind::ShowBusy),
@@ -602,12 +652,70 @@ mod tests {
                 .unwrap_or_else(|| panic!("exit {code} should have a fallback"));
             assert_eq!(remediation.kind, expected, "exit {code}");
         }
-        for code in [1, 6, 8, 15, 16, 130, 143] {
+        for code in [1, 6, 8, 11, 15, 16, 130, 143] {
             assert!(
                 remediation_for(&error("FUTURE_CODE", Some(code)), None).is_none(),
                 "exit {code} should stay generic"
             );
         }
+    }
+
+    #[test]
+    fn exit_18_overrides_an_editor_timeout_code() {
+        let remediation =
+            remediation_for(&error("EDITOR_TIMEOUT", Some(18)), None).expect("mapping");
+        assert_eq!(remediation.kind, RemediationKind::AnswerDialog);
+        assert!(remediation
+            .hint
+            .expect("hint")
+            .to_lowercase()
+            .contains("dialog"));
+    }
+
+    #[test]
+    fn dialog_codes_offer_the_dialog_action() {
+        for code in [
+            "EDITOR_BLOCKED_BY_DIALOG",
+            "PROJECTS_CLOSE_BLOCKED_BY_DIALOG",
+        ] {
+            let remediation = remediation_for(&error(code, Some(18)), None).expect("mapping");
+            assert_eq!(remediation.kind, RemediationKind::AnswerDialog, "{code}");
+        }
+    }
+
+    #[test]
+    fn not_a_project_does_not_offer_the_release_picker() {
+        let remediation =
+            remediation_for(&error("NOT_A_PROJECT", Some(11)), None).expect("mapping");
+        assert_eq!(remediation.kind, RemediationKind::OpenEditor);
+        let hint = remediation.hint.expect("hint").to_lowercase();
+        assert!(hint.contains("assets"));
+        assert!(hint.contains("projectsettings"));
+    }
+
+    #[test]
+    fn unregistered_project_does_not_offer_the_release_picker() {
+        let remediation =
+            remediation_for(&error("PROJECTS_REMOVE_NOT_FOUND", Some(11)), None).expect("mapping");
+        assert_eq!(remediation.kind, RemediationKind::OpenEditor);
+    }
+
+    #[test]
+    fn editor_not_installed_points_at_the_editors_screen() {
+        let remediation =
+            remediation_for(&error("EDITOR_NOT_INSTALLED", Some(11)), None).expect("mapping");
+        assert_eq!(remediation.kind, RemediationKind::PickVersion);
+        assert_eq!(remediation.label, "Install that version");
+    }
+
+    #[test]
+    fn invalid_command_args_mentions_a_pac_proxy() {
+        let remediation =
+            remediation_for(&error("INVALID_COMMAND_ARGS", Some(2)), None).expect("mapping");
+        assert_eq!(remediation.kind, RemediationKind::ShowCommand);
+        let hint = remediation.hint.expect("hint").to_lowercase();
+        assert!(hint.contains("pac"));
+        assert!(hint.contains("proxy"));
     }
 
     #[test]

@@ -449,10 +449,23 @@ CLI beta.15 removed the `list` subcommands and deprecated a few flags, so the ad
 uses the current spellings: `unity projects --all`, `unity modules <version>`,
 `unity releases --offset`, and `unity install-modules --editor-version`.
 
-The adapter is aligned to CLI 1.0.1:
+The adapter is aligned to CLI 1.0.1, with the 1.1.0 exit-code changes below:
 
-- Exit codes `17` (`UNAVAILABLE`) and `18` (`AWAITING_INPUT`) are still part of the 1.0.1
-  table (verified with `unity commands --format json`), mapped, and treated as retryable.
+- Exit code `17` (`UNAVAILABLE`) is mapped and retryable. Exit `18` is the CLI's
+  dialog signal (`AWAITING_INPUT`, `EDITOR_BLOCKED_BY_DIALOG`, or
+  `PROJECTS_CLOSE_BLOCKED_BY_DIALOG`); it wins over a streamed `EDITOR_TIMEOUT`
+  and offers "Answer the dialog", not an automatic retry.
+- 1.1.0 moved many not-found failures from exit `6` to exit `11` (`editors verify`,
+  `modules`, `install-modules`, `projects remove`, `templates info`, `open`). The
+  adapter no longer turns a bare exit `11` into "release not found": it maps
+  `EDITOR_NOT_INSTALLED`, `NOT_A_PROJECT`, and `PROJECTS_REMOVE_NOT_FOUND`
+  explicitly and leaves an unknown exit `11` generic.
+- 1.1.0 refuses a PAC-script proxy from an environment variable with exit `2` and
+  `INVALID_COMMAND_ARGS`; the remediation names the proxy variable instead of only
+  "review the arguments".
+- `unity close` / `unity projects close` and `unity command` now report a
+  dialog-blocked Editor as exit `18`. The app does not call those commands yet;
+  when it does, it must not auto-retry them.
 - `unity install --headless` installs the headless Linux Editor. The install card offers
   it only where the CLI ships that build, and the dry run previews it too.
 - `unity modules` and `unity install-modules` take the row's `--architecture`; the CLI
@@ -476,10 +489,13 @@ The adapter is aligned to CLI 1.0.1:
 - Error codes drive the remediation table in `unity-core` (`AUTH_ERROR`,
   `NETWORK_UNREACHABLE`, `VCS_PROVIDER_UNREACHABLE`, `INSTALL_LOCKED`,
   `RELEASE_NOT_FOUND`, `EDITOR_UNREACHABLE`, `TIMEOUT`, `UNAVAILABLE`,
-  `STATUS_SAFE_MODE`, `AWAITING_INPUT`, `VCS_TOKEN_REQUIRED`, `GIT_START_FAILED`,
-  `LOCAL_STORE_UNWRITABLE`, `LINK_VCS_DELETE_REMOTE_REQUIRES_YES`,
-  `INSTALL_HEADLESS_UNAVAILABLE`, `BAD_ARGS`). CLI `remediation` wins over the code,
-  and the code wins over the exit code.
+  `STATUS_SAFE_MODE`, `AWAITING_INPUT`, `EDITOR_BLOCKED_BY_DIALOG`,
+  `PROJECTS_CLOSE_BLOCKED_BY_DIALOG`, `INVALID_COMMAND_ARGS`,
+  `EDITOR_NOT_INSTALLED`, `NOT_A_PROJECT`, `PROJECTS_REMOVE_NOT_FOUND`,
+  `VCS_TOKEN_REQUIRED`, `GIT_START_FAILED`, `LOCAL_STORE_UNWRITABLE`,
+  `LINK_VCS_DELETE_REMOTE_REQUIRES_YES`, `INSTALL_HEADLESS_UNAVAILABLE`,
+  `BAD_ARGS`). The CLI's own `remediation` wins, exit `18` wins over the code
+  (the dialog is the contract), and the code wins over the other exit codes.
 - `unity projects upgrade` refuses a project that is open in an Editor; the upgrade job
   surfaces the CLI error, and the app also checks the running-Editor list before starting.
 - The Overview running-Editor card merges `unity editors running` with
