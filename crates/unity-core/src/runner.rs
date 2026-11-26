@@ -1103,6 +1103,9 @@ fn merge_pipeline_editors(running: &mut RunningEditors, pipeline: PipelineEditor
             if instance.dialog.is_some() {
                 target.dialog = instance.dialog.clone();
             }
+            if instance.blocked_by.is_some() {
+                target.blocked_by = instance.blocked_by.clone();
+            }
             if instance.state.is_some() {
                 target.state = instance.state.clone();
             }
@@ -1163,6 +1166,9 @@ fn merge_status_instances(running: &mut RunningEditors, status: Vec<StatusInstan
             if instance.dialog.is_some() {
                 target.dialog = instance.dialog.clone();
             }
+            if instance.blocked_by.is_some() {
+                target.blocked_by = instance.blocked_by.clone();
+            }
         } else {
             running.instances.push(RunningEditor {
                 project_path: instance.project_path,
@@ -1174,6 +1180,7 @@ fn merge_status_instances(running: &mut RunningEditors, status: Vec<StatusInstan
                 player_loop_ticking: instance.player_loop_ticking,
                 safe_mode: instance.safe_mode,
                 dialog: instance.dialog,
+                blocked_by: instance.blocked_by,
                 extra: instance.extra,
                 ..RunningEditor::default()
             });
@@ -3426,6 +3433,55 @@ mod tests {
 
         assert_eq!(running.instances.len(), 1);
         assert_eq!(running.instances[0].state.as_deref(), Some("starting"));
+    }
+
+    #[test]
+    fn status_merge_carries_blocked_by_dialogs_into_an_existing_editor() {
+        let mut running = RunningEditors {
+            count: 1,
+            instances: vec![RunningEditor {
+                project_path: Some("/tmp/Game".to_string()),
+                pid: Some(42),
+                state: Some("ready".to_string()),
+                ..RunningEditor::default()
+            }],
+        };
+        let status = vec![StatusInstance {
+            project_path: Some("/tmp/Game".to_string()),
+            pid: Some(42),
+            blocked_by: Some(serde_json::json!({
+                "dialogs": [{ "title": "Save changes?" }]
+            })),
+            ..StatusInstance::default()
+        }];
+
+        merge_status_instances(&mut running, status);
+
+        assert_eq!(
+            running.instances[0].dialog_text().as_deref(),
+            Some("Save changes?")
+        );
+        assert!(running.instances[0].blocked_by.is_some());
+    }
+
+    #[test]
+    fn status_added_editor_carries_blocked_by_dialogs() {
+        let mut running = RunningEditors::default();
+        let status = vec![StatusInstance {
+            project_path: Some("/tmp/Game".to_string()),
+            pid: Some(7),
+            blocked_by: Some(serde_json::json!({
+                "dialogs": [{ "message": "Enter your license." }]
+            })),
+            ..StatusInstance::default()
+        }];
+
+        merge_status_instances(&mut running, status);
+
+        assert_eq!(
+            running.instances[0].dialog_text().as_deref(),
+            Some("Enter your license.")
+        );
     }
 
     fn advisory_envelope() -> ValueEnvelope {

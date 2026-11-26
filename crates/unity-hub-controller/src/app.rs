@@ -9247,6 +9247,25 @@ mod tests {
     }
 
     #[test]
+    fn process_rows_show_a_dialog_reported_under_blocked_by() {
+        let editor = RunningEditor {
+            project_path: Some("/games/Orbital".to_string()),
+            editor_version: Some("6000.3.15f1".to_string()),
+            pid: Some(42),
+            // 1.1.0 `unity status` shape: the dialog is under blockedBy, not
+            // the Pipeline row's `dialog` field.
+            blocked_by: Some(serde_json::json!({
+                "dialogs": [{ "title": "Save changes?" }]
+            })),
+            ..RunningEditor::default()
+        };
+
+        let row = process_row_vm(&editor, &HashMap::new());
+
+        assert_eq!(row.dialog.as_deref(), Some("Save changes?"));
+    }
+
+    #[test]
     fn template_rows_infer_the_pipeline_and_keep_a_blank_one_optional() {
         let urp = template_row_vm(&TemplateBrief {
             name: "com.unity.template.urp-blank".to_string(),

@@ -318,6 +318,10 @@ pub struct RunningEditor {
     /// Present when a modal dialog blocks the Editor. The CLI shape is still evolving.
     #[serde(default)]
     pub dialog: Option<Value>,
+    /// `blockedBy` from `unity status`, including `blockedBy.dialogs`. 1.1.0
+    /// reports dialogs here even when the Pipeline package cannot.
+    #[serde(default)]
+    pub blocked_by: Option<Value>,
     /// Live state from `unity status`: `ready`, `starting`, or `unreachable`.
     #[serde(default)]
     pub state: Option<String>,
@@ -343,8 +347,12 @@ impl RunningEditor {
     }
 
     /// The blocking dialog's title, or its message when no title is reported.
+    ///
+    /// A Pipeline row carries `dialog`; `unity status` carries `blockedBy.dialogs`
+    /// on 1.1.0. Either is enough to keep the Editor from looking ready.
     pub fn dialog_text(&self) -> Option<String> {
         dialog_text(self.dialog.as_ref())
+            .or_else(|| blocked_by_dialog_text(self.blocked_by.as_ref()))
     }
 }
 
@@ -374,6 +382,8 @@ pub struct PipelineEditor {
     pub safe_mode: Option<Value>,
     #[serde(default)]
     pub dialog: Option<Value>,
+    #[serde(default)]
+    pub blocked_by: Option<Value>,
     #[serde(default)]
     pub state: Option<String>,
     #[serde(default)]
@@ -414,6 +424,7 @@ impl PipelineEditor {
             update_available: self.update_available,
             safe_mode: self.safe_mode,
             dialog: self.dialog,
+            blocked_by: self.blocked_by,
             state: self.state,
             frame_count: self.frame_count,
             player_loop_ticking: self.player_loop_ticking,
@@ -452,6 +463,13 @@ fn dialog_text(dialog: Option<&Value>) -> Option<String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string)
+}
+
+/// The dialog reported under `blockedBy.dialogs`, if any.
+fn blocked_by_dialog_text(blocked_by: Option<&Value>) -> Option<String> {
+    blocked_by
+        .and_then(|value| value.get("dialogs"))
+        .and_then(|value| dialog_text(Some(value)))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -1008,12 +1026,8 @@ pub struct StatusInstance {
 
 impl StatusInstance {
     pub fn dialog_text(&self) -> Option<String> {
-        dialog_text(self.dialog.as_ref()).or_else(|| {
-            self.blocked_by
-                .as_ref()
-                .and_then(|value| value.get("dialogs"))
-                .and_then(|value| dialog_text(Some(value)))
-        })
+        dialog_text(self.dialog.as_ref())
+            .or_else(|| blocked_by_dialog_text(self.blocked_by.as_ref()))
     }
 
     pub fn in_safe_mode(&self) -> bool {
