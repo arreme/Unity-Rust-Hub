@@ -12,12 +12,41 @@
 //! changelog filter treats an entry mentioning any of them as relevant.
 
 /// One command in the registry. `subcommands` are the second-level tokens the
-/// app knows how to name; an unknown second token still counts as a mention of
-/// the command, but the docs topic is the bare command.
+/// app knows how to name; an unknown second token is an argument only for a
+/// command that declares `free_argument`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CommandSurface {
     pub name: &'static str,
     pub subcommands: &'static [&'static str],
+    /// When true, a second token that is not a known subcommand is a value
+    /// (a docs topic), not an unknown subtree.
+    pub free_argument: bool,
+}
+
+impl CommandSurface {
+    const fn leaf(name: &'static str) -> Self {
+        Self {
+            name,
+            subcommands: &[],
+            free_argument: false,
+        }
+    }
+
+    const fn with_subcommands(name: &'static str, subcommands: &'static [&'static str]) -> Self {
+        Self {
+            name,
+            subcommands,
+            free_argument: false,
+        }
+    }
+
+    const fn with_argument(name: &'static str, subcommands: &'static [&'static str]) -> Self {
+        Self {
+            name,
+            subcommands,
+            free_argument: true,
+        }
+    }
 }
 
 /// Command tokens. Every builder in `runner.rs` uses these instead of a
@@ -48,6 +77,10 @@ pub mod command {
     pub const TEMPLATES: &str = "templates";
     pub const CLOUD: &str = "cloud";
     pub const BUILD: &str = "build";
+    /// 1.1.0: the app adopts these when the dialog/close and skill flows land.
+    pub const CLOSE: &str = "close";
+    pub const COMMAND: &str = "command";
+    pub const UNINSTALL: &str = "uninstall";
 }
 
 /// Second-level tokens used both for command paths and docs topics.
@@ -77,6 +110,16 @@ pub mod subcommand {
     pub const REMOVE: &str = "remove";
     pub const LIST: &str = "list";
     pub const CLOUD_BUILD: &str = "cloud-build";
+    pub const ADD: &str = "add";
+    pub const PIN: &str = "pin";
+    pub const UNPIN: &str = "unpin";
+    pub const CLOSE: &str = "close";
+    pub const BROKER: &str = "broker";
+    pub const ENSURE: &str = "ensure";
+    pub const PACK: &str = "pack";
+    pub const SHOW: &str = "show";
+    pub const UNINSTALL: &str = "uninstall";
+    pub const TOC: &str = "toc";
 }
 
 /// Flag tokens the app passes to the CLI.
@@ -126,6 +169,19 @@ pub mod flag {
     pub const LIST: &str = "--list";
     pub const LOCAL: &str = "--local";
     pub const SKILL_NAME: &str = "--skill";
+    pub const BRIEF: &str = "--brief";
+    pub const TYPE: &str = "--type";
+    pub const NAME: &str = "--name";
+    pub const DISPLAY_NAME: &str = "--display-name";
+    pub const DESCRIPTION: &str = "--description";
+    pub const OUTPUT_DIR: &str = "--output-dir";
+    pub const OUTPUT: &str = "--output";
+    pub const OVERWRITE: &str = "--overwrite";
+    pub const TEMPLATE: &str = "--template";
+    pub const NO_CLOUD: &str = "--no-cloud";
+    pub const OPEN: &str = "--open";
+    pub const BARE: &str = "--bare";
+    pub const VERSION: &str = "--version";
 }
 
 /// Stable CLI error codes the app turns into remediation actions. The codes
@@ -162,19 +218,76 @@ pub mod error_code {
     pub const BAD_ARGS: &str = "BAD_ARGS";
 }
 
+/// Stable CLI codes that have no dedicated remediation but still drive the
+/// changelog filter and controller branches. Codes with a remediation live in
+/// [`error_code`] and are also recognised by [`is_error_code`].
+pub mod cli_code {
+    pub const COMMAND_FAILED: &str = "COMMAND_FAILED";
+    pub const NOT_FOUND: &str = "NOT_FOUND";
+    pub const STATUS_NO_INSTANCES: &str = "STATUS_NO_INSTANCES";
+    pub const DOWNLOAD_FAILED: &str = "DOWNLOAD_FAILED";
+    pub const CHECKSUM_MISMATCH: &str = "CHECKSUM_MISMATCH";
+    pub const CANCELLED: &str = "CANCELLED";
+    pub const INTERRUPTED: &str = "INTERRUPTED";
+    pub const DOCS_NOT_FOUND: &str = "DOCS_NOT_FOUND";
+    pub const EDITORS_PRUNE_EDITOR_CHECK_FAILED: &str = "EDITORS_PRUNE_EDITOR_CHECK_FAILED";
+    pub const EDITORS_PRUNE_EDITOR_CHECK_UNAVAILABLE: &str =
+        "EDITORS_PRUNE_EDITOR_CHECK_UNAVAILABLE";
+    /// 1.1.0: `unity command` lost the Editor connection; the command may
+    /// have run, so it is not safe to retry blindly.
+    pub const EDITOR_CONNECTION_LOST: &str = "EDITOR_CONNECTION_LOST";
+    pub const EDITOR_NOT_RUNNING: &str = "EDITOR_NOT_RUNNING";
+    pub const EDITOR_NOT_READY: &str = "EDITOR_NOT_READY";
+    pub const UNSUPPORTED_STATE: &str = "UNSUPPORTED_STATE";
+    pub const TEMPLATE_OTHER_VERSION_ON_DISK: &str = "TEMPLATE_OTHER_VERSION_ON_DISK";
+}
+
+/// Command paths the ignored live suite asserts against the real CLI.
+///
+/// This lives in the registry so a command rename is a one-line change here,
+/// not a second list in `tests/live.rs`.
+pub const REQUIRED_COMMAND_PATHS: &[&str] = &[
+    "version",
+    "install-path",
+    "editors",
+    "editors running",
+    "editors info",
+    "editors default",
+    "editors verify",
+    "editors prune",
+    "pipeline editors",
+    "status",
+    "releases",
+    "modules",
+    "projects",
+    "projects add",
+    "projects remove",
+    "projects pin",
+    "projects unpin",
+    "projects create",
+    "projects upgrade",
+    "templates",
+    "templates info",
+    "templates create",
+    "templates pack",
+    "open",
+    "changelog",
+    "auth status",
+    "auth login",
+    "auth broker ensure",
+    "license status",
+    "install",
+    "install-modules",
+    "self-update",
+];
+
 /// Commands in the registry, in display order.
 pub const COMMANDS: &[CommandSurface] = &[
-    CommandSurface {
-        name: command::VERSION,
-        subcommands: &[],
-    },
-    CommandSurface {
-        name: command::INSTALL_PATH,
-        subcommands: &[],
-    },
-    CommandSurface {
-        name: command::EDITORS,
-        subcommands: &[
+    CommandSurface::leaf(command::VERSION),
+    CommandSurface::leaf(command::INSTALL_PATH),
+    CommandSurface::with_subcommands(
+        command::EDITORS,
+        &[
             subcommand::INSTALLED,
             subcommand::RUNNING,
             subcommand::INFO,
@@ -182,58 +295,39 @@ pub const COMMANDS: &[CommandSurface] = &[
             subcommand::VERIFY,
             subcommand::PRUNE,
         ],
-    },
-    CommandSurface {
-        name: command::PIPELINE,
-        subcommands: &[subcommand::EDITORS, subcommand::CLOUD_BUILD],
-    },
-    CommandSurface {
-        name: command::CHANGELOG,
-        subcommands: &[],
-    },
-    CommandSurface {
-        name: command::AUTH,
-        subcommands: &[subcommand::STATUS, subcommand::LOGIN, subcommand::LOGOUT],
-    },
-    CommandSurface {
-        name: command::LICENSE,
-        subcommands: &[subcommand::STATUS],
-    },
-    CommandSurface {
-        name: command::DOCTOR,
-        subcommands: &[],
-    },
-    CommandSurface {
-        name: command::ENV,
-        subcommands: &[],
-    },
-    CommandSurface {
-        name: command::DIAGNOSE,
-        subcommands: &[
+    ),
+    CommandSurface::with_subcommands(
+        command::PIPELINE,
+        &[subcommand::EDITORS, subcommand::CLOUD_BUILD],
+    ),
+    CommandSurface::leaf(command::CHANGELOG),
+    CommandSurface::with_subcommands(
+        command::AUTH,
+        &[
+            subcommand::STATUS,
+            subcommand::LOGIN,
+            subcommand::LOGOUT,
+            subcommand::BROKER,
+        ],
+    ),
+    CommandSurface::with_subcommands(command::LICENSE, &[subcommand::STATUS]),
+    CommandSurface::leaf(command::DOCTOR),
+    CommandSurface::leaf(command::ENV),
+    CommandSurface::with_subcommands(
+        command::DIAGNOSE,
+        &[
             subcommand::PROXY,
             subcommand::ACCELERATOR,
             subcommand::UPDATE,
         ],
-    },
-    CommandSurface {
-        name: command::INSTALL,
-        subcommands: &[],
-    },
-    CommandSurface {
-        name: command::INSTALL_MODULES,
-        subcommands: &[],
-    },
-    CommandSurface {
-        name: command::MODULES,
-        subcommands: &[],
-    },
-    CommandSurface {
-        name: command::RELEASES,
-        subcommands: &[],
-    },
-    CommandSurface {
-        name: command::PROJECTS,
-        subcommands: &[
+    ),
+    CommandSurface::leaf(command::INSTALL),
+    CommandSurface::leaf(command::INSTALL_MODULES),
+    CommandSurface::leaf(command::MODULES),
+    CommandSurface::leaf(command::RELEASES),
+    CommandSurface::with_subcommands(
+        command::PROJECTS,
+        &[
             subcommand::UPGRADE,
             subcommand::CREATE,
             subcommand::CLONE,
@@ -241,53 +335,46 @@ pub const COMMANDS: &[CommandSurface] = &[
             subcommand::UNLINK,
             subcommand::INFO,
             subcommand::AUDIT,
+            subcommand::ADD,
+            subcommand::REMOVE,
+            subcommand::PIN,
+            subcommand::UNPIN,
+            subcommand::CLOSE,
         ],
-    },
-    CommandSurface {
-        name: command::OPEN,
-        subcommands: &[],
-    },
-    CommandSurface {
-        name: command::SELF_UPDATE,
-        subcommands: &[],
-    },
-    CommandSurface {
-        name: command::DOCS,
-        subcommands: &[subcommand::CACHE],
-    },
-    CommandSurface {
-        name: command::STATUS,
-        subcommands: &[],
-    },
-    CommandSurface {
-        name: command::PLUGIN,
-        subcommands: &[
+    ),
+    CommandSurface::leaf(command::OPEN),
+    CommandSurface::leaf(command::SELF_UPDATE),
+    CommandSurface::with_argument(command::DOCS, &[subcommand::CACHE, subcommand::TOC]),
+    CommandSurface::leaf(command::STATUS),
+    CommandSurface::with_subcommands(
+        command::PLUGIN,
+        &[
             subcommand::INSTALL,
             subcommand::UPGRADE,
             subcommand::REMOVE,
             subcommand::LIST,
+            subcommand::UNINSTALL,
         ],
-    },
-    CommandSurface {
-        name: command::SKILL,
-        subcommands: &[subcommand::INSTALL, subcommand::REFRESH],
-    },
-    CommandSurface {
-        name: command::SKILLS,
-        subcommands: &[],
-    },
-    CommandSurface {
-        name: command::TEMPLATES,
-        subcommands: &[],
-    },
-    CommandSurface {
-        name: command::CLOUD,
-        subcommands: &[],
-    },
-    CommandSurface {
-        name: command::BUILD,
-        subcommands: &[],
-    },
+    ),
+    CommandSurface::with_subcommands(
+        command::SKILL,
+        &[
+            subcommand::INSTALL,
+            subcommand::REFRESH,
+            subcommand::SHOW,
+            subcommand::UNINSTALL,
+        ],
+    ),
+    CommandSurface::leaf(command::SKILLS),
+    CommandSurface::with_subcommands(
+        command::TEMPLATES,
+        &[subcommand::INFO, subcommand::CREATE, subcommand::PACK],
+    ),
+    CommandSurface::leaf(command::CLOUD),
+    CommandSurface::leaf(command::BUILD),
+    CommandSurface::leaf(command::CLOSE),
+    CommandSurface::leaf(command::COMMAND),
+    CommandSurface::leaf(command::UNINSTALL),
 ];
 
 /// Every flag the app passes, in the order it appears in commands.
@@ -337,6 +424,19 @@ pub const FLAGS: &[&str] = &[
     flag::LIST,
     flag::LOCAL,
     flag::SKILL_NAME,
+    flag::BRIEF,
+    flag::TYPE,
+    flag::NAME,
+    flag::DISPLAY_NAME,
+    flag::DESCRIPTION,
+    flag::OUTPUT_DIR,
+    flag::OUTPUT,
+    flag::OVERWRITE,
+    flag::TEMPLATE,
+    flag::NO_CLOUD,
+    flag::OPEN,
+    flag::BARE,
+    flag::VERSION,
 ];
 
 /// Stable error codes the app maps to a remediation action.
@@ -366,6 +466,25 @@ pub const ERROR_CODES: &[&str] = &[
     error_code::LINK_VCS_DELETE_REMOTE_REQUIRES_YES,
     error_code::INSTALL_HEADLESS_UNAVAILABLE,
     error_code::BAD_ARGS,
+];
+
+/// Codes the app recognises but does not give a dedicated remediation.
+pub const CLI_CODES: &[&str] = &[
+    cli_code::COMMAND_FAILED,
+    cli_code::NOT_FOUND,
+    cli_code::STATUS_NO_INSTANCES,
+    cli_code::DOWNLOAD_FAILED,
+    cli_code::CHECKSUM_MISMATCH,
+    cli_code::CANCELLED,
+    cli_code::INTERRUPTED,
+    cli_code::DOCS_NOT_FOUND,
+    cli_code::EDITORS_PRUNE_EDITOR_CHECK_FAILED,
+    cli_code::EDITORS_PRUNE_EDITOR_CHECK_UNAVAILABLE,
+    cli_code::EDITOR_CONNECTION_LOST,
+    cli_code::EDITOR_NOT_RUNNING,
+    cli_code::EDITOR_NOT_READY,
+    cli_code::UNSUPPORTED_STATE,
+    cli_code::TEMPLATE_OTHER_VERSION_ON_DISK,
 ];
 
 /// One documented exit code and everything the app derives from it.
@@ -553,7 +672,7 @@ pub fn is_flag(token: &str) -> bool {
 }
 
 pub fn is_error_code(token: &str) -> bool {
-    ERROR_CODES.contains(&token)
+    ERROR_CODES.contains(&token) || CLI_CODES.contains(&token)
 }
 
 /// Whether the app has an explicit remedy for this exit code.
@@ -565,8 +684,11 @@ pub fn is_mapped_exit_code(code: i32) -> bool {
 /// command path the CLI docs index uses. A leading `unity` is optional, so a
 /// backticked `` `install-modules --architecture` `` is recognised too.
 ///
-/// An unknown command returns `None`; an unknown second token still returns
-/// the bare command. Argument values and flags never become part of the path.
+/// An unknown command returns `None`. A second token that is not a registered
+/// subcommand returns the bare command only when the command takes a free
+/// argument (a docs topic) or has no subcommands at all (a version/path
+/// argument); otherwise it is an unknown subtree such as `pipeline automation`
+/// and returns `None`. Flags never become part of the path.
 pub fn command_path(tokens: &[&str]) -> Option<String> {
     let mut tokens = tokens;
     if tokens
@@ -580,10 +702,18 @@ pub fn command_path(tokens: &[&str]) -> Option<String> {
 
     let mut path = command.name.to_string();
     if let Some(second) = tokens.get(1) {
+        if second.starts_with('-') {
+            return Some(path);
+        }
         if command.subcommands.contains(second) {
             path.push(' ');
             path.push_str(second);
+            return Some(path);
         }
+        if command.subcommands.is_empty() || command.free_argument {
+            return Some(path);
+        }
+        return None;
     }
     Some(path)
 }
@@ -629,6 +759,55 @@ mod tests {
         assert!(!is_command("definitely-not-a-command"));
         assert!(!is_flag("--quiet"));
         assert!(!is_error_code("SOMETHING_ELSE"));
+    }
+
+    #[test]
+    fn unknown_subtrees_are_not_app_surface() {
+        // Pipeline Automation is a separate subtree from the Pipeline
+        // Editors/Cloud Build surface this app drives.
+        assert!(command_path(&["unity", "pipeline", "automation"]).is_none());
+        assert!(command_path(&["unity", "projects", "clean"]).is_none());
+    }
+
+    #[test]
+    fn argument_commands_keep_the_bare_path() {
+        assert_eq!(
+            command_path(&["unity", "docs", "MonoBehaviour.Start"]).as_deref(),
+            Some("docs")
+        );
+        assert_eq!(
+            command_path(&["unity", "install", "6000.6.6f1"]).as_deref(),
+            Some("install")
+        );
+    }
+
+    #[test]
+    fn newly_registered_paths_are_recognised() {
+        assert_eq!(
+            command_path(&["unity", "projects", "close"]).as_deref(),
+            Some("projects close")
+        );
+        assert_eq!(command_path(&["unity", "close"]).as_deref(), Some("close"));
+        assert_eq!(
+            command_path(&["unity", "uninstall", "6000.6.6f1"]).as_deref(),
+            Some("uninstall")
+        );
+        assert_eq!(
+            command_path(&["unity", "skill", "show", "--skill", "unity-cli"]).as_deref(),
+            Some("skill show")
+        );
+        assert_eq!(
+            command_path(&["unity", "skill", "uninstall", "unity-cli"]).as_deref(),
+            Some("skill uninstall")
+        );
+        assert_eq!(
+            command_path(&["unity", "templates", "info", "com.unity.x"]).as_deref(),
+            Some("templates info")
+        );
+        assert_eq!(
+            command_path(&["unity", "command", "editor", "status"]).as_deref(),
+            Some("command")
+        );
     }
 
     #[test]
@@ -709,5 +888,28 @@ mod tests {
         );
         assert!(!crate::errors::is_retryable_exit_code(99));
         assert!(!is_mapped_exit_code(99));
+    }
+
+    #[test]
+    fn recognises_codes_without_a_dedicated_remediation() {
+        for code in CLI_CODES {
+            assert!(is_error_code(code), "{code} should be recognised");
+        }
+        assert!(is_error_code(cli_code::EDITOR_CONNECTION_LOST));
+        assert!(!is_error_code("SOMETHING_ELSE"));
+    }
+
+    #[test]
+    fn required_command_paths_resolve_through_the_registry() {
+        for path in REQUIRED_COMMAND_PATHS {
+            let tokens: Vec<&str> = path.split_whitespace().collect();
+            let resolved =
+                command_path(&tokens).unwrap_or_else(|| panic!("{path} did not resolve"));
+            assert!(path.starts_with(&resolved), "{path} resolved to {resolved}");
+            assert!(
+                is_command(tokens[0]),
+                "{path} starts with an unregistered command"
+            );
+        }
     }
 }

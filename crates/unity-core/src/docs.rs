@@ -12,7 +12,7 @@ use crate::errors::UnityError;
 /// Code used when the CLI answers successfully but resolves no page. The
 /// controller renders this as the quiet "no docs page found" state instead of
 /// a failure.
-pub const DOCS_NOT_FOUND: &str = "DOCS_NOT_FOUND";
+pub const DOCS_NOT_FOUND: &str = crate::surface::cli_code::DOCS_NOT_FOUND;
 
 /// Code used when the CLI answers with something that is not an HTTP(S) URL.
 /// The OS opener must never receive another scheme from this app.

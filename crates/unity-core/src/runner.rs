@@ -19,11 +19,12 @@ use crate::models::{
 };
 use crate::surface;
 use crate::versions::{
-    validate_architecture, validate_archive_path, validate_cli_version, validate_docs_package,
-    validate_docs_topic, validate_download_directory, validate_editor_version, validate_module_id,
-    validate_output_dir, validate_package_id, validate_project_name, validate_project_path,
-    validate_release_stream, validate_skill_client, validate_skill_name, validate_template_id,
-    validate_template_version, validate_update_channel,
+    validate_architecture, validate_archive_path, validate_cli_version,
+    validate_create_architecture, validate_docs_package, validate_docs_topic,
+    validate_download_directory, validate_editor_version, validate_module_id, validate_output_dir,
+    validate_package_id, validate_project_name, validate_project_path, validate_release_stream,
+    validate_skill_client, validate_skill_name, validate_template_id, validate_template_version,
+    validate_update_channel,
 };
 
 /// The standard opt-out signal. The CLI's analytics/update callback adds a
@@ -477,10 +478,10 @@ impl UnityCli {
         validate_editor_version(editor_version)?;
         validate_template_id(name)?;
         let parts = svec(&[
-            "templates",
-            "info",
+            surface::command::TEMPLATES,
+            surface::subcommand::INFO,
             name,
-            "--editor-version",
+            surface::flag::EDITOR_VERSION,
             editor_version,
         ]);
         let executed = self.run_args(&parts, "json")?;
@@ -518,7 +519,7 @@ impl UnityCli {
     /// `unity status`: one row per connected Editor. Exit 12 with
     /// `STATUS_NO_INSTANCES` is the normal "nothing running" result.
     pub fn status_instances(&self) -> Result<Vec<StatusInstance>, UnityError> {
-        let spec = self.spec(&svec(&["status"]), "json")?;
+        let spec = self.spec(&svec(&[surface::command::STATUS]), "json")?;
         let executed = self.execute_envelope(&spec)?;
         status_instances_from_envelope(&executed.envelope, &executed.stderr, executed.exit_code)
     }
@@ -535,7 +536,14 @@ impl UnityCli {
     pub fn add_project(&self, path: &str) -> Result<(), UnityError> {
         let project = validate_project_path(path)?;
         let project = project.to_string_lossy().to_string();
-        self.run_args(&svec(&["projects", "add", &project]), "json")?;
+        self.run_args(
+            &svec(&[
+                surface::command::PROJECTS,
+                surface::subcommand::ADD,
+                &project,
+            ]),
+            "json",
+        )?;
         Ok(())
     }
 
@@ -543,7 +551,14 @@ impl UnityCli {
     pub fn remove_project(&self, path: &str) -> Result<(), UnityError> {
         let project = validate_project_path(path)?;
         let project = project.to_string_lossy().to_string();
-        self.run_args(&svec(&["projects", "remove", &project]), "json")?;
+        self.run_args(
+            &svec(&[
+                surface::command::PROJECTS,
+                surface::subcommand::REMOVE,
+                &project,
+            ]),
+            "json",
+        )?;
         Ok(())
     }
 
@@ -551,8 +566,15 @@ impl UnityCli {
     pub fn set_project_pinned(&self, path: &str, pinned: bool) -> Result<(), UnityError> {
         let project = validate_project_path(path)?;
         let project = project.to_string_lossy().to_string();
-        let command = if pinned { "pin" } else { "unpin" };
-        self.run_args(&svec(&["projects", command, &project]), "json")?;
+        let subcommand = if pinned {
+            surface::subcommand::PIN
+        } else {
+            surface::subcommand::UNPIN
+        };
+        self.run_args(
+            &svec(&[surface::command::PROJECTS, subcommand, &project]),
+            "json",
+        )?;
         Ok(())
     }
 
@@ -1204,7 +1226,7 @@ fn status_instances_from_envelope(
         let empty = envelope
             .errors
             .iter()
-            .any(|error| error.code == "STATUS_NO_INSTANCES");
+            .any(|error| error.code == surface::cli_code::STATUS_NO_INSTANCES);
         if empty {
             return Ok(Vec::new());
         }
@@ -1845,12 +1867,17 @@ fn templates_parts(
     installed_only: bool,
 ) -> Result<Vec<String>, UnityError> {
     validate_editor_version(editor_version)?;
-    let mut parts = svec(&["templates", "--editor-version", editor_version, "--brief"]);
+    let mut parts = svec(&[
+        surface::command::TEMPLATES,
+        surface::flag::EDITOR_VERSION,
+        editor_version,
+        surface::flag::BRIEF,
+    ]);
     if filter != TemplateFilter::All {
-        parts.extend(svec(&["--type", filter.cli_value()]));
+        parts.extend(svec(&[surface::flag::TYPE, filter.cli_value()]));
     }
     if installed_only {
-        parts.push("--installed".to_string());
+        parts.push(surface::flag::INSTALLED.to_string());
     }
     Ok(parts)
 }
@@ -1867,18 +1894,25 @@ fn templates_create_parts(options: &TemplateCreateOptions) -> Result<Vec<String>
     let project = project.to_string_lossy().into_owned();
     let output_dir = output_dir.to_string_lossy().into_owned();
 
-    let mut parts = svec(&["templates", "create", &project]);
-    parts.extend(svec(&["--name", options.name.trim()]));
-    parts.extend(svec(&["--display-name", display_name]));
+    let mut parts = svec(&[
+        surface::command::TEMPLATES,
+        surface::subcommand::CREATE,
+        &project,
+    ]);
+    parts.extend(svec(&[surface::flag::NAME, options.name.trim()]));
+    parts.extend(svec(&[surface::flag::DISPLAY_NAME, display_name]));
     if !options.description.trim().is_empty() {
-        parts.extend(svec(&["--description", options.description.trim()]));
+        parts.extend(svec(&[
+            surface::flag::DESCRIPTION,
+            options.description.trim(),
+        ]));
     }
     if !options.version.trim().is_empty() {
-        parts.extend(svec(&["--version", options.version.trim()]));
+        parts.extend(svec(&[surface::flag::VERSION, options.version.trim()]));
     }
-    parts.extend(svec(&["--output-dir", &output_dir]));
+    parts.extend(svec(&[surface::flag::OUTPUT_DIR, &output_dir]));
     if options.overwrite {
-        parts.push("--overwrite".to_string());
+        parts.push(surface::flag::OVERWRITE.to_string());
     }
     Ok(parts)
 }
@@ -1904,20 +1938,30 @@ fn templates_pack_parts(options: &TemplatePackOptions) -> Result<Vec<String>, Un
     let project = project.to_string_lossy().into_owned();
     let output = output.to_string_lossy().into_owned();
 
-    let mut parts = svec(&["templates", "pack", &project]);
-    parts.extend(svec(&["--output", &output]));
+    let mut parts = svec(&[
+        surface::command::TEMPLATES,
+        surface::subcommand::PACK,
+        &project,
+    ]);
+    parts.extend(svec(&[surface::flag::OUTPUT, &output]));
     if !options.name.trim().is_empty() {
-        parts.extend(svec(&["--name", options.name.trim()]));
-        parts.extend(svec(&["--display-name", options.display_name.trim()]));
+        parts.extend(svec(&[surface::flag::NAME, options.name.trim()]));
+        parts.extend(svec(&[
+            surface::flag::DISPLAY_NAME,
+            options.display_name.trim(),
+        ]));
         if !options.description.trim().is_empty() {
-            parts.extend(svec(&["--description", options.description.trim()]));
+            parts.extend(svec(&[
+                surface::flag::DESCRIPTION,
+                options.description.trim(),
+            ]));
         }
         if !options.version.trim().is_empty() {
-            parts.extend(svec(&["--version", options.version.trim()]));
+            parts.extend(svec(&[surface::flag::VERSION, options.version.trim()]));
         }
     }
     if options.overwrite {
-        parts.push("--overwrite".to_string());
+        parts.push(surface::flag::OVERWRITE.to_string());
     }
     Ok(parts)
 }
@@ -1927,34 +1971,29 @@ fn create_project_parts(options: &CreateProjectOptions) -> Result<Vec<String>, U
     let output_dir = validate_output_dir(&options.output_dir)?;
     validate_editor_version(&options.editor_version)?;
     validate_template_id(&options.template)?;
-    let architecture = options.architecture.trim();
-    if !matches!(architecture, "x86_64" | "arm64") {
-        return Err(UnityError::invalid_input(
-            "Choose the x86_64 or arm64 Editor architecture.",
-        ));
-    }
+    let architecture = validate_create_architecture(&options.architecture)?;
 
     let output_dir = output_dir.to_string_lossy().into_owned();
     let mut parts = svec(&[
-        "projects",
-        "create",
+        surface::command::PROJECTS,
+        surface::subcommand::CREATE,
         options.name.trim(),
-        "--output-dir",
+        surface::flag::OUTPUT_DIR,
         &output_dir,
-        "--editor-version",
+        surface::flag::EDITOR_VERSION,
         options.editor_version.trim(),
-        "--template",
+        surface::flag::TEMPLATE,
         options.template.trim(),
-        "--architecture",
-        architecture,
+        surface::flag::ARCHITECTURE,
+        &architecture,
         // The GUI must never link a new project to Cloud implicitly.
-        "--no-cloud",
+        surface::flag::NO_CLOUD,
     ]);
     if options.open {
-        parts.push("--open".to_string());
+        parts.push(surface::flag::OPEN.to_string());
     }
     if options.bare {
-        parts.push("--bare".to_string());
+        parts.push(surface::flag::BARE.to_string());
     }
     Ok(parts)
 }
@@ -2127,7 +2166,11 @@ fn append_architecture(
 }
 
 fn auth_broker_ensure_parts() -> Vec<String> {
-    svec(&["auth", "broker", "ensure"])
+    svec(&[
+        surface::command::AUTH,
+        surface::subcommand::BROKER,
+        surface::subcommand::ENSURE,
+    ])
 }
 
 fn append_modules(parts: &mut Vec<String>, modules: &[String]) -> Result<(), UnityError> {

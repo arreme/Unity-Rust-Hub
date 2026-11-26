@@ -19,6 +19,7 @@ use unity_core::models::{
     SkillRefreshRow, TemplateBrief, TemplateCreateOptions, TemplateFilter, TemplateInfo,
     TemplatePackOptions, TrackedSkillInstall, VerifyComponent,
 };
+use unity_core::surface::{cli_code, error_code};
 use unity_core::versions::{
     validate_archive_path, validate_output_dir, validate_package_id, validate_project_name,
     validate_project_path, validate_template_version,
@@ -6875,12 +6876,16 @@ fn resume_reason(error: Option<&UnityError>, result: Option<&Value>) -> Option<S
 
     let code = error?.code.as_str();
     let reason = match code {
-        "CANCELLED" | "INTERRUPTED" => {
+        cli_code::CANCELLED | cli_code::INTERRUPTED => {
             "The install was interrupted; its downloaded files are in the cache."
         }
-        "TIMEOUT" => "The install stopped waiting and left its downloaded files in the cache.",
-        "NETWORK_UNREACHABLE" => "The download was cut off; its completed files are cached.",
-        "DOWNLOAD_FAILED" | "CHECKSUM_MISMATCH" => {
+        error_code::TIMEOUT => {
+            "The install stopped waiting and left its downloaded files in the cache."
+        }
+        error_code::NETWORK_UNREACHABLE => {
+            "The download was cut off; its completed files are cached."
+        }
+        cli_code::DOWNLOAD_FAILED | cli_code::CHECKSUM_MISMATCH => {
             "A download failed mid-transfer; the CLI kept the partial payload in its cache."
         }
         _ => return None,
@@ -6894,7 +6899,8 @@ fn resume_reason(error: Option<&UnityError>, result: Option<&Value>) -> Option<S
 fn prune_force_available_for(error: &UnityError) -> bool {
     matches!(
         error.code.as_str(),
-        "EDITORS_PRUNE_EDITOR_CHECK_FAILED" | "EDITORS_PRUNE_EDITOR_CHECK_UNAVAILABLE"
+        cli_code::EDITORS_PRUNE_EDITOR_CHECK_FAILED
+            | cli_code::EDITORS_PRUNE_EDITOR_CHECK_UNAVAILABLE
     )
 }
 

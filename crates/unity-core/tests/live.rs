@@ -14,46 +14,12 @@ use unity_core::changelog::{
     parse_changelog, ChangelogProvider, ChangelogRequest, CliChangelogProvider,
 };
 use unity_core::models::{CreateProjectOptions, TemplateFilter};
+use unity_core::surface::REQUIRED_COMMAND_PATHS;
 use unity_core::UnityCli;
 
 use std::collections::BTreeSet;
 
 use serde_json::Value;
-
-/// Every command path the adapter builds in `runner.rs`. A bump that renames
-/// or removes one of them breaks the app even when the JSON shape still looks
-/// familiar, so the live suite asserts the surface before the app ships.
-const REQUIRED_COMMANDS: &[&str] = &[
-    "version",
-    "install-path",
-    "editors",
-    "editors running",
-    "editors info",
-    "pipeline editors",
-    "status",
-    "releases",
-    "modules",
-    "projects",
-    "projects add",
-    "projects remove",
-    "projects pin",
-    "projects unpin",
-    "projects create",
-    "projects upgrade",
-    "templates",
-    "templates info",
-    "templates create",
-    "templates pack",
-    "open",
-    "changelog",
-    "auth status",
-    "auth login",
-    "auth broker ensure",
-    "license status",
-    "install",
-    "install-modules",
-    "self-update",
-];
 
 #[test]
 #[ignore = "requires the Unity CLI"]
@@ -328,7 +294,7 @@ fn app_command_surface_is_still_exposed() {
     let mut paths = BTreeSet::new();
     collect_command_paths(commands, &mut paths);
 
-    let missing: Vec<&str> = REQUIRED_COMMANDS
+    let missing: Vec<&str> = REQUIRED_COMMAND_PATHS
         .iter()
         .copied()
         .filter(|path| !paths.contains(*path))
@@ -338,8 +304,8 @@ fn app_command_surface_is_still_exposed() {
         "the CLI no longer exposes commands the app builds: {missing:?}"
     );
     println!(
-        "checked {} command paths against `unity commands` (1.0.1 exposes `path` on every node)",
-        REQUIRED_COMMANDS.len()
+        "checked {} command paths against `unity commands`",
+        REQUIRED_COMMAND_PATHS.len()
     );
 }
 

@@ -763,7 +763,11 @@ fn backtick_span() -> &'static Regex {
 
 fn prose_command() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"(?i)\bunity\s+([a-z][a-z0-9-]*)\b").expect("valid regex"))
+    // Capture the command plus one following word so `unity pipeline
+    // automation` can resolve to an unknown subtree, not the bare `pipeline`.
+    RE.get_or_init(|| {
+        Regex::new(r"(?i)\bunity\s+([a-z][a-z0-9-]*(?:\s+[a-z][a-z0-9-]*)?)").expect("valid regex")
+    })
 }
 
 fn flag_token() -> &'static Regex {
@@ -872,9 +876,9 @@ fn class_identifier(token: &str) -> Option<String> {
 
 fn mentions_used_command(raw: &str) -> bool {
     prose_command().captures_iter(raw).any(|capture| {
-        capture
-            .get(1)
-            .is_some_and(|command| surface::is_command(command.as_str()))
+        let span = capture.get(1).map(|span| span.as_str()).unwrap_or_default();
+        let tokens: Vec<&str> = span.split_whitespace().collect();
+        surface::command_path(&tokens).is_some()
     })
 }
 
@@ -1155,6 +1159,82 @@ mod tests {
             flags_and_placeholders.docs_topic.as_deref(),
             Some("install")
         );
+    }
+
+    const V1_1_0: &str = r#"## 1.1.0
+
+### Changed
+
+- **Breaking:** `unity close` and `unity projects close` fail with exit `18`, reason `blocked_by_dialog` and `PROJECTS_CLOSE_BLOCKED_BY_DIALOG` when a dialog window holds the Editor, instead of waiting out the timeout. The error names the dialog; close it in the Editor and run the close again, or use `--force`.
+- **Breaking:** A command refused because a proxy environment variable such as `UNITY_PROXY` or `HTTPS_PROXY` points to a PAC script now exits `2` with `INVALID_COMMAND_ARGS`, the same as `--proxy` naming a PAC script. It used to exit `1` with `UNSUPPORTED_STATE`. A PAC script saved in the proxy settings file still exits `1`.
+- **Breaking:** A `unity command` that times out because a modal dialog holds the Editor now exits `18` (`EDITOR_BLOCKED_BY_DIALOG`) instead of `14`, and names the dialog even when the Editor is too blocked to report it. A script that retries on `14` should treat `18` as "close the dialog first". With `--format json` or `ndjson`, an envelope the Editor streams itself still carries `EDITOR_TIMEOUT`, so key scripts on the exit code; when the Editor streams none, the CLI writes the `EDITOR_BLOCKED_BY_DIALOG` envelope.
+- `unity command` now reports `EDITOR_CONNECTION_LOST` instead of `COMMAND_FAILED` when the Editor closes the connection before it answers, for example when the command starts a script reload. The command may have run, so the message says to check its result before running it again. The exit code stays `6`.
+- `unity pipeline automation pipelines run` starts a job from a pipeline defined in a file.
+- `unity install` and `unity install-modules` download up to three editor and module files at once.
+"#;
+
+    #[test]
+    fn v1_1_0_breaking_and_command_entries_are_flagged() {
+        let parsed = parse_changelog(V1_1_0);
+        let breaking: Vec<&str> = parsed
+            .breaking_changes
+            .iter()
+            .map(|change| change.text.as_str())
+            .collect();
+        assert_eq!(breaking.len(), 4, "{breaking:?}");
+        assert!(breaking
+            .iter()
+            .any(|text| text.contains("PROJECTS_CLOSE_BLOCKED_BY_DIALOG")));
+        assert!(breaking.iter().any(|text| text.contains("PAC script")));
+        assert!(breaking
+            .iter()
+            .any(|text| text.contains("EDITOR_BLOCKED_BY_DIALOG")));
+        // The connection code rename is also a contract change even though the
+        // CLI did not mark it `**Breaking:**`.
+        assert!(breaking
+            .iter()
+            .any(|text| text.contains("EDITOR_CONNECTION_LOST")));
+    }
+
+    #[test]
+    fn v1_1_0_command_and_install_entries_are_app_impact() {
+        let parsed = parse_changelog(V1_1_0);
+        let entries: Vec<&ChangelogEntry> = parsed
+            .sections
+            .iter()
+            .flat_map(|section| section.entries.iter())
+            .collect();
+
+        let connection = entries
+            .iter()
+            .find(|entry| entry.text.contains("EDITOR_CONNECTION_LOST"))
+            .expect("connection entry");
+        assert!(connection.app_impact);
+        assert_eq!(connection.docs_topic.as_deref(), Some("command"));
+
+        let install = entries
+            .iter()
+            .find(|entry| entry.text.contains("three editor and module files"))
+            .expect("install entry");
+        assert!(install.app_impact);
+
+        // Pipeline Automation is not the Pipeline Editors/Cloud Build surface.
+        let automation = entries
+            .iter()
+            .find(|entry| entry.text.contains("pipeline automation"))
+            .expect("automation entry");
+        assert!(
+            !automation.app_impact,
+            "pipeline automation must not count as app surface"
+        );
+    }
+
+    #[test]
+    fn connection_lost_is_recognised_even_without_a_command_span() {
+        let signals = classify_entry(
+            "- The CLI reports `EDITOR_CONNECTION_LOST` when the Editor drops the connection.",
+        );
+        assert!(signals.app_impact);
     }
 
     #[test]

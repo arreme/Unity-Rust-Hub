@@ -331,6 +331,13 @@ The adapter side is `unity-core::changelog` plus `unity-core::docs`:
   `message_for_exit_code`, `is_retryable_exit_code` and `is_mapped_exit_code`
   project it, so adding a code is one row. Exit `11` stays unmapped because
   1.1.0 moved several different not-found failures onto it.
+- `command_path` resolves a backticked `unity <command> [<subcommand>]`. A
+  second token outside the registered subcommands is an argument only when the
+  command declares one (`docs <topic>`) or has no subcommands; otherwise it is
+  an unknown subtree and returns `None`, so `pipeline automation` never counts
+  as the app's `pipeline editors` / `cloud-build` surface. `CLI_CODES` lists
+  recognised codes that have no dedicated remediation; `ERROR_CODES` is the
+  remediated subset.
 - `UnityCli::docs_spec` always passes `--url`, so the CLI never opens a
   browser. `--manual`, `--cli`, `--hub`, `--cloud`, and `--package <name>` are
   optional scopes; no scope means the script reference. A search URL is a
