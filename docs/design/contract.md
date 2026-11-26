@@ -632,6 +632,11 @@ Resolution order in `unity-core::errors::remediation_for`:
 
 Retry is a controller-side target, not a closure in the view model:
 
+- `UnityError::is_blocked_by_dialog()` keys on exit `18` or the three dialog
+  codes. `close_editor_spec` / `close_project_spec` exist in the adapter but no
+  Processes flow wires them yet; when it lands, `--force` is a separate explicit
+  confirmation and a dialog-blocked close or command never offers Retry.
+
 - The controller keeps `retry_targets` keyed by the stable read id carried in
   `ErrorActionKind::Retry("read:…")`. Parameterised reads (`modules`,
   `dialog-modules`, `preview-install`) keep the request they started with, so

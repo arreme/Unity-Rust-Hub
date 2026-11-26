@@ -532,6 +532,26 @@ impl UnityCli {
         Ok(())
     }
 
+    /// `unity close [--force]`: closes the current project's Editor.
+    ///
+    /// 1.1.0 exits `18` (`EDITOR_BLOCKED_BY_DIALOG`) when a dialog holds the
+    /// Editor. The caller must offer the dialog action, never a retry, and
+    /// `--force` only after an explicit confirmation.
+    pub fn close_editor_spec(&self, force: bool) -> Result<CommandSpec, UnityError> {
+        self.spec(&close_parts(None, force), "json")
+    }
+
+    /// `unity projects close <path> [--force]`.
+    ///
+    /// 1.1.0 exits `18` (`PROJECTS_CLOSE_BLOCKED_BY_DIALOG`) when a dialog holds
+    /// the Editor; `--force` is the explicit fallback and is never added by the
+    /// adapter on its own.
+    pub fn close_project_spec(&self, path: &str, force: bool) -> Result<CommandSpec, UnityError> {
+        let project = validate_project_path(path)?;
+        let project = project.to_string_lossy().into_owned();
+        self.spec(&close_parts(Some(&project), force), "json")
+    }
+
     /// Registers an existing Unity project in the Hub registry.
     pub fn add_project(&self, path: &str) -> Result<(), UnityError> {
         let project = validate_project_path(path)?;
@@ -2012,6 +2032,21 @@ fn absolute_for_compare(path: &std::path::Path) -> std::path::PathBuf {
     std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
+fn close_parts(project: Option<&str>, force: bool) -> Vec<String> {
+    let mut parts = match project {
+        Some(project) => svec(&[
+            surface::command::PROJECTS,
+            surface::subcommand::CLOSE,
+            project,
+        ]),
+        None => svec(&[surface::command::CLOSE]),
+    };
+    if force {
+        parts.push(surface::flag::FORCE.to_string());
+    }
+    parts
+}
+
 fn open_project_parts(path: &str) -> Result<Vec<String>, UnityError> {
     let project = validate_project_path(path)?;
     let project = project.to_string_lossy().to_string();
@@ -3357,6 +3392,34 @@ mod tests {
             ..CreateProjectOptions::default()
         };
         assert!(create_project_parts(&options).is_err());
+    }
+
+    #[test]
+    fn close_parts_only_add_force_when_explicitly_requested() {
+        assert_eq!(close_parts(None, false), svec(&["close"]));
+        assert_eq!(close_parts(None, true), svec(&["close", "--force"]));
+        assert_eq!(
+            close_parts(Some("/tmp/Game"), false),
+            svec(&["projects", "close", "/tmp/Game"])
+        );
+        assert_eq!(
+            close_parts(Some("/tmp/Game"), true),
+            svec(&["projects", "close", "/tmp/Game", "--force"])
+        );
+    }
+
+    #[test]
+    fn close_project_spec_validates_the_path_and_never_defaults_to_force() {
+        let cli = UnityCli::new();
+        let project = std::env::temp_dir();
+        let project = project.to_string_lossy();
+        let spec = cli.close_project_spec(&project, false).unwrap();
+        assert_eq!(&spec.args[..3], &["projects", "close", project.as_ref()]);
+        assert!(!spec.args.contains(&"--force".to_string()));
+
+        assert!(cli
+            .close_project_spec("/definitely/not/a/project", false)
+            .is_err());
     }
 
     #[test]

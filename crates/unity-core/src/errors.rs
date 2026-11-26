@@ -73,6 +73,21 @@ impl UnityError {
         }
     }
 
+    /// Whether the CLI says a modal dialog blocked an Editor command or close.
+    ///
+    /// 1.1.0 keys this on exit `18` even when a streamed envelope still names
+    /// `EDITOR_TIMEOUT`, so scripts and the app branch on the exit code rather
+    /// than the message. This never retries: the user must answer the dialog.
+    pub fn is_blocked_by_dialog(&self) -> bool {
+        self.exit_code == Some(18)
+            || matches!(
+                self.code.as_str(),
+                crate::surface::error_code::AWAITING_INPUT
+                    | crate::surface::error_code::EDITOR_BLOCKED_BY_DIALOG
+                    | crate::surface::error_code::PROJECTS_CLOSE_BLOCKED_BY_DIALOG
+            )
+    }
+
     pub fn cli_not_found() -> Self {
         Self::new(
             "CLI_NOT_FOUND",
@@ -722,6 +737,25 @@ mod tests {
             redact_proxy("socks5://proxy.example:1080"),
             "socks5://proxy.example:1080"
         );
+    }
+
+    #[test]
+    fn dialog_blocked_errors_are_recognised_without_parsing_messages() {
+        for error in [
+            error("EDITOR_BLOCKED_BY_DIALOG", Some(18)),
+            error("PROJECTS_CLOSE_BLOCKED_BY_DIALOG", Some(18)),
+            error("AWAITING_INPUT", Some(18)),
+            error("EDITOR_TIMEOUT", Some(18)),
+        ] {
+            assert!(error.is_blocked_by_dialog(), "{}", error.code);
+        }
+        for error in [
+            error("TIMEOUT", Some(14)),
+            error("COMMAND_FAILED", Some(6)),
+            error("EDITOR_TIMEOUT", None),
+        ] {
+            assert!(!error.is_blocked_by_dialog(), "{}", error.code);
+        }
     }
 
     #[test]

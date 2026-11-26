@@ -9253,6 +9253,22 @@ mod tests {
     }
 
     #[test]
+    fn dialog_blocked_close_and_command_never_offer_retry() {
+        // 1.1.0: exit 18 is the dialog contract, not a timeout to retry. The
+        // close/command flows are not wired yet, but the policy they must use
+        // is fixed here.
+        assert!(!job_allows_retry("close"));
+        assert!(!job_allows_retry("command"));
+
+        let error =
+            UnityError::new("EDITOR_TIMEOUT", "The command timed out.").with_exit_code(Some(18));
+        let remediation = remediation_for(&error, None).expect("dialog action");
+        assert_eq!(remediation.kind, RemediationKind::AnswerDialog);
+        assert!(!remediation.kind.is_retry());
+        assert!(error.is_blocked_by_dialog());
+    }
+
+    #[test]
     fn process_rows_show_a_dialog_reported_under_blocked_by() {
         let editor = RunningEditor {
             project_path: Some("/games/Orbital".to_string()),
