@@ -89,6 +89,20 @@ pub fn validate_architecture(input: &str) -> Result<Option<String>, UnityError> 
     )))
 }
 
+/// The architecture a new project requires: one of the two Editor builds.
+///
+/// Unlike [`validate_architecture`], an empty value is not allowed here because
+/// `unity projects create` needs an explicit build. Keeping the allowed set in
+/// `versions.rs` prevents the command builder from carrying its own grammar.
+pub fn validate_create_architecture(input: &str) -> Result<String, UnityError> {
+    match validate_architecture(input)? {
+        Some(value) if matches!(value.as_str(), "x86_64" | "arm64") => Ok(value),
+        _ => Err(UnityError::invalid_input(
+            "Choose the x86_64 or arm64 Editor architecture.",
+        )),
+    }
+}
+
 /// Validates the release stream filter accepted by `unity releases --stream`.
 pub fn validate_release_stream(input: &str) -> Result<(), UnityError> {
     match input {
