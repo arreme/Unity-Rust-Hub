@@ -102,7 +102,7 @@ The app does not call `close`, `projects close`, or `command` yet. Nothing in
 | OPS-14 | `validate_template_version` uses the SemVer grammar and rejects `01.0.0`, `1.0`, and leading-zero prerelease identifiers. | `daf11a7` |
 | OPS-12 | `RunningEditor` carries `blockedBy`; both merges copy it; `dialog_text()` reads it, so the Overview cannot show "ready" while a dialog is present. | `ef7e87a` |
 | OPS-20 | One `surface::EXIT_CODES` table; the four derived functions project it. | `c6e5e47` |
-| OPS-10 | Remaining command/flag literals moved to the registry; `command`/`close`/`uninstall`/`skill show`/`skill uninstall`/`projects close` registered; code lists centralised; 1.1.0 changelog fixture added. | `c302bc8` |
+| OPS-10 | Remaining command/flag literals moved to the registry; `command`/`close`/`uninstall`/`skill show`/`skill uninstall`/`projects close` registered; code lists centralised; 1.1.0 changelog fixture added. The create-project architecture validator is in `versions.rs` (`aeed35e`). | `c302bc8` |
 | OPS-11 | `close_editor_spec` / `close_project_spec` added; `--force` only when the caller asks; `is_blocked_by_dialog()`; tests pin "Answer dialog, never Retry". | `2e1e58a` |
 | OPS-13 | Parallel install frames parsed (`pct`, `downloads[]`, per-file `pct`); overall progress tracks each `sha256` and only moves forward. | `f0fe201` |
 
