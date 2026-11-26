@@ -3,6 +3,7 @@
 **Issue:** App triggers repeated polkit prompts by calling `systemd-creds` on every
 login/use.
 **Date:** 2026-11-06
+**Re-checked:** 2026-11-26 against Unity CLI `1.1.0` (see section 12)
 **Verdict:** The calls come from the **Unity CLI auth broker**, not from Unity Rust
 Hub. The Hub never invokes `systemd-creds`. This repository can stop amplifying the
 problem, but the repeated prompts can only be fixed in the Unity CLI.
@@ -51,7 +52,8 @@ waits for the user's Retry action or an explicit Refresh. The new test is
 
 ## 2. What the Unity CLI does
 
-The local CLI is `1.0.0-beta.17` (`unity --version`). Its auth broker is a
+The local CLI is `1.0.0-beta.17` at the time of the original investigation
+(`1.1.0` on the 2026-11-26 re-check; see section 12). Its auth broker is a
 resident process started on demand and exiting after 120 seconds idle. The CLI's
 own log records this lifecycle:
 
@@ -375,7 +377,47 @@ caused by the Unity Editor, plugins, terminal commands, or a manual doctor run.
 > cache an authorization denial as terminal, serialize probe/startup, and only
 > re-seal when the token changes. No polkit auto-approve rule is shipped.
 
-## 12. Open questions
+## 12. Release re-check
+
+The prompts are fixed only when the CLI changes its seal path. Each Unity CLI
+release is checked with the steps below; **OPS-22** tracks the upstream item.
+
+### 1.1.0 (2026-11-26) — not fixed
+
+- `unity --version` reports `1.1.0`.
+- The binary still contains `unity-auth-broker-seal`, `systemd-creds`,
+  `--with-key=host+tpm2`, `systemd-creds-round-trip-failed`, and the same tier
+  list (`linux-tpm2-systemd-creds`, `linux-secret-service`, `windows-platform-tpm`,
+  `windows-dpapi`, `mac-keychain`, `file-key`). No `--user` / `--uid=self` form
+  appears in the seal path; the 15 `--user` strings in the binary belong to
+  unrelated commands such as `collab jira ... --username`.
+- `unity changelog --target 1.1.0` mentions the auth broker only for
+  `NODE_EXTRA_CA_CERTS` support and a clearer `unity auth broker ensure
+  --verbose` failure. It does not mention user-scoped credentials, a cached
+  denial, serialized probe/startup, or re-sealing only on token change.
+- The Hub-side mitigations from section 6 are unchanged and still apply:
+  `unity doctor` stays opt-in, failed reads are not retried on navigation, and
+  all CLI reads are serialized.
+- `unity doctor` was not run during this re-check, because its credential-store
+  probe is the trigger.
+
+### Checklist for every future CLI release
+
+1. `unity --version`, then `unity changelog --target <version>`; look for
+   `systemd-creds`, `--user`, `LoadCredentialEncrypted`, `polkit`, `auth broker`,
+   and `credential`.
+2. Inspect the binary (no live probe): `strings -n 6 "$(which unity)" | grep -n
+   "systemd-creds\|unity-auth-broker-seal\|--with-key=host+tpm2\|--uid=\|--user"`.
+   A user-scoped fix shows `--user` or `--uid=self` near the seal path, or a
+   system-unit/`LoadCredentialEncrypted=` path instead of a per-call probe.
+3. Check `unity doctor --format json` **only if a probe is acceptable**; it
+   still invokes the seal-tier probe. Prefer the binary inspection and the
+   changelog.
+4. If the fix ships, update sections 2, 4, 5 and 7 here and close OPS-22; keep
+   the Hub's opt-in doctor and serialized reads.
+5. Do not add a polkit auto-approve rule in the meantime (section 8).
+
+## 13. Open questions
 
 - **What owns `unity-auth-broker-seal`?** The Unity CLI itself. The string,
   the `systemd-creds` argv, and the `apps/cli/crates/auth-broker/src/linux_tier/polkit.rs`
@@ -390,7 +432,7 @@ caused by the Unity Editor, plugins, terminal commands, or a manual doctor run.
   current login session. A session-only key (kernel keyring) would lose the
   sign-in on reboot and is not required by the current design.
 
-## 13. References
+## 14. References
 
 Local primary sources used for this investigation:
 
