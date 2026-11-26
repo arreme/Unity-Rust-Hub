@@ -326,6 +326,11 @@ The adapter side is `unity-core::changelog` plus `unity-core::docs`:
   builders take their tokens from it, and `app_impact` is true only when an
   entry names one of those commands, a flag the app passes, or a mapped
   error/exit code. Do not add a second list in the controller or UI.
+- `surface::EXIT_CODES` is the one exit-code table (`name`, `message`,
+  `retryable`, `remediation_code`). `code_for_exit_code`,
+  `message_for_exit_code`, `is_retryable_exit_code` and `is_mapped_exit_code`
+  project it, so adding a code is one row. Exit `11` stays unmapped because
+  1.1.0 moved several different not-found failures onto it.
 - `UnityCli::docs_spec` always passes `--url`, so the CLI never opens a
   browser. `--manual`, `--cli`, `--hub`, `--cloud`, and `--package <name>` are
   optional scopes; no scope means the script reference. A search URL is a

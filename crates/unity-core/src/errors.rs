@@ -104,40 +104,18 @@ impl std::fmt::Display for UnityError {
 
 impl std::error::Error for UnityError {}
 
-/// Exit-code semantics from the Unity CLI 1.0.1 reference.
+/// Exit-code semantics from the Unity CLI reference.
 ///
-/// The table has been unchanged since 1.0.0: beta 17 added no exit code of its
-/// own, it only moved some commands onto the existing codes (`unity mcp
-/// configure` write failures became `1`, and argument errors `2`).
+/// The single table is [`crate::surface::EXIT_CODES`]; these functions only
+/// project it, so a new code is one row.
 pub fn is_retryable_exit_code(code: i32) -> bool {
-    matches!(code, 7 | 9 | 10 | 12 | 14 | 17 | 18 | 130 | 143)
+    crate::surface::exit_code_spec(code).is_some_and(|spec| spec.retryable)
 }
 
 pub fn code_for_exit_code(code: i32) -> &'static str {
-    match code {
-        0 => "SUCCESS",
-        1 => "ERROR",
-        2 => crate::surface::error_code::BAD_ARGS,
-        3 => "AUTH_ERROR",
-        4 => "NEEDS_CONFIG",
-        6 => "COMMAND_FAILED",
-        7 => "NETWORK_UNREACHABLE",
-        8 => "TESTS_FAILED",
-        9 => crate::surface::error_code::INSTALL_LOCKED,
-        10 => "READY_TIMEOUT",
-        11 => "NOT_FOUND",
-        12 => crate::surface::error_code::EDITOR_UNREACHABLE,
-        13 => "REMOTE_COMMAND_FAILED",
-        14 => "TIMEOUT",
-        15 => "RUN_FAILED",
-        16 => "JOB_SUSPENDED",
-        17 => "UNAVAILABLE",
-        18 => crate::surface::error_code::AWAITING_INPUT,
-        130 => "INTERRUPTED",
-        141 => "OUTPUT_CLOSED",
-        143 => "TERMINATED",
-        _ => "ERROR",
-    }
+    crate::surface::exit_code_spec(code)
+        .map(|spec| spec.name)
+        .unwrap_or("ERROR")
 }
 
 /// The kind of primary next step an error offers.
@@ -404,18 +382,10 @@ fn code_remediation(code: &str, proxy: Option<&str>) -> Option<ErrorRemediation>
 
 fn exit_remediation(code: i32, proxy: Option<&str>) -> Option<ErrorRemediation> {
     // Exit codes are the last resort, but they still describe the CLI's
-    // documented retry semantics.
-    match code {
-        2 => code_remediation(crate::surface::error_code::BAD_ARGS, proxy),
-        3 => code_remediation(crate::surface::error_code::AUTH_ERROR, proxy),
-        7 => code_remediation(crate::surface::error_code::NETWORK_UNREACHABLE, proxy),
-        9 => code_remediation(crate::surface::error_code::INSTALL_LOCKED, proxy),
-        12 => code_remediation(crate::surface::error_code::EDITOR_UNREACHABLE, proxy),
-        14 => code_remediation(crate::surface::error_code::TIMEOUT, proxy),
-        17 => code_remediation(crate::surface::error_code::UNAVAILABLE, proxy),
-        18 => code_remediation(crate::surface::error_code::AWAITING_INPUT, proxy),
-        _ => None,
-    }
+    // documented retry semantics. The table names the stable code whose
+    // remediation applies; `None` stays generic.
+    let spec = crate::surface::exit_code_spec(code)?;
+    code_remediation(spec.remediation_code?, proxy)
 }
 
 fn network_hint(proxy: Option<&str>) -> String {
@@ -445,28 +415,9 @@ pub fn redact_proxy(value: &str) -> String {
 }
 
 pub fn message_for_exit_code(code: i32) -> &'static str {
-    match code {
-        2 => "The Unity CLI rejected the arguments.",
-        3 => "Unity sign-in is required, or the session expired.",
-        4 => "The Unity CLI needs configuration before this can run.",
-        6 => "The Unity CLI command failed.",
-        7 => "A Unity service could not be reached.",
-        8 => "The tests ran, and some failed.",
-        9 => "Another Unity install is holding the install lock.",
-        10 => "The Unity Editor did not become ready in time.",
-        11 => "The requested project, release, or module does not exist.",
-        12 => "No running Unity Editor answered.",
-        13 => "The connected Editor does not expose that command.",
-        14 => "The operation timed out.",
-        15 => "A build or job finished unsuccessfully.",
-        16 => "A job is waiting for a person to resume or approve it.",
-        17 => "The target is busy; wait for it to finish, then retry.",
-        18 => "The target is waiting on a person to answer a dialog or prompt.",
-        130 => "The operation was interrupted.",
-        141 => "The output reader closed the pipe.",
-        143 => "The operation was terminated.",
-        _ => "The Unity CLI command failed.",
-    }
+    crate::surface::exit_code_spec(code)
+        .map(|spec| spec.message)
+        .unwrap_or("The Unity CLI command failed.")
 }
 
 #[cfg(test)]

@@ -368,12 +368,181 @@ pub const ERROR_CODES: &[&str] = &[
     error_code::BAD_ARGS,
 ];
 
-/// Exit codes the app has an explicit remedy for. Changing this list also
-/// changes the matching table in `errors::exit_remediation`.
-// Exit 11 is deliberately absent: 1.1.0 moved many different not-found
-// failures onto it, so the code must name the target. A bare exit 11 keeps the
-// generic rendering instead of guessing "release not found".
-pub const MAPPED_EXIT_CODES: &[i32] = &[2, 3, 7, 9, 12, 14, 17, 18];
+/// One documented exit code and everything the app derives from it.
+///
+/// Before this table existed, the code name, message, retry flag, remediation
+/// fallback and mapped set each lived in a separate `match`, so adding a code
+/// touched four places that could drift. Everything now reads this one row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExitCodeSpec {
+    pub code: i32,
+    /// Stable name used when the CLI gives no envelope code.
+    pub name: &'static str,
+    /// Human summary used when the CLI gives no message.
+    pub message: &'static str,
+    /// Whether a read at this exit code is safe to retry.
+    pub retryable: bool,
+    /// The stable error code whose remediation this exit code falls back to.
+    /// `None` keeps the generic rendering.
+    pub remediation_code: Option<&'static str>,
+}
+
+/// Every documented exit code, in numeric order.
+pub const EXIT_CODES: &[ExitCodeSpec] = &[
+    ExitCodeSpec {
+        code: 0,
+        name: "SUCCESS",
+        message: "The Unity CLI command succeeded.",
+        retryable: false,
+        remediation_code: None,
+    },
+    ExitCodeSpec {
+        code: 1,
+        name: "ERROR",
+        message: "The Unity CLI command failed.",
+        retryable: false,
+        remediation_code: None,
+    },
+    ExitCodeSpec {
+        code: 2,
+        name: "BAD_ARGS",
+        message: "The Unity CLI rejected the arguments.",
+        retryable: false,
+        remediation_code: Some(error_code::BAD_ARGS),
+    },
+    ExitCodeSpec {
+        code: 3,
+        name: "AUTH_ERROR",
+        message: "Unity sign-in is required, or the session expired.",
+        retryable: false,
+        remediation_code: Some(error_code::AUTH_ERROR),
+    },
+    ExitCodeSpec {
+        code: 4,
+        name: "NEEDS_CONFIG",
+        message: "The Unity CLI needs configuration before this can run.",
+        retryable: false,
+        remediation_code: None,
+    },
+    ExitCodeSpec {
+        code: 6,
+        name: "COMMAND_FAILED",
+        message: "The Unity CLI command failed.",
+        retryable: false,
+        remediation_code: None,
+    },
+    ExitCodeSpec {
+        code: 7,
+        name: "NETWORK_UNREACHABLE",
+        message: "A Unity service could not be reached.",
+        retryable: true,
+        remediation_code: Some(error_code::NETWORK_UNREACHABLE),
+    },
+    ExitCodeSpec {
+        code: 8,
+        name: "TESTS_FAILED",
+        message: "The tests ran, and some failed.",
+        retryable: false,
+        remediation_code: None,
+    },
+    ExitCodeSpec {
+        code: 9,
+        name: "INSTALL_LOCKED",
+        message: "Another Unity install is holding the install lock.",
+        retryable: true,
+        remediation_code: Some(error_code::INSTALL_LOCKED),
+    },
+    ExitCodeSpec {
+        code: 10,
+        name: "READY_TIMEOUT",
+        message: "The Unity Editor did not become ready in time.",
+        retryable: true,
+        remediation_code: None,
+    },
+    ExitCodeSpec {
+        code: 11,
+        name: "NOT_FOUND",
+        message: "The requested project, release, or module does not exist.",
+        retryable: false,
+        // Deliberately unmapped: 1.1.0 moved several different not-found
+        // failures onto 11, so the code must name the target.
+        remediation_code: None,
+    },
+    ExitCodeSpec {
+        code: 12,
+        name: "EDITOR_UNREACHABLE",
+        message: "No running Unity Editor answered.",
+        retryable: true,
+        remediation_code: Some(error_code::EDITOR_UNREACHABLE),
+    },
+    ExitCodeSpec {
+        code: 13,
+        name: "REMOTE_COMMAND_FAILED",
+        message: "The connected Editor does not expose that command.",
+        retryable: false,
+        remediation_code: None,
+    },
+    ExitCodeSpec {
+        code: 14,
+        name: "TIMEOUT",
+        message: "The operation timed out.",
+        retryable: true,
+        remediation_code: Some(error_code::TIMEOUT),
+    },
+    ExitCodeSpec {
+        code: 15,
+        name: "RUN_FAILED",
+        message: "A build or job finished unsuccessfully.",
+        retryable: false,
+        remediation_code: None,
+    },
+    ExitCodeSpec {
+        code: 16,
+        name: "JOB_SUSPENDED",
+        message: "A job is waiting for a person to resume or approve it.",
+        retryable: false,
+        remediation_code: None,
+    },
+    ExitCodeSpec {
+        code: 17,
+        name: "UNAVAILABLE",
+        message: "The target is busy; wait for it to finish, then retry.",
+        retryable: true,
+        remediation_code: Some(error_code::UNAVAILABLE),
+    },
+    ExitCodeSpec {
+        code: 18,
+        name: "AWAITING_INPUT",
+        message: "The target is waiting on a person to answer a dialog or prompt.",
+        retryable: true,
+        remediation_code: Some(error_code::AWAITING_INPUT),
+    },
+    ExitCodeSpec {
+        code: 130,
+        name: "INTERRUPTED",
+        message: "The operation was interrupted.",
+        retryable: true,
+        remediation_code: None,
+    },
+    ExitCodeSpec {
+        code: 141,
+        name: "OUTPUT_CLOSED",
+        message: "The output reader closed the pipe.",
+        retryable: false,
+        remediation_code: None,
+    },
+    ExitCodeSpec {
+        code: 143,
+        name: "TERMINATED",
+        message: "The operation was terminated.",
+        retryable: true,
+        remediation_code: None,
+    },
+];
+
+pub fn exit_code_spec(code: i32) -> Option<&'static ExitCodeSpec> {
+    EXIT_CODES.iter().find(|spec| spec.code == code)
+}
 
 pub fn is_command(token: &str) -> bool {
     COMMANDS.iter().any(|command| command.name == token)
@@ -387,8 +556,9 @@ pub fn is_error_code(token: &str) -> bool {
     ERROR_CODES.contains(&token)
 }
 
+/// Whether the app has an explicit remedy for this exit code.
 pub fn is_mapped_exit_code(code: i32) -> bool {
-    MAPPED_EXIT_CODES.contains(&code)
+    exit_code_spec(code).is_some_and(|spec| spec.remediation_code.is_some())
 }
 
 /// Resolves `unity <command> [<subcommand>]` (or a bare command span) to the
@@ -474,12 +644,70 @@ mod tests {
 
     #[test]
     fn every_mapped_exit_code_has_a_remediation() {
-        for code in MAPPED_EXIT_CODES {
-            let error = crate::errors::UnityError::new("ERROR", "test").with_exit_code(Some(*code));
+        for spec in EXIT_CODES
+            .iter()
+            .filter(|spec| spec.remediation_code.is_some())
+        {
+            let error =
+                crate::errors::UnityError::new("ERROR", "test").with_exit_code(Some(spec.code));
             assert!(
                 crate::errors::remediation_for(&error, None).is_some(),
-                "exit code {code} is in the surface but has no remediation"
+                "exit code {} is mapped but has no remediation",
+                spec.code
             );
         }
+    }
+
+    #[test]
+    fn every_exit_code_has_exactly_one_spec() {
+        let mut seen = std::collections::BTreeSet::new();
+        for spec in EXIT_CODES {
+            assert!(
+                seen.insert(spec.code),
+                "duplicate spec for exit {}",
+                spec.code
+            );
+            assert_eq!(
+                crate::errors::code_for_exit_code(spec.code),
+                spec.name,
+                "exit {} name drifted",
+                spec.code
+            );
+            assert_eq!(
+                crate::errors::message_for_exit_code(spec.code),
+                spec.message,
+                "exit {} message drifted",
+                spec.code
+            );
+            assert_eq!(
+                crate::errors::is_retryable_exit_code(spec.code),
+                spec.retryable,
+                "exit {} retryable flag drifted",
+                spec.code
+            );
+            assert_eq!(
+                is_mapped_exit_code(spec.code),
+                spec.remediation_code.is_some(),
+                "exit {} mapped flag drifted",
+                spec.code
+            );
+        }
+
+        for code in [
+            0, 1, 2, 3, 4, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 130, 141, 143,
+        ] {
+            assert!(seen.contains(&code), "documented exit {code} is missing");
+        }
+    }
+
+    #[test]
+    fn unknown_exit_codes_stay_generic() {
+        assert_eq!(crate::errors::code_for_exit_code(99), "ERROR");
+        assert_eq!(
+            crate::errors::message_for_exit_code(99),
+            "The Unity CLI command failed."
+        );
+        assert!(!crate::errors::is_retryable_exit_code(99));
+        assert!(!is_mapped_exit_code(99));
     }
 }
