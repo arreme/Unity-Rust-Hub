@@ -413,13 +413,14 @@ fn mid_frame_advisories(value: &Value) -> Vec<CliAdvisory> {
 }
 
 fn progress_from(object: &serde_json::Map<String, Value>) -> Option<f64> {
+    // `progress` is the legacy fraction-or-percent field.
     if let Some(value) = number(object, "progress") {
         return Some(clamp(if value <= 1.0 { value * 100.0 } else { value }));
     }
-    // 1.1.0 install frames use `pct`; some builds nest the status under
-    // `install`.
-    if let Some(value) = number(object, "pct").or_else(|| number(object, "progress")) {
-        return Some(clamp(if value <= 1.0 { value * 100.0 } else { value }));
+    // 1.1.0 install frames use `pct`, and `percent`/`percentage` are already
+    // 0-100. A `pct: 1` is one percent, not a fraction.
+    if let Some(value) = number(object, "pct") {
+        return Some(clamp(value));
     }
     if let Some(value) = number(object, "percent").or_else(|| number(object, "percentage")) {
         return Some(clamp(value));
@@ -476,15 +477,14 @@ fn downloads_from(object: &serde_json::Map<String, Value>) -> Vec<DownloadStatus
                 .find_map(|key| entry.get(*key).and_then(Value::as_str))
                 .map(str::to_string)
                 .unwrap_or_else(|| format!("#{index}"));
-            let pct = ["pct", "progress"]
+            let pct = ["pct", "percent", "percentage"]
                 .iter()
                 .find_map(|key| number(entry, key))
-                .map(|value| clamp(if value <= 1.0 { value * 100.0 } else { value }) as f32)
+                .map(|value| clamp(value) as f32)
                 .or_else(|| {
-                    ["percent", "percentage"]
-                        .iter()
-                        .find_map(|key| number(entry, key))
-                        .map(|value| clamp(value) as f32)
+                    // `progress` keeps the fraction-or-percent convention.
+                    number(entry, "progress")
+                        .map(|value| clamp(if value <= 1.0 { value * 100.0 } else { value }) as f32)
                 });
             let failed = entry
                 .get("error")
@@ -794,6 +794,19 @@ mod tests {
         );
         assert_eq!(parsed.downloads[0].pct, Some(80.0));
         assert_eq!(parsed.downloads[1].pct, Some(20.0));
+    }
+
+    #[test]
+    fn pct_one_means_one_percent_not_one_hundred() {
+        let parsed = parse_stdout(r#"{"type":"progress","pct":1}"#);
+        assert_eq!(parsed.progress, Some(1.0));
+
+        let parsed = parse_stdout(
+            r#"{"type":"progress","downloads":[{"sha256":"a","pct":1},{"sha256":"b","progress":0.5}]}"#,
+        );
+        assert_eq!(parsed.downloads[0].pct, Some(1.0));
+        // `progress` keeps the fraction-or-percent convention.
+        assert_eq!(parsed.downloads[1].pct, Some(50.0));
     }
 
     #[test]
