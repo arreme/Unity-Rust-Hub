@@ -387,7 +387,17 @@ pub fn validate_template_id(input: &str) -> Result<(), UnityError> {
 fn template_version() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
-        Regex::new(r"^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$").expect("valid regex")
+        // The exact SemVer 2.0.0 grammar: three numeric parts with no leading
+        // zeros, then optional dot-separated prerelease and build identifiers.
+        // The CLI (1.1.0) rejects `01.0.0` and `1.0`; matching its parser here
+        // keeps the failure specific instead of a generic `BAD_ARGS`.
+        Regex::new(concat!(
+            r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)",
+            r"(?:-(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)",
+            r"(?:\.(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?",
+            r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$"
+        ))
+        .expect("valid regex")
     })
 }
 
@@ -398,7 +408,7 @@ pub fn validate_template_version(input: &str) -> Result<(), UnityError> {
         return Ok(());
     }
     Err(UnityError::invalid_input(format!(
-        "`{value}` is not a version. Use a value such as 1.0.0."
+        "`{value}` is not a semantic version. Use three numeric parts such as 1.0.0, without leading zeros; prerelease and build suffixes are allowed."
     )))
 }
 
@@ -644,7 +654,19 @@ mod tests {
         assert!(validate_template_version("").is_ok());
         assert!(validate_template_version("1.0.0").is_ok());
         assert!(validate_template_version("1.0.0-beta.1").is_ok());
-        for value in ["1.0", "v1.0.0", "1.0.0; rm"] {
+        assert!(validate_template_version("1.0.0-beta.1+build.5").is_ok());
+        for value in [
+            "1.0",
+            "v1.0.0",
+            "1.0.0; rm",
+            // CLI 1.1.0 rejects leading zeros in numeric components and in
+            // numeric prerelease identifiers; the adapter must reject them
+            // before the command line, not surface a generic BAD_ARGS.
+            "01.0.0",
+            "1.01.0",
+            "1.0.01",
+            "1.0.0-01",
+        ] {
             assert!(
                 validate_template_version(value).is_err(),
                 "{value} should be rejected"
