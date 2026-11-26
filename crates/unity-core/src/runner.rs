@@ -751,7 +751,7 @@ impl UnityCli {
             }
             let code = exit_code
                 .map(code_for_exit_code)
-                .unwrap_or("COMMAND_FAILED");
+                .unwrap_or(surface::cli_code::COMMAND_FAILED);
             let message = exit_code
                 .map(message_for_exit_code)
                 .unwrap_or("The Unity CLI command failed.");
@@ -1302,7 +1302,7 @@ fn envelope_error(envelope: &ValueEnvelope, stderr: &str, exit_code: Option<i32>
         .map(|error| error.to_unity_error(exit_code, stderr))
         .unwrap_or_else(|| {
             UnityError::new(
-                "COMMAND_FAILED",
+                surface::cli_code::COMMAND_FAILED,
                 exit_code
                     .map(message_for_exit_code)
                     .unwrap_or("The Unity CLI command failed."),
@@ -1372,15 +1372,15 @@ fn run_command(spec: &CommandSpec, timeout: Duration) -> Result<std::process::Ou
             // open. The process exit closes them and the detached threads end.
             drop(stdout_reader);
             drop(stderr_reader);
-            return Err(
-                UnityError::new("TIMEOUT", "The Unity CLI did not respond in time.").with_detail(
-                    format!(
-                        "No result after {:.0}s from `{}`.",
-                        timeout.as_secs_f64(),
-                        spec.program.display()
-                    ),
-                ),
-            );
+            return Err(UnityError::new(
+                surface::error_code::TIMEOUT,
+                "The Unity CLI did not respond in time.",
+            )
+            .with_detail(format!(
+                "No result after {:.0}s from `{}`.",
+                timeout.as_secs_f64(),
+                spec.program.display()
+            )));
         }
 
         std::thread::sleep(Duration::from_millis(10));
@@ -1429,9 +1429,9 @@ impl DiagnoseTopic {
 
     pub fn arg(self) -> &'static str {
         match self {
-            Self::Proxy => "proxy",
-            Self::Accelerator => "accelerator",
-            Self::Update => "update",
+            Self::Proxy => surface::subcommand::PROXY,
+            Self::Accelerator => surface::subcommand::ACCELERATOR,
+            Self::Update => surface::subcommand::UPDATE,
         }
     }
 }
@@ -2175,7 +2175,11 @@ fn append_update_channel(parts: &mut Vec<String>, channel: Option<&str>) -> Resu
 }
 
 fn auth_status_from_error(error: &UnityError) -> Option<AuthStatus> {
-    matches!(error.code.as_str(), "NOT_SIGNED_IN" | "SESSION_EXPIRED").then(|| AuthStatus {
+    matches!(
+        error.code.as_str(),
+        surface::error_code::NOT_SIGNED_IN | surface::error_code::SESSION_EXPIRED
+    )
+    .then(|| AuthStatus {
         logged_in: false,
         session_state: Some(error.code.clone()),
         ..AuthStatus::default()

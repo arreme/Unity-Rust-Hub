@@ -327,8 +327,12 @@ The adapter side is `unity-core::changelog` plus `unity-core::docs`:
   `<placeholders>` are stripped.
 - `unity-core::surface` is the single command/flag/error-code registry. Command
   builders take their tokens from it, and `app_impact` is true only when an
-  entry names one of those commands, a flag the app passes, or a mapped
-  error/exit code. Do not add a second list in the controller or UI.
+  entry names one of those commands, a flag the app passes, or a recognised
+  error code / mapped exit code. A command-specific flag counts only when the
+  entry does not name an unknown subtree (`unity pipeline automation ...`);
+  the global machine flags (`--format`, `--no-pager`, `--no-banner`,
+  `--non-interactive`) always count. Do not add a second list in the
+  controller or UI.
 - `surface::EXIT_CODES` is the one exit-code table (`name`, `message`,
   `retryable`, `remediation_code`). `code_for_exit_code`,
   `message_for_exit_code`, `is_retryable_exit_code` and `is_mapped_exit_code`

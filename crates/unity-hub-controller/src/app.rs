@@ -1479,9 +1479,9 @@ impl App {
                 if let Err(error) = &result {
                     if matches!(
                         error.code.as_str(),
-                        "AUTH_BROKER_UNAVAILABLE"
-                            | "AUTH_BROKER_REFUSED"
-                            | "CREDENTIAL_STORE_ACCESS_DENIED"
+                        cli_code::AUTH_BROKER_UNAVAILABLE
+                            | cli_code::AUTH_BROKER_REFUSED
+                            | cli_code::CREDENTIAL_STORE_ACCESS_DENIED
                     ) {
                         self.notifications.push_error(&broker_error(error));
                     }
@@ -5131,7 +5131,7 @@ impl App {
                 };
             }
             return AuthVm::SignedOut {
-                expired: auth.session_state.as_deref() == Some("SESSION_EXPIRED"),
+                expired: auth.session_state.as_deref() == Some(error_code::SESSION_EXPIRED),
             };
         }
 

@@ -883,10 +883,43 @@ fn mentions_used_command(raw: &str) -> bool {
 }
 
 fn mentions_used_flag(raw: &str) -> bool {
+    // A command-specific flag only describes this app's surface when the entry
+    // is not about an unknown subtree. `unity pipeline automation ... --name`
+    // must not look relevant just because the template form also passes
+    // `--name`. The global machine flags stay relevant everywhere.
+    let scoped = mentions_unknown_subtree(raw);
     flag_token().captures_iter(raw).any(|capture| {
+        capture.get(1).is_some_and(|flag| {
+            let flag = flag.as_str();
+            surface::is_flag(flag) && (!scoped || surface::is_global_flag(flag))
+        })
+    })
+}
+
+/// True when an entry names a registered command with a second token that is
+/// not one of its subcommands, such as `unity pipeline automation`.
+fn mentions_unknown_subtree(raw: &str) -> bool {
+    let unknown = |tokens: &[&str]| {
+        let Some(rest) = tokens
+            .first()
+            .filter(|token| token.eq_ignore_ascii_case("unity"))
+            .map(|_| &tokens[1..])
+        else {
+            return false;
+        };
+        rest.first().is_some_and(|name| surface::is_command(name))
+            && rest.get(1).is_some_and(|second| !second.starts_with('-'))
+            && surface::command_path(rest).is_none()
+    };
+
+    backtick_span().captures_iter(raw).any(|capture| {
         capture
             .get(1)
-            .is_some_and(|flag| surface::is_flag(flag.as_str()))
+            .is_some_and(|span| unknown(&span_tokens(span.as_str())))
+    }) || prose_command().captures_iter(raw).any(|capture| {
+        capture
+            .get(1)
+            .is_some_and(|span| unknown(&span_tokens(span.as_str())))
     })
 }
 
@@ -1169,7 +1202,8 @@ mod tests {
 - **Breaking:** A command refused because a proxy environment variable such as `UNITY_PROXY` or `HTTPS_PROXY` points to a PAC script now exits `2` with `INVALID_COMMAND_ARGS`, the same as `--proxy` naming a PAC script. It used to exit `1` with `UNSUPPORTED_STATE`. A PAC script saved in the proxy settings file still exits `1`.
 - **Breaking:** A `unity command` that times out because a modal dialog holds the Editor now exits `18` (`EDITOR_BLOCKED_BY_DIALOG`) instead of `14`, and names the dialog even when the Editor is too blocked to report it. A script that retries on `14` should treat `18` as "close the dialog first". With `--format json` or `ndjson`, an envelope the Editor streams itself still carries `EDITOR_TIMEOUT`, so key scripts on the exit code; when the Editor streams none, the CLI writes the `EDITOR_BLOCKED_BY_DIALOG` envelope.
 - `unity command` now reports `EDITOR_CONNECTION_LOST` instead of `COMMAND_FAILED` when the Editor closes the connection before it answers, for example when the command starts a script reload. The command may have run, so the message says to check its result before running it again. The exit code stays `6`.
-- `unity pipeline automation pipelines run` starts a job from a pipeline defined in a file.
+- `unity pipeline automation pipelines validate` checks a Pipeline Automation pipeline defined in a JSON file without saving or running it, and `unity pipeline automation pipelines run` starts a job from one without saving it. `--name`, `--description` and `--tag` override the file, and `run` takes `--priority` and `--max-duration`. A saved pipeline version works as the file.
+- `unity pipeline automation apps versions status <app-id> <version> --to <available|deprecated|archived>` publishes, deprecates or archives an app version, with `--archiving-date` for a deprecation. It asks for confirmation first, since no move can be undone; pass `--yes` to skip the question.
 - `unity install` and `unity install-modules` download up to three editor and module files at once.
 "#;
 
@@ -1181,7 +1215,10 @@ mod tests {
             .iter()
             .map(|change| change.text.as_str())
             .collect();
-        assert_eq!(breaking.len(), 4, "{breaking:?}");
+        // The three explicit `**Breaking:**` entries, the connection-code
+        // rename, and the irreversible automation status move (which is a
+        // contract change for that subtree but not app surface).
+        assert!(breaking.len() >= 4, "{breaking:?}");
         assert!(breaking
             .iter()
             .any(|text| text.contains("PROJECTS_CLOSE_BLOCKED_BY_DIALOG")));
@@ -1219,14 +1256,22 @@ mod tests {
         assert!(install.app_impact);
 
         // Pipeline Automation is not the Pipeline Editors/Cloud Build surface.
-        let automation = entries
+        // The real entries carry `--name`, `--description`, `--to` and `--yes`,
+        // which are registered flags used elsewhere; those must not make an
+        // unknown subtree look like app surface.
+        let automation: Vec<&ChangelogEntry> = entries
             .iter()
-            .find(|entry| entry.text.contains("pipeline automation"))
-            .expect("automation entry");
-        assert!(
-            !automation.app_impact,
-            "pipeline automation must not count as app surface"
-        );
+            .copied()
+            .filter(|entry| entry.text.contains("pipeline automation"))
+            .collect();
+        assert_eq!(automation.len(), 2, "{automation:?}");
+        for entry in automation {
+            assert!(
+                !entry.app_impact,
+                "pipeline automation must not count as app surface: {}",
+                entry.text
+            );
+        }
     }
 
     #[test]
@@ -1235,6 +1280,17 @@ mod tests {
             "- The CLI reports `EDITOR_CONNECTION_LOST` when the Editor drops the connection.",
         );
         assert!(signals.app_impact);
+    }
+
+    #[test]
+    fn command_specific_flags_do_not_leak_from_an_unknown_subtree() {
+        assert!(
+            !classify_entry("- `unity pipeline automation pipelines run` takes `--priority`.")
+                .app_impact
+        );
+        assert!(
+            classify_entry("- `unity pipeline automation` now honours `--format json`.").app_impact
+        );
     }
 
     #[test]

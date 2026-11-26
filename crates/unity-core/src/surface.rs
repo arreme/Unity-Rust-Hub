@@ -240,6 +240,10 @@ pub mod cli_code {
     pub const EDITOR_NOT_READY: &str = "EDITOR_NOT_READY";
     pub const UNSUPPORTED_STATE: &str = "UNSUPPORTED_STATE";
     pub const TEMPLATE_OTHER_VERSION_ON_DISK: &str = "TEMPLATE_OTHER_VERSION_ON_DISK";
+    /// Auth-broker failures the Overview treats as "reads may prompt again".
+    pub const AUTH_BROKER_UNAVAILABLE: &str = "AUTH_BROKER_UNAVAILABLE";
+    pub const AUTH_BROKER_REFUSED: &str = "AUTH_BROKER_REFUSED";
+    pub const CREDENTIAL_STORE_ACCESS_DENIED: &str = "CREDENTIAL_STORE_ACCESS_DENIED";
 }
 
 /// Command paths the ignored live suite asserts against the real CLI.
@@ -485,6 +489,9 @@ pub const CLI_CODES: &[&str] = &[
     cli_code::EDITOR_NOT_READY,
     cli_code::UNSUPPORTED_STATE,
     cli_code::TEMPLATE_OTHER_VERSION_ON_DISK,
+    cli_code::AUTH_BROKER_UNAVAILABLE,
+    cli_code::AUTH_BROKER_REFUSED,
+    cli_code::CREDENTIAL_STORE_ACCESS_DENIED,
 ];
 
 /// One documented exit code and everything the app derives from it.
@@ -669,6 +676,18 @@ pub fn is_command(token: &str) -> bool {
 
 pub fn is_flag(token: &str) -> bool {
     FLAGS.contains(&token)
+}
+
+/// Flags every invocation carries. A changelog entry that names a subtree the
+/// app does not drive still affects the app when it changes one of these.
+pub fn is_global_flag(token: &str) -> bool {
+    [
+        flag::FORMAT,
+        flag::NO_PAGER,
+        flag::NO_BANNER,
+        flag::NON_INTERACTIVE,
+    ]
+    .contains(&token)
 }
 
 pub fn is_error_code(token: &str) -> bool {
