@@ -513,6 +513,11 @@ The adapter is aligned to CLI 1.0.1, with the 1.1.0 exit-code changes below:
 - 1.0.0 adds `unity close --if-saved` and `unity install --headless`; neither is wired into
   the UI yet. See [`docs/unity-cli-1.0-upgrade.md`](docs/unity-cli-1.0-upgrade.md) and
   [`docs/unity-cli-1.0.1-upgrade.md`](docs/unity-cli-1.0.1-upgrade.md).
+- The adapter is now aligned to 1.1.0 for errors, exit codes, `blockedBy`,
+  parallel-install progress, and local template-version validation. 1.1.0's
+  dialog-blocked `close`/`command` flows, `skill uninstall`, `docs toc`, the
+  Build page, and the Pipeline Automation surfaces are tracked but not wired.
+  See [`docs/unity-cli-1.1.0-upgrade.md`](docs/unity-cli-1.1.0-upgrade.md).
 
 Resolution order for the binary:
 
